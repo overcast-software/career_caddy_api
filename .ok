@@ -1,0 +1,4 @@
+python manage.py runserver
+python manage.py migrate
+python manage.py makemigrations job_hunting
+docker-compose up -d db
