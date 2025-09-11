@@ -1,6 +1,6 @@
-from lib.parsers import GenericParser
-from lib.scrapers import GenericScraper
-from lib.models import Scrape
+from job_hunting.lib.parsers.generic_parser import GenericParser
+from job_hunting.lib.scrapers.generic_scraper import GenericScraper
+from job_hunting.lib.models import Scrape
 
 
 class GenericService:

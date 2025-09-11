@@ -1,7 +1,4 @@
 import asyncio
-from job_hunting.lib.services.generic_service import GenericService
-from job_hunting.lib.ai_client import ai_client
-from job_hunting.lib.browser_manager import BrowserManager
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
@@ -272,16 +269,30 @@ class JobPostViewSet(BaseSAViewSet):
 
         # URL present: alternate path (kick off scrape/parse pipeline)
 
+        # Lazy import to avoid hard dependency at module import time
+        from job_hunting.lib.ai_client import ai_client
+        from job_hunting.lib.browser_manager import BrowserManager
+        # Lazy import to avoid heavy deps at module import time
+        from job_hunting.lib.services.generic_service import GenericService
+
         browser_manager = BrowserManager()
         service = GenericService(
             url=url, browser=browser_manager, ai_client=ai_client, creds={}
         )
         try:
-            scrape = asyncio.run(service.process())
-        except RuntimeError:
-            # If an event loop is already running (e.g., under ASGI), use it
-            loop = asyncio.get_event_loop()
-            scrape = loop.run_until_complete(service.process())
+            try:
+                scrape = asyncio.run(service.process())
+                asyncio.run(browser_manager.close_browser())
+            except RuntimeError:
+                # If an event loop is already running (e.g., under ASGI), use it
+                loop = asyncio.get_event_loop()
+                scrape = loop.run_until_complete(service.process())
+                loop.run_until_complete(browser_manager.close_browser())
+        except Exception as e:
+            return Response(
+                {"errors": [{"detail": f"Failed to process URL: {e}"}]},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         # Try to resolve the created/linked JobPost; if not available, return 202 with the scrape
         session = self.get_session()
