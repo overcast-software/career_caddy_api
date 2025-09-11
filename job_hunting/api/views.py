@@ -1,16 +1,34 @@
+import asyncio
+from job_hunting.lib.services.generic_service import GenericService
+from job_hunting.lib.ai_client import ai_client
+from job_hunting.lib.browser_manager import BrowserManager
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from job_hunting.lib.models import (
-    User, Resume, Score, JobPost, Scrape, Company, CoverLetter, Application
+    User,
+    Resume,
+    Score,
+    JobPost,
+    Scrape,
+    Company,
+    CoverLetter,
+    Application,
 )
 from .serializers import (
-    UserSerializer, ResumeSerializer, ScoreSerializer, JobPostSerializer,
-    ScrapeSerializer, CompanySerializer, CoverLetterSerializer, ApplicationSerializer,
+    UserSerializer,
+    ResumeSerializer,
+    ScoreSerializer,
+    JobPostSerializer,
+    ScrapeSerializer,
+    CompanySerializer,
+    CoverLetterSerializer,
+    ApplicationSerializer,
     TYPE_TO_SERIALIZER,
 )
+
 
 class BaseSAViewSet(viewsets.ViewSet):
     permission_classes = [AllowAny]
@@ -139,9 +157,15 @@ class BaseSAViewSet(viewsets.ViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
-        cfg = ser.relationships.get(rel) if ser and hasattr(ser, "relationships") else None
+        cfg = (
+            ser.relationships.get(rel)
+            if ser and hasattr(ser, "relationships")
+            else None
+        )
         if not cfg:
-            return Response({"errors": [{"detail": "Relationship not found"}]}, status=404)
+            return Response(
+                {"errors": [{"detail": "Relationship not found"}]}, status=404
+            )
         rel_type = cfg["type"]
         uselist = cfg.get("uselist", True)
         target = getattr(obj, cfg["attr"], None)
@@ -150,6 +174,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         else:
             data = {"type": rel_type, "id": str(target.id)} if target else None
         return Response({"data": data})
+
 
 class UserViewSet(BaseSAViewSet):
     model = User
@@ -176,7 +201,9 @@ class UserViewSet(BaseSAViewSet):
         user = self.model.get(int(pk))
         if not user:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [CoverLetterSerializer().to_resource(c) for c in (user.cover_letters or [])]
+        data = [
+            CoverLetterSerializer().to_resource(c) for c in (user.cover_letters or [])
+        ]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
@@ -184,8 +211,11 @@ class UserViewSet(BaseSAViewSet):
         user = self.model.get(int(pk))
         if not user:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ApplicationSerializer().to_resource(a) for a in (user.applications or [])]
+        data = [
+            ApplicationSerializer().to_resource(a) for a in (user.applications or [])
+        ]
         return Response({"data": data})
+
 
 class ResumeViewSet(BaseSAViewSet):
     model = Resume
@@ -204,7 +234,9 @@ class ResumeViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [CoverLetterSerializer().to_resource(c) for c in (obj.cover_letters or [])]
+        data = [
+            CoverLetterSerializer().to_resource(c) for c in (obj.cover_letters or [])
+        ]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
@@ -212,16 +244,70 @@ class ResumeViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ApplicationSerializer().to_resource(a) for a in (obj.applications or [])]
+        data = [
+            ApplicationSerializer().to_resource(a) for a in (obj.applications or [])
+        ]
         return Response({"data": data})
+
 
 class ScoreViewSet(BaseSAViewSet):
     model = Score
     serializer_class = ScoreSerializer
 
+
 class JobPostViewSet(BaseSAViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
+
+    def create(self, request):
+        # Detect a "url" key in either a plain JSON body or JSON:API attributes
+        data = request.data if isinstance(request.data, dict) else {}
+        url = data.get("url")
+        if url is None and isinstance(data.get("data"), dict):
+            url = (data["data"].get("attributes") or {}).get("url")
+
+        # If no URL provided, fall back to the default JSON:API create
+        if not url:
+            return super().create(request)
+
+        # URL present: alternate path (kick off scrape/parse pipeline)
+
+        browser_manager = BrowserManager()
+        service = GenericService(
+            url=url, browser=browser_manager, ai_client=ai_client, creds={}
+        )
+        try:
+            scrape = asyncio.run(service.process())
+        except RuntimeError:
+            # If an event loop is already running (e.g., under ASGI), use it
+            loop = asyncio.get_event_loop()
+            scrape = loop.run_until_complete(service.process())
+
+        # Try to resolve the created/linked JobPost; if not available, return 202 with the scrape
+        session = self.get_session()
+        job_post = None
+        try:
+            if getattr(scrape, "job_post_id", None):
+                job_post = JobPost.get(scrape.job_post_id, session=session)
+            else:
+                job_post = JobPost.first(session=session, url=url)
+        except Exception:
+            job_post = None
+
+        if job_post:
+            serializer = self.get_serializer()
+            resource = serializer.to_resource(job_post)
+            include_rels = self._parse_include(request)
+            payload = {"data": resource}
+            if include_rels:
+                payload["included"] = self._build_included([job_post], include_rels)
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        # Could not resolve a JobPost yet — return the Scrape so the client can track progress
+        ScrapeSerializer = TYPE_TO_SERIALIZER["scrape"]
+        scr_ser = ScrapeSerializer()
+        scrape_resource = scr_ser.to_resource(scrape)
+        return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
@@ -244,7 +330,9 @@ class JobPostViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [CoverLetterSerializer().to_resource(c) for c in (obj.cover_letters or [])]
+        data = [
+            CoverLetterSerializer().to_resource(c) for c in (obj.cover_letters or [])
+        ]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
@@ -252,12 +340,16 @@ class JobPostViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ApplicationSerializer().to_resource(a) for a in (obj.applications or [])]
+        data = [
+            ApplicationSerializer().to_resource(a) for a in (obj.applications or [])
+        ]
         return Response({"data": data})
+
 
 class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
+
 
 class CompanyViewSet(BaseSAViewSet):
     model = Company
@@ -279,9 +371,11 @@ class CompanyViewSet(BaseSAViewSet):
         data = [ScrapeSerializer().to_resource(s) for s in (company.scrapes or [])]
         return Response({"data": data})
 
+
 class CoverLetterViewSet(BaseSAViewSet):
     model = CoverLetter
     serializer_class = CoverLetterSerializer
+
 
 class ApplicationViewSet(BaseSAViewSet):
     model = Application
