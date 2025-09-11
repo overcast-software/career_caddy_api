@@ -13,6 +13,7 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+
 from django.contrib import admin
 from django.urls import path, include
 from rest_framework import routers
@@ -21,14 +22,32 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from job_hunting.views import TaskViewSet, ping
+from job_hunting.api.views import (
+    UserViewSet,
+    ResumeViewSet,
+    ScoreViewSet,
+    JobPostViewSet,
+    ScrapeViewSet,
+    CompanyViewSet,
+    CoverLetterViewSet,
+    ApplicationViewSet,
+)
 
 router = routers.DefaultRouter()
-router.register(r'tasks', TaskViewSet)
+router.register(r"tasks", TaskViewSet)
+router.register(r"users", UserViewSet, basename="users")
+router.register(r"resumes", ResumeViewSet, basename="resumes")
+router.register(r"scores", ScoreViewSet, basename="scores")
+router.register(r"job-posts", JobPostViewSet, basename="job-posts")
+router.register(r"scrapes", ScrapeViewSet, basename="scrapes")
+router.register(r"companies", CompanyViewSet, basename="companies")
+router.register(r"cover-letters", CoverLetterViewSet, basename="cover-letters")
+router.register(r"applications", ApplicationViewSet, basename="applications")
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
-    path('api/v1/', include(router.urls)),
-    path('api/v1/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('api/v1/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('api/v1/ping/', ping, name='ping'),
+    path("admin/", admin.site.urls),
+    path("api/v1/", include(router.urls)),
+    path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/v1/ping/", ping, name="ping"),
 ]
