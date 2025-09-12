@@ -1,4 +1,4 @@
-from lib.models.scrape import Scrape
+from job_hunting.lib.models.scrape import Scrape
 from markdownify import markdownify as md
 
 

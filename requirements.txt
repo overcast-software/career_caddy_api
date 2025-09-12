@@ -10,3 +10,4 @@ openai>=1.40
 playwright>=1.45
 Jinja2>=3.1
 setuptools>=70.0
+markdownify

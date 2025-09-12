@@ -1,5 +1,5 @@
 import openai
-from lib.models import Scrape, JobPost, Company
+from job_hunting.lib.models import Scrape, JobPost, Company
 import sys
 import json
 from jinja2 import Environment, FileSystemLoader

@@ -8,6 +8,7 @@ from job_hunting.lib.scoring.job_scorer import JobScorer
 from job_hunting.lib.ai_client import ai_client
 from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.lib.services.cover_letter_service import CoverLetterService
+from job_hunting.lib.services.generic_service import GenericService
 
 from job_hunting.lib.models import (
     User,
@@ -362,71 +363,6 @@ class JobPostViewSet(BaseSAViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
 
-    def create(self, request):
-        # Detect a "url" key in either a plain JSON body or JSON:API attributes
-        data = request.data if isinstance(request.data, dict) else {}
-        url = data.get("url")
-        if url is None and isinstance(data.get("data"), dict):
-            url = (data["data"].get("attributes") or {}).get("url")
-
-        # If no URL provided, fall back to the default JSON:API create
-        if not url:
-            return super().create(request)
-
-        # URL present: alternate path (kick off scrape/parse pipeline)
-
-        # Lazy import to avoid hard dependency at module import time
-        from job_hunting.lib.ai_client import ai_client
-        from job_hunting.lib.browser_manager import BrowserManager
-
-        # Lazy import to avoid heavy deps at module import time
-        from job_hunting.lib.services.generic_service import GenericService
-
-        browser_manager = BrowserManager()
-        service = GenericService(
-            url=url, browser=browser_manager, ai_client=ai_client, creds={}
-        )
-        try:
-            try:
-                scrape = asyncio.run(service.process())
-                asyncio.run(browser_manager.close_browser())
-            except RuntimeError:
-                # If an event loop is already running (e.g., under ASGI), use it
-                loop = asyncio.get_event_loop()
-                scrape = loop.run_until_complete(service.process())
-                loop.run_until_complete(browser_manager.close_browser())
-        except Exception as e:
-            return Response(
-                {"errors": [{"detail": f"Failed to process URL: {e}"}]},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        # Try to resolve the created/linked JobPost; if not available, return 202 with the scrape
-        session = self.get_session()
-        job_post = None
-        try:
-            if getattr(scrape, "job_post_id", None):
-                job_post = JobPost.get(scrape.job_post_id, session=session)
-            else:
-                job_post = JobPost.first(session=session, url=url)
-        except Exception:
-            job_post = None
-
-        if job_post:
-            serializer = self.get_serializer()
-            resource = serializer.to_resource(job_post)
-            include_rels = self._parse_include(request)
-            payload = {"data": resource}
-            if include_rels:
-                payload["included"] = self._build_included([job_post], include_rels)
-            return Response(payload, status=status.HTTP_201_CREATED)
-
-        # Could not resolve a JobPost yet — return the Scrape so the client can track progress
-        ScrapeSerializer = TYPE_TO_SERIALIZER["scrape"]
-        scr_ser = ScrapeSerializer()
-        scrape_resource = scr_ser.to_resource(scrape)
-        return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
-
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -476,6 +412,61 @@ class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
+    def create(self, request):
+        # Detect a "url" key in either a plain JSON body or JSON:API attributes
+        data = request.data if isinstance(request.data, dict) else {}
+        url = data.get("url")
+        if url is None and isinstance(data.get("data"), dict):
+            url = (data["data"].get("attributes") or {}).get("url")
+
+        # Lazy import to avoid hard dependency at module import time
+        from job_hunting.lib.browser_manager import BrowserManager
+
+        # Lazy import to avoid heavy deps at module import time
+
+        browser_manager = BrowserManager()
+        asyncio.run(browser_manager.start_browser(False))
+        service = GenericService(
+            url=url, browser=browser_manager, ai_client=ai_client, creds={}
+        )
+        try:
+            try:
+                scrape = asyncio.run(service.process())
+                asyncio.run(browser_manager.close_browser())
+            except RuntimeError:
+                # If an event loop is already running (e.g., under ASGI), use it
+                loop = asyncio.get_event_loop()
+                scrape = loop.run_until_complete(service.process())
+                loop.run_until_complete(browser_manager.close_browser())
+        except Exception as e:
+            return Response(
+                {"errors": [{"detail": f"Failed to process URL: {e}"}]},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # Try to resolve the created/linked JobPost; if not available, return 202 with the scrape
+        session = self.get_session()
+        job_post = None
+        try:
+            job_post = scrape.job_post
+        except Exception:
+            job_post = None
+
+        if job_post:
+            serializer = self.get_serializer()
+            resource = serializer.to_resource(job_post)
+            include_rels = self._parse_include(request)
+            payload = {"data": resource}
+            if include_rels:
+                payload["included"] = self._build_included([job_post], include_rels)
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        # Could not resolve a JobPost yet — return the Scrape so the client can track progress
+        ScrapeSerializer = TYPE_TO_SERIALIZER["scrape"]
+        scr_ser = ScrapeSerializer()
+        scrape_resource = scr_ser.to_resource(scrape)
+        return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
+
 
 class CompanyViewSet(BaseSAViewSet):
     model = Company
@@ -506,7 +497,6 @@ class CoverLetterViewSet(BaseSAViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         relationships = (data.get("data") or {}).get("relationships") or {}
         job_post_id = relationships.get("job-post", {}).get("data", {}).get("id")
-        user_id = relationships.get("user", {}).get("data", {}).get("id")
         # Support both "resume" and "resumes" relationship keys
         resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
         resume_id = resume_rel.get("data", {}).get("id")

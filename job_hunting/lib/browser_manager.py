@@ -12,10 +12,12 @@ class BrowserManager:
         self.cookies_file = cookies_file
         self.page = None
 
-    async def start_browser(self, headless=True):
+    async def start_browser(self, headless=True, navigation_timeout=30000):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=headless)
         self.context = await self.browser.new_context()
+        self.context.set_default_navigation_timeout(navigation_timeout)
+        self.context.set_default_timeout(navigation_timeout)
         self.page = await self.context.new_page()
         await self.load_cookies()
 
@@ -27,20 +29,21 @@ class BrowserManager:
         if self.playwright:
             await self.playwright.stop()
 
-    async def get_page_content(self, url, timeout=30000) -> str:
+    async def get_page_content(self, url, timeout=3000) -> str:
         try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-            content = await self.page.content()
-            return content
+            await self.page.goto(url, wait_until="networkidle", timeout=timeout)
         except TimeoutError:
-            content = await self.page.content()
+            try:
+                await self.page.evaluate("window.stop()")
+            except Exception:
+                pass
             print(f"Timeout exceeded while navigating to {url}")
-            return content
         except Exception as e:
             print("*" * 88)
             print(f"Error navigating to {url}: {e}")
             print("*" * 88)
             return None
+        return await self.page.content()
 
     async def save_cookies(self):
         cookies = await self.context.cookies()
