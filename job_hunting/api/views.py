@@ -1,8 +1,13 @@
 import asyncio
+import re
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from job_hunting.lib.scoring.job_scorer import JobScorer
+from job_hunting.lib.ai_client import ai_client
+from job_hunting.lib.services.summary_service import SummaryService
+from job_hunting.lib.services.cover_letter_service import CoverLetterService
 
 from job_hunting.lib.models import (
     User,
@@ -13,6 +18,7 @@ from job_hunting.lib.models import (
     Company,
     CoverLetter,
     Application,
+    Summary,
 )
 from .serializers import (
     UserSerializer,
@@ -23,6 +29,7 @@ from .serializers import (
     CompanySerializer,
     CoverLetterSerializer,
     ApplicationSerializer,
+    SummarySerializer,
     TYPE_TO_SERIALIZER,
 )
 
@@ -173,6 +180,29 @@ class BaseSAViewSet(viewsets.ViewSet):
         return Response({"data": data})
 
 
+class SummaryViewSet(BaseSAViewSet):
+    model = Summary
+    serializer_class = SummarySerializer
+
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        relationships = (data.get("data") or {}).get("relationships") or {}
+        job_post_id = relationships.get("job-post", {}).get("data", {}).get("id")
+        job_post = JobPost.get(job_post_id)
+        resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_id = resume_rel.get("data", {}).get("id")
+        resume = Resume.get(resume_id)
+        summary_service = SummaryService(ai_client, job=job_post, resume=resume)
+
+        summary = summary_service.generate_summary()
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(summary)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([summary], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
 class UserViewSet(BaseSAViewSet):
     model = User
     serializer_class = UserSerializer
@@ -213,6 +243,14 @@ class UserViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
+    @action(detail=True, methods=["get"])
+    def summaries(self, request, pk=None):
+        user = self.model.get(int(pk))
+        if not user:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        data = [SummarySerializer().to_resource(s) for s in (user.summaries or [])]
+        return Response({"data": data})
+
 
 class ResumeViewSet(BaseSAViewSet):
     model = Resume
@@ -246,10 +284,78 @@ class ResumeViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
+    @action(detail=True, methods=["get"])
+    def summaries(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        data = [SummarySerializer().to_resource(s) for s in (obj.summaries or [])]
+        return Response({"data": data})
+
 
 class ScoreViewSet(BaseSAViewSet):
     model = Score
     serializer_class = ScoreSerializer
+
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        myJobScorer = JobScorer(ai_client)
+
+        relationships = (data.get("data") or {}).get("relationships") or {}
+        job_post_id = relationships.get("job-post", {}).get("data", {}).get("id")
+        user_id = relationships.get("user", {}).get("data", {}).get("id")
+        # Support both "resume" and "resumes" relationship keys
+        resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_id = resume_rel.get("data", {}).get("id")
+
+        if job_post_id is None or user_id is None or resume_id is None:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": "Missing required relationships: user, job-post, resume"
+                        }
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        jp = JobPost.get(int(job_post_id))
+        resume = Resume.get(int(resume_id))
+
+        myScore, is_created = Score.first_or_initialize(
+            job_post_id=int(job_post_id), resume_id=int(resume_id), user_id=int(user_id)
+        )
+
+        evaluation = myJobScorer.score_job_match(jp.description, resume.content)
+        score_value, explanation = self._parse_eval(evaluation)
+        myScore.explanation = explanation
+        myScore.score = score_value
+        myScore.save()
+
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(myScore)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([myScore], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    def _parse_eval(self, e):
+        if isinstance(e, dict):
+            s = e.get("score")
+            expl = e.get("explanation") or e.get("evaluation")
+            if isinstance(expl, dict):
+                expl = expl.get("text") or str(expl)
+            if s is not None and expl:
+                return int(s), str(expl)
+        text = str(e)
+        m_score = re.search(r"(?i)\**score\**\s*[:\-]\s*(\d{1,3})", text)
+        m_expl = re.search(
+            r"(?i)\**(explanation|evaluation)\**\s*[:\-]\s*(.+)", text, re.DOTALL
+        )
+        s_val = int(m_score.group(1)) if m_score else None
+        expl = m_expl.group(2).strip() if m_expl else text
+        return s_val, expl
 
 
 class JobPostViewSet(BaseSAViewSet):
@@ -272,6 +378,7 @@ class JobPostViewSet(BaseSAViewSet):
         # Lazy import to avoid hard dependency at module import time
         from job_hunting.lib.ai_client import ai_client
         from job_hunting.lib.browser_manager import BrowserManager
+
         # Lazy import to avoid heavy deps at module import time
         from job_hunting.lib.services.generic_service import GenericService
 
@@ -356,6 +463,14 @@ class JobPostViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
+    @action(detail=True, methods=["get"])
+    def summaries(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        data = [SummarySerializer().to_resource(s) for s in (obj.summaries or [])]
+        return Response({"data": data})
+
 
 class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
@@ -386,6 +501,27 @@ class CompanyViewSet(BaseSAViewSet):
 class CoverLetterViewSet(BaseSAViewSet):
     model = CoverLetter
     serializer_class = CoverLetterSerializer
+
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        relationships = (data.get("data") or {}).get("relationships") or {}
+        job_post_id = relationships.get("job-post", {}).get("data", {}).get("id")
+        user_id = relationships.get("user", {}).get("data", {}).get("id")
+        # Support both "resume" and "resumes" relationship keys
+        resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_id = resume_rel.get("data", {}).get("id")
+        resume = Resume.get(resume_id)
+        job_post = JobPost.get(job_post_id)
+        cl_service = CoverLetterService(ai_client, job_post, resume)
+        cover_letter = cl_service.generate_cover_letter()
+        cover_letter.save()
+
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(cover_letter)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([cover_letter], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class ApplicationViewSet(BaseSAViewSet):

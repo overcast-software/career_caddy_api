@@ -9,6 +9,7 @@ from job_hunting.lib.models import (
     Company,
     CoverLetter,
     Application,
+    Summary,
 )
 
 
@@ -111,6 +112,7 @@ class UserSerializer(BaseSASerializer):
             "type": "application",
             "uselist": True,
         },
+        "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
     }
 
 
@@ -131,6 +133,7 @@ class ResumeSerializer(BaseSASerializer):
             "type": "application",
             "uselist": True,
         },
+        "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
     }
     relationship_fks = {"user": "user_id"}
 
@@ -175,6 +178,7 @@ class JobPostSerializer(BaseSASerializer):
             "type": "application",
             "uselist": True,
         },
+        "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
     }
     relationship_fks = {"company": "company_id"}
 
@@ -248,6 +252,22 @@ class ApplicationSerializer(BaseSASerializer):
     }
 
 
+class SummarySerializer(BaseSASerializer):
+    type = "summary"
+    model = Summary
+    attributes = ["content"]
+    relationships = {
+        "user": {"attr": "user", "type": "user", "uselist": False},
+        "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
+        "resume": {"attr": "resume", "type": "resume", "uselist": False},
+    }
+    relationship_fks = {
+        "user": "user_id",
+        "job-post": "job_post_id",
+        "resume": "resume_id",
+    }
+
+
 TYPE_TO_SERIALIZER = {
     "user": UserSerializer,
     "resume": ResumeSerializer,
@@ -257,4 +277,5 @@ TYPE_TO_SERIALIZER = {
     "company": CompanySerializer,
     "cover-letter": CoverLetterSerializer,
     "application": ApplicationSerializer,
+    "summary": SummarySerializer,
 }

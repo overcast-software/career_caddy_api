@@ -31,6 +31,7 @@ from job_hunting.api.views import (
     CompanyViewSet,
     CoverLetterViewSet,
     ApplicationViewSet,
+    SummaryViewSet,
 )
 
 router = routers.DefaultRouter()
@@ -43,6 +44,7 @@ router.register(r"scrapes", ScrapeViewSet, basename="scrapes")
 router.register(r"companies", CompanyViewSet, basename="companies")
 router.register(r"cover-letters", CoverLetterViewSet, basename="cover-letters")
 router.register(r"applications", ApplicationViewSet, basename="applications")
+router.register(r"summaries", SummaryViewSet, basename="summaries")
 
 urlpatterns = [
     path("admin/", admin.site.urls),

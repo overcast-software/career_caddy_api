@@ -14,6 +14,7 @@ class Resume(BaseModel):
     scores = relationship("Score", back_populates="resume")
     cover_letters = relationship("CoverLetter", back_populates="resume")
     applications = relationship("Application", back_populates="resume")
+    summaries = relationship("Summary", back_populates="resume")
 
     @classmethod
     def from_path_and_user_id(cls, path, user_id):
