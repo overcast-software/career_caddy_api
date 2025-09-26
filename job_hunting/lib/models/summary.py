@@ -12,5 +12,8 @@ class Summary(BaseModel):
     resume_id = Column(Integer, ForeignKey("resume.id"))
 
     job_post = relationship("JobPost", back_populates="summaries")
-    resume = relationship("Resume", back_populates="summaries")
+    resume = relationship(
+        "Resume", back_populates="summaries"
+    )  # the original resume that the summary was imported with
     user = relationship("User", back_populates="summaries")
+    resume_summaries = relationship("ResumeSummary", back_populates="summary")

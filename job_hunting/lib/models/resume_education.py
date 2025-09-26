@@ -1,0 +1,17 @@
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, Date
+from sqlalchemy.orm import relationship
+from .base import BaseModel
+
+
+class ResumeEducation(BaseModel):
+    __tablename__ = "resume_education"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    resume_id = Column(Integer, ForeignKey("resume.id"), nullable=False)
+
+    institution = Column(String, nullable=True)
+    degree = Column(String, nullable=True)
+    issue_date = Column(Date, nullable=True)
+    content = Column(Text, nullable=True)
+
+    # Relationships
+    resume = relationship("Resume", back_populates="educations")

@@ -9,12 +9,17 @@ class Resume(BaseModel):
     content = Column(Text, nullable=False)
     user_id = Column(Integer, ForeignKey("user.id"))
     file_path = Column(String)
+    title = Column(String)
     # Relationships
     user = relationship("User", back_populates="resumes")
     scores = relationship("Score", back_populates="resume")
     cover_letters = relationship("CoverLetter", back_populates="resume")
     applications = relationship("Application", back_populates="resume")
     summaries = relationship("Summary", back_populates="resume")
+    resume_summaries = relationship("ResumeSummary", back_populates="resume")
+    experiences = relationship("ResumeExperience", back_populates="resume")
+    certifications = relationship("ResumeCertification", back_populates="resume")
+    educations = relationship("ResumeEducation", back_populates="resume")
 
     @classmethod
     def from_path_and_user_id(cls, path, user_id):
@@ -24,3 +29,7 @@ class Resume(BaseModel):
                 content=body, file_path=path, user_id=user_id
             )
         return resume
+
+    def collated_content(self):
+        # TODO body content from relationships
+        pass

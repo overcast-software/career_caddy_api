@@ -8,3 +8,7 @@ from .company import Company
 from .cover_letter import CoverLetter
 from .application import Application
 from .summary import Summary
+from .resume_summary import ResumeSummary
+from .resume_experience import ResumeExperience
+from .resume_certification import ResumeCertification
+from .resume_education import ResumeEducation
