@@ -12,3 +12,4 @@ from .resume_summary import ResumeSummary
 from .resume_experience import ResumeExperience
 from .resume_certification import ResumeCertification
 from .resume_education import ResumeEducation
+from .experience import Experience

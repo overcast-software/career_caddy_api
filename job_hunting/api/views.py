@@ -20,6 +20,7 @@ from job_hunting.lib.models import (
     CoverLetter,
     Application,
     Summary,
+    Experience,
 )
 from .serializers import (
     UserSerializer,
@@ -31,6 +32,7 @@ from .serializers import (
     CoverLetterSerializer,
     ApplicationSerializer,
     SummarySerializer,
+    ExperienceSerializer,
     TYPE_TO_SERIALIZER,
 )
 
@@ -67,6 +69,9 @@ class BaseSAViewSet(viewsets.ViewSet):
                 if not ser_cls:
                     continue
                 rel_ser = ser_cls()
+                # Provide parent context so serializers can customize included resources
+                if hasattr(rel_ser, "set_parent_context"):
+                    rel_ser.set_parent_context(primary_ser.type, obj.id, rel)
                 for t in targets:
                     key = (rel_type, str(t.id))
                     if key in seen:
@@ -293,6 +298,16 @@ class ResumeViewSet(BaseSAViewSet):
         data = [SummarySerializer().to_resource(s) for s in (obj.summaries or [])]
         return Response({"data": data})
 
+    @action(detail=True, methods=["get"])
+    def experiences(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = ExperienceSerializer()
+        ser.set_parent_context("resume", obj.id, "experiences")
+        data = [ser.to_resource(e) for e in (obj.experiences or [])]
+        return Response({"data": data})
+
 
 class ScoreViewSet(BaseSAViewSet):
     model = Score
@@ -517,3 +532,8 @@ class CoverLetterViewSet(BaseSAViewSet):
 class ApplicationViewSet(BaseSAViewSet):
     model = Application
     serializer_class = ApplicationSerializer
+
+
+class ExperienceViewSet(BaseSAViewSet):
+    model = Experience
+    serializer_class = ExperienceSerializer

@@ -17,7 +17,11 @@ class Resume(BaseModel):
     applications = relationship("Application", back_populates="resume")
     summaries = relationship("Summary", back_populates="resume")
     resume_summaries = relationship("ResumeSummary", back_populates="resume")
-    experiences = relationship("ResumeExperience", back_populates="resume")
+    experiences = relationship(
+        "Experience",
+        secondary="resume_experience",
+        back_populates="resumes",
+    )
     certifications = relationship("ResumeCertification", back_populates="resume")
     educations = relationship("ResumeEducation", back_populates="resume")
 

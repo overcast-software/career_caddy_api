@@ -10,6 +10,7 @@ from job_hunting.lib.models import (
     CoverLetter,
     Application,
     Summary,
+    Experience,
 )
 
 
@@ -17,6 +18,17 @@ def _to_primitive(val):
     if isinstance(val, (datetime, date)):
         return val.isoformat()
     return val
+
+
+def _parse_date(val):
+    if val is None or val == "":
+        return None
+    if isinstance(val, (datetime, date)):
+        return val.date() if isinstance(val, datetime) else val
+    try:
+        return date.fromisoformat(str(val))
+    except Exception:
+        return None
 
 
 def _pluralize_type(t: str) -> str:
@@ -34,6 +46,13 @@ class BaseSASerializer:
     attributes: List[str] = []
     relationships: Dict[str, Dict[str, Any]] = {}
     relationship_fks: Dict[str, str] = {}
+
+    def set_parent_context(self, parent_type: str, parent_id: int, rel_name: str):
+        self._parent_context = {
+            "parent_type": parent_type,
+            "parent_id": parent_id,
+            "rel_name": rel_name,
+        }
 
     def accepted_types(self):
         return {self.type, _pluralize_type(self.type)}
@@ -134,6 +153,11 @@ class ResumeSerializer(BaseSASerializer):
             "uselist": True,
         },
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
+        "experiences": {
+            "attr": "experiences",
+            "type": "experience",
+            "uselist": True,
+        },
     }
     relationship_fks = {"user": "user_id"}
 
@@ -268,6 +292,30 @@ class SummarySerializer(BaseSASerializer):
     }
 
 
+class ExperienceSerializer(BaseSASerializer):
+    type = "experience"
+    model = Experience
+    attributes = ["title", "start_date", "end_date", "summary", "content"]
+    relationships = {
+        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
+    }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        ctx = getattr(self, "_parent_context", None)
+        if ctx and ctx.get("parent_type") == "resume":
+            res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")
+        return res
+
+    def parse_payload(self, payload):
+        out = super().parse_payload(payload)
+        if "start_date" in out:
+            out["start_date"] = _parse_date(out["start_date"])
+        if "end_date" in out:
+            out["end_date"] = _parse_date(out["end_date"])
+        return out
+
+
 TYPE_TO_SERIALIZER = {
     "user": UserSerializer,
     "resume": ResumeSerializer,
@@ -278,4 +326,5 @@ TYPE_TO_SERIALIZER = {
     "cover-letter": CoverLetterSerializer,
     "application": ApplicationSerializer,
     "summary": SummarySerializer,
+    "experience": ExperienceSerializer,
 }
