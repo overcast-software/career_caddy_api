@@ -4,6 +4,8 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.parsers import JSONParser
+from .parsers import VndApiJSONParser
 from job_hunting.lib.scoring.job_scorer import JobScorer
 from job_hunting.lib.ai_client import ai_client
 from job_hunting.lib.services.summary_service import SummaryService
@@ -39,6 +41,7 @@ from .serializers import (
 
 class BaseSAViewSet(viewsets.ViewSet):
     permission_classes = [AllowAny]
+    parser_classes = [VndApiJSONParser, JSONParser]
     model = None
     serializer_class = None
 
@@ -318,29 +321,48 @@ class ScoreViewSet(BaseSAViewSet):
         myJobScorer = JobScorer(ai_client)
 
         relationships = (data.get("data") or {}).get("relationships") or {}
-        job_post_id = relationships.get("job-post", {}).get("data", {}).get("id")
-        user_id = relationships.get("user", {}).get("data", {}).get("id")
-        # Support both "resume" and "resumes" relationship keys
-        resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
-        resume_id = resume_rel.get("data", {}).get("id")
+
+        def _first_id(node):
+            if isinstance(node, dict):
+                data = node.get("data")
+            else:
+                data = None
+            if isinstance(data, dict) and "id" in data:
+                return data["id"]
+            if isinstance(data, list) and data:
+                first = data[0]
+                if isinstance(first, dict) and "id" in first:
+                    return first["id"]
+            return None
+
+        def _rel_id(*keys):
+            for k in keys:
+                val = relationships.get(k)
+                if val is not None:
+                    rid = _first_id(val)
+                    if rid is not None:
+                        return rid
+            return None
+
+        job_post_id = _rel_id("job-post", "job_post", "jobPost", "job-posts", "jobPosts")
+        user_id = _rel_id("user", "users")
+        resume_id = _rel_id("resume", "resumes")
 
         if job_post_id is None or user_id is None or resume_id is None:
             return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": "Missing required relationships: user, job-post, resume"
-                        }
-                    ]
-                },
+                {"errors": [{"detail": "Missing required relationships: user, job-post, resume"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        jp = JobPost.get(int(job_post_id))
-        resume = Resume.get(int(resume_id))
+        job_post_id = int(job_post_id)
+        user_id = int(user_id)
+        resume_id = int(resume_id)
+
+        jp = JobPost.get(job_post_id)
+        resume = Resume.get(resume_id)
 
         myScore, is_created = Score.first_or_initialize(
-            job_post_id=int(job_post_id), resume_id=int(resume_id), user_id=int(user_id)
+            job_post_id=job_post_id, resume_id=resume_id, user_id=user_id
         )
 
         evaluation = myJobScorer.score_job_match(jp.description, resume.content)
