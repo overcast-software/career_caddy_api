@@ -33,6 +33,8 @@ from job_hunting.api.views import (
     ApplicationViewSet,
     SummaryViewSet,
     ExperienceViewSet,
+    EducationViewSet,
+    CertificationViewSet,
 )
 
 router = routers.DefaultRouter()
@@ -47,6 +49,8 @@ router.register(r"cover-letters", CoverLetterViewSet, basename="cover-letters")
 router.register(r"applications", ApplicationViewSet, basename="applications")
 router.register(r"summaries", SummaryViewSet, basename="summaries")
 router.register(r"experiences", ExperienceViewSet, basename="experiences")
+router.register(r"educations", EducationViewSet, basename="educations")
+router.register(r"certifications", CertificationViewSet, basename="certifications")
 
 urlpatterns = [
     path("admin/", admin.site.urls),

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Date
+from sqlalchemy import Column, Integer, String, Text, Date, ForeignKey
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -12,10 +12,12 @@ class Experience(BaseModel):
     end_date = Column(Date, nullable=True)
     summary = Column(Text, nullable=True)
     content = Column(Text, nullable=True)
-
+    location = Column(String, nullable=True)
+    company_id = Column(Integer, ForeignKey("company.id"), nullable=False)
     # Many-to-many with Resume via resume_experience
     resumes = relationship(
         "Resume",
         secondary="resume_experience",
         back_populates="experiences",
     )
+    company = relationship("Company")

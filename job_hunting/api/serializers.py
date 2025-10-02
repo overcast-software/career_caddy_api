@@ -11,6 +11,8 @@ from job_hunting.lib.models import (
     Application,
     Summary,
     Experience,
+    Education,
+    Certification,
 )
 
 
@@ -158,6 +160,12 @@ class ResumeSerializer(BaseSASerializer):
             "type": "experience",
             "uselist": True,
         },
+        "educations": {"attr": "educations", "type": "education", "uselist": True},
+        "certifications": {
+            "attr": "certifications",
+            "type": "certification",
+            "uselist": True,
+        },
     }
     relationship_fks = {"user": "user_id"}
 
@@ -295,7 +303,42 @@ class SummarySerializer(BaseSASerializer):
 class ExperienceSerializer(BaseSASerializer):
     type = "experience"
     model = Experience
-    attributes = ["title", "start_date", "end_date", "summary", "content"]
+    attributes = ["title", "start_date", "end_date", "summary", "location", "content"]
+    relationships = {
+        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
+        "company": {"attr": "company", "type": "company", "uselist": False},
+    }
+    relationship_fks = {"company": "company_id"}
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        ctx = getattr(self, "_parent_context", None)
+        if ctx and ctx.get("parent_type") == "resume":
+            res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")
+        else:
+            rid = None
+            try:
+                if getattr(obj, "resumes", None):
+                    rid = obj.resumes[0].id
+            except Exception:
+                rid = None
+            if rid is not None:
+                res.setdefault("attributes", {})["resume_id"] = rid
+        return res
+
+    def parse_payload(self, payload):
+        out = super().parse_payload(payload)
+        if "start_date" in out:
+            out["start_date"] = _parse_date(out["start_date"])
+        if "end_date" in out:
+            out["end_date"] = _parse_date(out["end_date"])
+        return out
+
+
+class EducationSerializer(BaseSASerializer):
+    type = "education"
+    model = Education
+    attributes = ["degree", "issue_date", "institution", "major", "minor"]
     relationships = {
         "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
     }
@@ -309,10 +352,39 @@ class ExperienceSerializer(BaseSASerializer):
 
     def parse_payload(self, payload):
         out = super().parse_payload(payload)
-        if "start_date" in out:
-            out["start_date"] = _parse_date(out["start_date"])
-        if "end_date" in out:
-            out["end_date"] = _parse_date(out["end_date"])
+        if "issue_date" in out:
+            out["issue_date"] = _parse_date(out["issue_date"])
+        return out
+
+
+class CertificationSerializer(BaseSASerializer):
+    type = "certification"
+    model = Certification
+    attributes = ["issuer", "title", "issue_date", "content"]
+    relationships = {
+        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
+    }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        ctx = getattr(self, "_parent_context", None)
+        if ctx and ctx.get("parent_type") == "resume":
+            res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")
+        else:
+            rid = None
+            try:
+                if getattr(obj, "resumes", None):
+                    rid = obj.resumes[0].id
+            except Exception:
+                rid = None
+            if rid is not None:
+                res.setdefault("attributes", {})["resume_id"] = rid
+        return res
+
+    def parse_payload(self, payload):
+        out = super().parse_payload(payload)
+        if "issue_date" in out:
+            out["issue_date"] = _parse_date(out["issue_date"])
         return out
 
 
@@ -327,4 +399,6 @@ TYPE_TO_SERIALIZER = {
     "application": ApplicationSerializer,
     "summary": SummarySerializer,
     "experience": ExperienceSerializer,
+    "education": EducationSerializer,
+    "certification": CertificationSerializer,
 }

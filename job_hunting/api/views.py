@@ -23,6 +23,8 @@ from job_hunting.lib.models import (
     Application,
     Summary,
     Experience,
+    Education,
+    Certification,
 )
 from .serializers import (
     UserSerializer,
@@ -35,6 +37,8 @@ from .serializers import (
     ApplicationSerializer,
     SummarySerializer,
     ExperienceSerializer,
+    EducationSerializer,
+    CertificationSerializer,
     TYPE_TO_SERIALIZER,
 )
 
@@ -311,6 +315,16 @@ class ResumeViewSet(BaseSAViewSet):
         data = [ser.to_resource(e) for e in (obj.experiences or [])]
         return Response({"data": data})
 
+    @action(detail=True, methods=["get"])
+    def educations(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = EducationSerializer()
+        ser.set_parent_context("resume", obj.id, "educations")
+        data = [ser.to_resource(e) for e in (obj.educations or [])]
+        return Response({"data": data})
+
 
 class ScoreViewSet(BaseSAViewSet):
     model = Score
@@ -559,3 +573,13 @@ class ApplicationViewSet(BaseSAViewSet):
 class ExperienceViewSet(BaseSAViewSet):
     model = Experience
     serializer_class = ExperienceSerializer
+
+
+class EducationViewSet(BaseSAViewSet):
+    model = Education
+    serializer_class = EducationSerializer
+
+
+class CertificationViewSet(BaseSAViewSet):
+    model = Certification
+    serializer_class = CertificationSerializer

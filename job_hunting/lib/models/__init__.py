@@ -13,3 +13,5 @@ from .resume_experience import ResumeExperience
 from .resume_certification import ResumeCertification
 from .resume_education import ResumeEducation
 from .experience import Experience
+from .education import Education
+from .certification import Certification

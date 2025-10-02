@@ -22,8 +22,16 @@ class Resume(BaseModel):
         secondary="resume_experience",
         back_populates="resumes",
     )
-    certifications = relationship("ResumeCertification", back_populates="resume")
-    educations = relationship("ResumeEducation", back_populates="resume")
+    certifications = relationship(
+        "Certification",
+        secondary="resume_certification",
+        back_populates="resumes",
+    )
+    educations = relationship(
+        "Education",
+        secondary="resume_education",
+        back_populates="resumes",
+    )
 
     @classmethod
     def from_path_and_user_id(cls, path, user_id):
