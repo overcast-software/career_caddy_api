@@ -13,6 +13,8 @@ from job_hunting.lib.models import (
     Experience,
     Education,
     Certification,
+    Description,
+    ExperienceDescription,
 )
 
 
@@ -307,6 +309,7 @@ class ExperienceSerializer(BaseSASerializer):
     relationships = {
         "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
         "company": {"attr": "company", "type": "company", "uselist": False},
+        "descriptions": {"attr": "descriptions", "type": "description", "uselist": True},
     }
     relationship_fks = {"company": "company_id"}
 
@@ -324,6 +327,22 @@ class ExperienceSerializer(BaseSASerializer):
                 rid = None
             if rid is not None:
                 res.setdefault("attributes", {})["resume_id"] = rid
+
+        # Also expose description content lines for convenience, either from linked descriptions
+        # or by splitting the legacy Experience.content field.
+        try:
+            desc_list = getattr(obj, "descriptions", None)
+            if desc_list:
+                lines = [d.content for d in desc_list if getattr(d, "content", None)]
+            else:
+                raw = getattr(obj, "content", None) or ""
+                lines = [ln.strip() for ln in raw.splitlines() if ln and ln.strip()]
+            if lines:
+                res.setdefault("attributes", {})["description_lines"] = lines
+        except Exception:
+            # Non-fatal; just omit description_lines on error
+            pass
+
         return res
 
     def parse_payload(self, payload):
@@ -388,6 +407,36 @@ class CertificationSerializer(BaseSASerializer):
         return out
 
 
+class DescriptionSerializer(BaseSASerializer):
+    type = "description"
+    model = Description
+    attributes = ["content"]
+    relationships = {
+        "experiences": {"attr": "experiences", "type": "experience", "uselist": True},
+    }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # If included under an experience, inject per-link 'order' from the join table
+        try:
+            ctx = getattr(self, "_parent_context", None)
+            if ctx and ctx.get("parent_type") == "experience":
+                experience_id = ctx.get("parent_id")
+                if experience_id:
+                    session = self.model.get_session()
+                    link = (
+                        session.query(ExperienceDescription)
+                        .filter_by(experience_id=int(experience_id), description_id=obj.id)
+                        .first()
+                    )
+                    if link and hasattr(link, "order"):
+                        res.setdefault("attributes", {})["order"] = link.order
+        except Exception:
+            # Non-fatal; omit 'order' if unavailable
+            pass
+        return res
+
+
 TYPE_TO_SERIALIZER = {
     "user": UserSerializer,
     "resume": ResumeSerializer,
@@ -401,4 +450,5 @@ TYPE_TO_SERIALIZER = {
     "experience": ExperienceSerializer,
     "education": EducationSerializer,
     "certification": CertificationSerializer,
+    "description": DescriptionSerializer,
 }

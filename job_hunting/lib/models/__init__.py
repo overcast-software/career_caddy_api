@@ -15,3 +15,5 @@ from .resume_education import ResumeEducation
 from .experience import Experience
 from .education import Education
 from .certification import Certification
+from .description import Description
+from .experience_description import ExperienceDescription

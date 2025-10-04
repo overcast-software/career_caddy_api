@@ -25,6 +25,7 @@ from job_hunting.lib.models import (
     Experience,
     Education,
     Certification,
+    Description,
 )
 from .serializers import (
     UserSerializer,
@@ -39,6 +40,7 @@ from .serializers import (
     ExperienceSerializer,
     EducationSerializer,
     CertificationSerializer,
+    DescriptionSerializer,
     TYPE_TO_SERIALIZER,
 )
 
@@ -199,15 +201,98 @@ class SummaryViewSet(BaseSAViewSet):
 
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
-        relationships = (data.get("data") or {}).get("relationships") or {}
-        job_post_id = relationships.get("job-post", {}).get("data", {}).get("id")
-        job_post = JobPost.get(job_post_id)
-        resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
-        resume_id = resume_rel.get("data", {}).get("id")
-        resume = Resume.get(resume_id)
-        summary_service = SummaryService(ai_client, job=job_post, resume=resume)
+        node = (data.get("data") or {})
+        attrs = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
 
-        summary = summary_service.generate_summary()
+        def _first_id(node):
+            if isinstance(node, dict):
+                d = node.get("data")
+            else:
+                d = None
+            if isinstance(d, dict) and "id" in d:
+                return d["id"]
+            if isinstance(d, list) and d:
+                first = d[0]
+                if isinstance(first, dict) and "id" in first:
+                    return first["id"]
+            return None
+
+        def _rel_id(*keys):
+            for k in keys:
+                v = relationships.get(k)
+                if v is not None:
+                    rid = _first_id(v)
+                    if rid is not None:
+                        return rid
+            return None
+
+        # Accept both hyphenated and underscored keys; allow nullable job_post
+        resume_id = _rel_id("resume", "resumes")
+        job_post_id = _rel_id("job-post", "job_post", "jobPost", "job-posts", "jobPosts")
+        user_id = _rel_id("user", "users")
+
+        if resume_id is None:
+            return Response(
+                {"errors": [{"detail": "Missing required relationship: resume"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            resume = Resume.get(int(resume_id))
+        except (TypeError, ValueError):
+            resume = None
+        if not resume:
+            return Response(
+                {"errors": [{"detail": "Invalid resume ID"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        job_post = None
+        if job_post_id is not None:
+            try:
+                job_post = JobPost.get(int(job_post_id))
+            except (TypeError, ValueError):
+                job_post = None
+            if not job_post:
+                return Response(
+                    {"errors": [{"detail": "Invalid job-post ID"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Resolve user_id; default to resume.user_id if not provided or invalid
+        try:
+            user_id = int(user_id) if user_id is not None else None
+        except (TypeError, ValueError):
+            user_id = None
+        if user_id is None:
+            user_id = getattr(resume, "user_id", None)
+
+        content = attrs.get("content")
+
+        if content:
+            summary = Summary(
+                resume_id=resume.id,
+                job_post_id=job_post.id if job_post else None,
+                user_id=user_id,
+                content=content,
+            )
+            summary.save()
+        else:
+            if not job_post:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": "Provide 'attributes.content' or a job-post relationship to generate content"
+                            }
+                        ]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            summary_service = SummaryService(ai_client, job=job_post, resume=resume)
+            summary = summary_service.generate_summary()
+
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(summary)}
         include_rels = self._parse_include(request)
@@ -297,8 +382,70 @@ class ResumeViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
+        if request.method.lower() == "post":
+            obj = self.model.get(int(pk))  # obj is the Resume
+            if not obj:
+                return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+            data = request.data if isinstance(request.data, dict) else {}
+            node = (data.get("data") or {})
+            attrs = node.get("attributes") or {}
+            relationships = node.get("relationships") or {}
+
+            # Accept hyphenated or underscored job-post relationship; allow null if content is provided
+            job_post_rel = (
+                relationships.get("job-post")
+                or relationships.get("job_post")
+                or relationships.get("jobPost")
+                or relationships.get("job-posts")
+                or relationships.get("jobPosts")
+                or {}
+            )
+            job_post_id = None
+            if isinstance(job_post_rel, dict):
+                d = job_post_rel.get("data")
+                if isinstance(d, dict):
+                    job_post_id = d.get("id")
+
+            job_post = None
+            if job_post_id is not None:
+                try:
+                    job_post = JobPost.get(int(job_post_id))
+                except (TypeError, ValueError):
+                    job_post = None
+                if not job_post:
+                    return Response(
+                        {"errors": [{"detail": "Invalid job-post ID"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            content = attrs.get("content")
+            if content:
+                summary = Summary(
+                    resume_id=obj.id,
+                    job_post_id=job_post.id if job_post else None,
+                    user_id=getattr(obj, "user_id", None),
+                    content=content,
+                )
+                summary.save()
+            else:
+                if not job_post:
+                    return Response(
+                        {"errors": [{"detail": "Provide 'attributes.content' or a job-post relationship to generate content"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                summary_service = SummaryService(ai_client, job=job_post, resume=obj)
+                summary = summary_service.generate_summary()
+
+            ser = SummarySerializer()
+            payload = {"data": ser.to_resource(summary)}
+            include_rels = self._parse_include(request)
+            if include_rels:
+                payload["included"] = self._build_included([summary], include_rels)
+            return Response(payload, status=status.HTTP_201_CREATED)
+
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -312,8 +459,41 @@ class ResumeViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = ExperienceSerializer()
         ser.set_parent_context("resume", obj.id, "experiences")
-        data = [ser.to_resource(e) for e in (obj.experiences or [])]
-        return Response({"data": data})
+        items = list(obj.experiences or [])
+        data = [ser.to_resource(e) for e in items]
+
+        # Build included using ExperienceSerializer so descriptions (and other first-level rels) are returned
+        inc_param = request.query_params.get("include")
+        if inc_param:
+            include_rels = [s.strip() for s in inc_param.split(",") if s.strip()]
+        else:
+            include_rels = list(getattr(ser, "relationships", {}).keys())
+
+        included = []
+        if include_rels:
+            seen = set()
+            for exp in items:
+                for rel in include_rels:
+                    rel_type, targets = ser.get_related(exp, rel)
+                    if not rel_type:
+                        continue
+                    ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                    if not ser_cls:
+                        continue
+                    rel_ser = ser_cls()
+                    if hasattr(rel_ser, "set_parent_context"):
+                        rel_ser.set_parent_context(ser.type, exp.id, rel)
+                    for t in targets:
+                        key = (rel_type, str(t.id))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        included.append(rel_ser.to_resource(t))
+
+        payload = {"data": data}
+        if included:
+            payload["included"] = included
+        return Response(payload)
 
     @action(detail=True, methods=["get"])
     def educations(self, request, pk=None):
@@ -450,8 +630,63 @@ class JobPostViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
+        if request.method.lower() == "post":
+            obj = self.model.get(int(pk))  # obj is the JobPost
+            if not obj:
+                return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+            data = request.data if isinstance(request.data, dict) else {}
+            node = (data.get("data") or {})
+            attrs = node.get("attributes") or {}
+            relationships = node.get("relationships") or {}
+
+            # Accept "resume"/"resumes" for resume relationship
+            resume_rel = relationships.get("resumes") or relationships.get("resume") or {}
+            resume_id = None
+            if isinstance(resume_rel, dict):
+                d = resume_rel.get("data")
+                if isinstance(d, dict):
+                    resume_id = d.get("id")
+
+            if not resume_id:
+                return Response(
+                    {"errors": [{"detail": "Missing required relationship: resume"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                resume = Resume.get(int(resume_id))
+            except (TypeError, ValueError):
+                resume = None
+
+            if not resume:
+                return Response(
+                    {"errors": [{"detail": "Invalid resume ID"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            content = attrs.get("content")
+            if content:
+                summary = Summary(
+                    resume_id=resume.id,
+                    job_post_id=obj.id,
+                    user_id=getattr(resume, "user_id", None),
+                    content=content,
+                )
+                summary.save()
+            else:
+                summary_service = SummaryService(ai_client, job=obj, resume=resume)
+                summary = summary_service.generate_summary()
+
+            ser = SummarySerializer()
+            payload = {"data": ser.to_resource(summary)}
+            include_rels = self._parse_include(request)
+            if include_rels:
+                payload["included"] = self._build_included([summary], include_rels)
+            return Response(payload, status=status.HTTP_201_CREATED)
+
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -583,3 +818,16 @@ class EducationViewSet(BaseSAViewSet):
 class CertificationViewSet(BaseSAViewSet):
     model = Certification
     serializer_class = CertificationSerializer
+
+
+class DescriptionViewSet(BaseSAViewSet):
+    model = Description
+    serializer_class = DescriptionSerializer
+
+    @action(detail=True, methods=["get"])
+    def experiences(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        data = [ExperienceSerializer().to_resource(e) for e in (obj.experiences or [])]
+        return Response({"data": data})

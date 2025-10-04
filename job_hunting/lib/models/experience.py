@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, Date, ForeignKey
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from .base import BaseModel, Base
 
 
 class Experience(BaseModel):
@@ -21,3 +21,9 @@ class Experience(BaseModel):
         back_populates="experiences",
     )
     company = relationship("Company")
+    descriptions = relationship(
+        "Description",
+        secondary="experience_description",
+        back_populates="experiences",
+        order_by=lambda: Base.metadata.tables["experience_description"].c.order,
+    )
