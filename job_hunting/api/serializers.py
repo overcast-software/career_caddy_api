@@ -121,7 +121,7 @@ class BaseSASerializer:
 class UserSerializer(BaseSASerializer):
     type = "user"
     model = User
-    attributes = ["name", "email"]
+    attributes = ["name", "email", "phone"]
     relationships = {
         "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -142,7 +142,7 @@ class UserSerializer(BaseSASerializer):
 class ResumeSerializer(BaseSASerializer):
     type = "resume"
     model = Resume
-    attributes = ["content", "file_path"]
+    attributes = ["content", "file_path", "title"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -170,7 +170,6 @@ class ResumeSerializer(BaseSASerializer):
         },
     }
     relationship_fks = {"user": "user_id"}
-
 
 class ScoreSerializer(BaseSASerializer):
     type = "score"

@@ -10,6 +10,7 @@ class User(BaseModel):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=True)
     email = Column(String, unique=True, nullable=True)
+    phone = Column(String, unique=True)
 
     # Relationships
     resumes = relationship("Resume", back_populates="user")

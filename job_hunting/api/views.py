@@ -26,6 +26,11 @@ from job_hunting.lib.models import (
     Education,
     Certification,
     Description,
+    ExperienceDescription,
+    ResumeEducation,
+    ResumeCertification,
+    ResumeSummary,
+    ResumeExperience,
 )
 from .serializers import (
     UserSerializer,
@@ -293,6 +298,10 @@ class SummaryViewSet(BaseSAViewSet):
             summary_service = SummaryService(ai_client, job=job_post, resume=resume)
             summary = summary_service.generate_summary()
 
+        session = self.get_session()
+        session.add(ResumeSummary(resume_id=resume.id, summary_id=summary.id))
+        session.commit()
+
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(summary)}
         include_rels = self._parse_include(request)
@@ -438,6 +447,10 @@ class ResumeViewSet(BaseSAViewSet):
                     )
                 summary_service = SummaryService(ai_client, job=job_post, resume=obj)
                 summary = summary_service.generate_summary()
+
+            session = self.get_session()
+            session.add(ResumeSummary(resume_id=obj.id, summary_id=summary.id))
+            session.commit()
 
             ser = SummarySerializer()
             payload = {"data": ser.to_resource(summary)}
@@ -680,6 +693,10 @@ class JobPostViewSet(BaseSAViewSet):
                 summary_service = SummaryService(ai_client, job=obj, resume=resume)
                 summary = summary_service.generate_summary()
 
+            session = self.get_session()
+            session.add(ResumeSummary(resume_id=resume.id, summary_id=summary.id))
+            session.commit()
+
             ser = SummarySerializer()
             payload = {"data": ser.to_resource(summary)}
             include_rels = self._parse_include(request)
@@ -809,20 +826,262 @@ class ExperienceViewSet(BaseSAViewSet):
     model = Experience
     serializer_class = ExperienceSerializer
 
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        relationships = node.get("relationships") or {}
+
+        # Accept both "resumes" (list) and "resume" (single)
+        res_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_ids = []
+        if isinstance(res_rel, dict):
+            d = res_rel.get("data")
+            items = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("id")
+                if rid is None:
+                    continue
+                try:
+                    resume_ids.append(int(rid))
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        # Validate referenced resumes (if provided)
+        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        if invalid:
+            return Response(
+                {"errors": [{"detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session = self.get_session()
+
+        # Create Experience
+        exp = Experience(**attrs)
+        session.add(exp)
+        session.commit()  # ensure exp.id is available
+
+        # Populate join table
+        for rid in resume_ids:
+            link = ResumeExperience(resume_id=rid, experience_id=exp.id)
+            session.add(link)
+        session.commit()
+
+        payload = {"data": ser.to_resource(exp)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([exp], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
 
 class EducationViewSet(BaseSAViewSet):
     model = Education
     serializer_class = EducationSerializer
+
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        relationships = node.get("relationships") or {}
+
+        # Accept both "resumes" (list) and "resume" (single) relationship keys
+        res_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_ids = []
+        if isinstance(res_rel, dict):
+            d = res_rel.get("data")
+            items = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("id")
+                if rid is None:
+                    continue
+                try:
+                    resume_ids.append(int(rid))
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        # Validate referenced resumes (if provided)
+        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        if invalid:
+            return Response(
+                {"errors": [{"detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session = self.get_session()
+
+        # Create Education
+        edu = Education(**attrs)
+        session.add(edu)
+        session.commit()  # ensure edu.id is available
+
+        # Populate join table for each provided resume
+        for rid in resume_ids:
+            link = ResumeEducation(resume_id=rid, education_id=edu.id)
+            session.add(link)
+        session.commit()
+
+        payload = {"data": ser.to_resource(edu)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([edu], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class CertificationViewSet(BaseSAViewSet):
     model = Certification
     serializer_class = CertificationSerializer
 
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        relationships = node.get("relationships") or {}
+
+        # Accept both "resumes" (list) and "resume" (single)
+        res_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_ids = []
+        if isinstance(res_rel, dict):
+            d = res_rel.get("data")
+            items = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("id")
+                if rid is None:
+                    continue
+                try:
+                    resume_ids.append(int(rid))
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        # Validate referenced resumes (if provided)
+        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        if invalid:
+            return Response(
+                {"errors": [{"detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session = self.get_session()
+
+        # Create Certification
+        cert = Certification(**attrs)
+        session.add(cert)
+        session.commit()  # ensure cert.id is available
+
+        # Populate join table
+        for rid in resume_ids:
+            link = ResumeCertification(resume_id=rid, certification_id=cert.id)
+            session.add(link)
+        session.commit()
+
+        payload = {"data": ser.to_resource(cert)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([cert], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
 
 class DescriptionViewSet(BaseSAViewSet):
     model = Description
     serializer_class = DescriptionSerializer
+
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        relationships = node.get("relationships") or {}
+
+        exp_rel = relationships.get("experiences") or relationships.get("experience") or {}
+        exp_items = []  # list of tuples (experience_id, order)
+        if isinstance(exp_rel, dict):
+            d = exp_rel.get("data")
+            # Accept list or single object
+            items = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("id")
+                if rid is None:
+                    continue
+                try:
+                    eid = int(rid)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": f"Invalid experience id: {rid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                order = 0
+                meta = it.get("meta")
+                if isinstance(meta, dict) and "order" in meta:
+                    try:
+                        order = int(meta.get("order", 0))
+                    except (TypeError, ValueError):
+                        order = 0
+                exp_items.append((eid, order))
+
+        # Validate referenced experiences before creating description
+        invalid_ids = [eid for eid, _ in exp_items if Experience.get(eid) is None]
+        if invalid_ids:
+            return Response(
+                {"errors": [{"detail": f"Invalid experience ID(s): {', '.join(map(str, invalid_ids))}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session = self.get_session()
+
+        # Create description
+        desc = Description(**attrs)
+        session.add(desc)
+        session.commit()  # ensure desc.id is available
+
+        # Populate join table with optional per-link order
+        for eid, order in exp_items:
+            link = ExperienceDescription(
+                experience_id=eid, description_id=desc.id, order=order
+            )
+            session.add(link)
+        session.commit()
+
+        payload = {"data": ser.to_resource(desc)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([desc], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):

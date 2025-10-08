@@ -6,7 +6,7 @@ from .base import BaseModel
 class Resume(BaseModel):
     __tablename__ = "resume"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    content = Column(Text, nullable=False)
+    content = Column(Text)
     user_id = Column(Integer, ForeignKey("user.id"))
     file_path = Column(String)
     title = Column(String)
