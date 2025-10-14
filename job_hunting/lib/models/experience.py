@@ -10,7 +10,6 @@ class Experience(BaseModel):
     title = Column(String, nullable=True)
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
-    summary = Column(Text, nullable=True)
     content = Column(Text, nullable=True)
     location = Column(String, nullable=True)
     company_id = Column(Integer, ForeignKey("company.id"), nullable=False)
@@ -19,6 +18,7 @@ class Experience(BaseModel):
         "Resume",
         secondary="resume_experience",
         back_populates="experiences",
+        overlaps="experience,resume",
     )
     company = relationship("Company")
     descriptions = relationship(

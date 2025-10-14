@@ -6,7 +6,7 @@ from .base import BaseModel
 class Resume(BaseModel):
     __tablename__ = "resume"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    content = Column(Text)
+    content = Column(Text)  # not using anymore
     user_id = Column(Integer, ForeignKey("user.id"))
     file_path = Column(String)
     title = Column(String)
@@ -15,18 +15,28 @@ class Resume(BaseModel):
     scores = relationship("Score", back_populates="resume")
     cover_letters = relationship("CoverLetter", back_populates="resume")
     applications = relationship("Application", back_populates="resume")
-    summaries = relationship("Summary", back_populates="resume")
-    resume_summaries = relationship("ResumeSummary", back_populates="resume")
+    summaries = relationship(
+        "Summary",
+        secondary="resume_summaries",
+        back_populates="resumes",
+        overlaps="resume_summaries,summary",
+    )
+
+    resume_summaries = relationship("ResumeSummaries", back_populates="resume")
+
     experiences = relationship(
         "Experience",
         secondary="resume_experience",
         back_populates="resumes",
+        overlaps="experience,resume",
     )
+
     certifications = relationship(
         "Certification",
         secondary="resume_certification",
         back_populates="resumes",
     )
+
     educations = relationship(
         "Education",
         secondary="resume_education",

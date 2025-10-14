@@ -8,12 +8,13 @@ class Summary(BaseModel):
     id = Column(Integer, primary_key=True, autoincrement=True)
     content = Column(Text, nullable=False)
     user_id = Column(Integer, ForeignKey("user.id"))
-    job_post_id = Column(Integer, ForeignKey("job_post.id"))
-    resume_id = Column(Integer, ForeignKey("resume.id"))
-
+    job_post_id = Column(Integer, ForeignKey("job_post.id", ondelete="CASCADE"))
     job_post = relationship("JobPost", back_populates="summaries")
-    resume = relationship(
-        "Resume", back_populates="summaries"
-    )  # the original resume that the summary was imported with
+    resumes = relationship(
+        "Resume",
+        secondary="resume_summaries",
+        back_populates="summaries",
+        overlaps="resume_summaries,resume",
+    )  # many-to-many via resume_summaries
     user = relationship("User", back_populates="summaries")
-    resume_summaries = relationship("ResumeSummary", back_populates="summary")
+    resume_summaries = relationship("ResumeSummaries", back_populates="summary")

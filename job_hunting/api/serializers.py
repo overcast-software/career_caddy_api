@@ -1,5 +1,6 @@
 from datetime import datetime, date
 from typing import Any, Dict, List
+import dateparser
 from job_hunting.lib.models import (
     User,
     Resume,
@@ -10,6 +11,7 @@ from job_hunting.lib.models import (
     CoverLetter,
     Application,
     Summary,
+    ResumeSummaries,
     Experience,
     Education,
     Certification,
@@ -97,7 +99,9 @@ class BaseSASerializer:
                     }
                     # For to-one, safely include a related link to the related resource if present
                     if target is not None and getattr(target, "id", None) is not None:
-                        links["related"] = f"{_resource_base_path(rel_type)}/{target.id}"
+                        links["related"] = (
+                            f"{_resource_base_path(rel_type)}/{target.id}"
+                        )
                     rel_out[rel_name] = {"data": data, "links": links}
             res["relationships"] = rel_out
         return res
@@ -125,6 +129,7 @@ class BaseSASerializer:
             raise ValueError(f"JSON:API type mismatch: expected one of '{exp_str}'")
         attrs_in = data.get("attributes", {}) or {}
         out: Dict[str, Any] = {}
+
         for k in self.attributes:
             if k in attrs_in:
                 out[k] = attrs_in[k]
@@ -194,8 +199,11 @@ class ResumeSerializer(BaseSASerializer):
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Convenience link to related summaries collection
-        res.setdefault("links", {})["summaries"] = f"{_resource_base_path(self.type)}/{obj.id}/summaries"
+        res.setdefault("links", {})[
+            "summaries"
+        ] = f"{_resource_base_path(self.type)}/{obj.id}/summaries"
         return res
+
 
 class ScoreSerializer(BaseSASerializer):
     type = "score"
@@ -318,30 +326,54 @@ class SummarySerializer(BaseSASerializer):
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
-        "resume": {"attr": "resume", "type": "resume", "uselist": False},
     }
     relationship_fks = {
         "user": "user_id",
         "job-post": "job_post_id",
-        "resume": "resume_id",
     }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # If included under a resume, inject per-link 'active' from resume_summary
+        try:
+            ctx = getattr(self, "_parent_context", None)
+            if ctx and ctx.get("parent_type") == "resume":
+                resume_id = ctx.get("parent_id")
+                if resume_id:
+                    session = self.model.get_session()
+                    link = (
+                        session.query(ResumeSummaries)
+                        .filter_by(resume_id=int(resume_id), summary_id=obj.id)
+                        .first()
+                    )
+                    if link and hasattr(link, "active"):
+                        res.setdefault("attributes", {})["active"] = bool(link.active)
+        except Exception:
+            pass
+        return res
 
 
 class ExperienceSerializer(BaseSASerializer):
     type = "experience"
     model = Experience
-    attributes = ["title", "start_date", "end_date", "summary", "location", "content"]
+    attributes = ["title", "start_date", "end_date", "location", "content"]
     relationships = {
         "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
         "company": {"attr": "company", "type": "company", "uselist": False},
-        "descriptions": {"attr": "descriptions", "type": "description", "uselist": True},
+        "descriptions": {
+            "attr": "descriptions",
+            "type": "description",
+            "uselist": True,
+        },
     }
     relationship_fks = {"company": "company_id"}
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Convenience link to related descriptions (non-relationships URL)
-        res.setdefault("links", {})["descriptions"] = f"{_resource_base_path(self.type)}/{obj.id}/descriptions"
+        res.setdefault("links", {})[
+            "descriptions"
+        ] = f"{_resource_base_path(self.type)}/{obj.id}/descriptions"
         ctx = getattr(self, "_parent_context", None)
         if ctx and ctx.get("parent_type") == "resume":
             res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")
@@ -374,10 +406,22 @@ class ExperienceSerializer(BaseSASerializer):
 
     def parse_payload(self, payload):
         out = super().parse_payload(payload)
+
+        def _dp(val):
+            if val is None or val == "":
+                return None
+            if isinstance(val, (datetime, date)):
+                return val.date() if isinstance(val, datetime) else val
+            try:
+                dt = dateparser.parse(str(val))
+                return dt.date() if dt else None
+            except Exception:
+                return None
+
         if "start_date" in out:
-            out["start_date"] = _parse_date(out["start_date"])
+            out["start_date"] = _dp(out["start_date"])
         if "end_date" in out:
-            out["end_date"] = _parse_date(out["end_date"])
+            out["end_date"] = _dp(out["end_date"])
         return out
 
 
@@ -453,7 +497,9 @@ class DescriptionSerializer(BaseSASerializer):
                     session = self.model.get_session()
                     link = (
                         session.query(ExperienceDescription)
-                        .filter_by(experience_id=int(experience_id), description_id=obj.id)
+                        .filter_by(
+                            experience_id=int(experience_id), description_id=obj.id
+                        )
                         .first()
                     )
                     if link and hasattr(link, "order"):
