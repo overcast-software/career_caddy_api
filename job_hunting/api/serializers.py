@@ -44,6 +44,11 @@ def _pluralize_type(t: str) -> str:
     return t + "s"
 
 
+def _resource_base_path(t: str) -> str:
+    # Assumes your API is mounted at /api/v1/
+    return f"/api/v1/{_pluralize_type(t)}"
+
+
 class BaseSASerializer:
     type: str
     model: Any
@@ -67,6 +72,8 @@ class BaseSASerializer:
             "id": str(obj.id),
             "attributes": {k: _to_primitive(getattr(obj, k)) for k in self.attributes},
         }
+        # JSON:API resource self link
+        res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
         if self.relationships:
             rel_out = {}
             for rel_name, cfg in self.relationships.items():
@@ -76,9 +83,22 @@ class BaseSASerializer:
                 target = getattr(obj, rel_attr, None)
                 if uselist:
                     data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
+                    rel_out[rel_name] = {
+                        "data": data,
+                        "links": {
+                            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                            "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
+                        },
+                    }
                 else:
                     data = {"type": rel_type, "id": str(target.id)} if target else None
-                rel_out[rel_name] = {"data": data}
+                    links = {
+                        "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                    }
+                    # For to-one, safely include a related link to the related resource if present
+                    if target is not None and getattr(target, "id", None) is not None:
+                        links["related"] = f"{_resource_base_path(rel_type)}/{target.id}"
+                    rel_out[rel_name] = {"data": data, "links": links}
             res["relationships"] = rel_out
         return res
 
@@ -170,6 +190,12 @@ class ResumeSerializer(BaseSASerializer):
         },
     }
     relationship_fks = {"user": "user_id"}
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # Convenience link to related summaries collection
+        res.setdefault("links", {})["summaries"] = f"{_resource_base_path(self.type)}/{obj.id}/summaries"
+        return res
 
 class ScoreSerializer(BaseSASerializer):
     type = "score"
@@ -314,6 +340,8 @@ class ExperienceSerializer(BaseSASerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
+        # Convenience link to related descriptions (non-relationships URL)
+        res.setdefault("links", {})["descriptions"] = f"{_resource_base_path(self.type)}/{obj.id}/descriptions"
         ctx = getattr(self, "_parent_context", None)
         if ctx and ctx.get("parent_type") == "resume":
             res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")

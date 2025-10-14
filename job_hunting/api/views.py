@@ -47,6 +47,7 @@ from .serializers import (
     CertificationSerializer,
     DescriptionSerializer,
     TYPE_TO_SERIALIZER,
+    _parse_date,
 )
 
 
@@ -64,18 +65,31 @@ class BaseSAViewSet(viewsets.ViewSet):
 
     def _parse_include(self, request):
         inc = request.query_params.get("include")
-        if inc:
-            return [s.strip() for s in inc.split(",") if s.strip()]
-        # Default: include all first-level relationships for this resource
-        ser = self.get_serializer()
-        return list(getattr(ser, "relationships", {}).keys())
+        if not inc:
+            return []
+        return [s.strip() for s in str(inc).split(",") if s and s.strip()]
 
     def _build_included(self, objs, include_rels):
         included = []
-        seen = set()  # (type, id) for de-duplication
+        seen = set()  # (type, id)
         primary_ser = self.get_serializer()
+        rel_keys = set(getattr(primary_ser, "relationships", {}).keys())
+        def _normalize_rel(name: str) -> str:
+            if name in rel_keys:
+                return name
+            # Try simple plural forms
+            if not name.endswith("s") and f"{name}s" in rel_keys:
+                return f"{name}s"
+            if (
+                name.endswith("y")
+                and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
+                and f"{name[:-1]}ies" in rel_keys
+            ):
+                return f"{name[:-1]}ies"
+            return name
         for obj in objs:
             for rel in include_rels:
+                rel = _normalize_rel(rel)
                 rel_type, targets = primary_ser.get_related(obj, rel)
                 if not rel_type:
                     continue
@@ -363,6 +377,191 @@ class ResumeViewSet(BaseSAViewSet):
     model = Resume
     serializer_class = ResumeSerializer
 
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        session = self.get_session()
+
+        # Create the resume
+        resume = Resume(**attrs)
+        session.add(resume)
+        session.commit()  # ensure resume.id
+
+        # Extract potential child arrays from JSON:API attributes or top-level convenience keys
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        attrs_node = (node.get("attributes") or {})
+        experiences_in = node.get("experiences") or data.get("experiences") or []
+        educations_in = node.get("educations") or data.get("educations") or []
+        certifications_in = node.get("certifications") or data.get("certifications") or []
+
+        # Helpers
+        def _int_or_none(v):
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        # Upsert Experiences and link to resume; also upsert/link nested descriptions
+        for item in experiences_in or []:
+            if not isinstance(item, dict):
+                continue
+            exp = None
+            # TODO change this
+            eid = item.get("data", {}).get("id", None)
+            if eid:
+                exp = Experience.get(eid)
+
+            if exp is None:
+                # Dedup by company_id + title + location + summary (content does not affect uniqueness)
+                company_id = item.get('relationships').get('company').get('data').get('id')
+                descriptions = item.get('relationships').get('descriptions').get('data')
+
+                lookup = {
+                    "company_id": company_id,
+                    "title": item.get("title"),
+                    "location": item.get("location"),
+                    "summary": item.get("summary") or "",
+                    "start_date": _parse_date(item.get("start_date")),
+                    "end_date": _parse_date(item.get("end_date")),
+                }
+                exp = Experience.first_or_create(**lookup)
+
+                if not exp.id: # not in db
+                    breakpoint()
+                else: #
+                    breakpoint()
+
+
+            # Join resume_experience (avoid duplicates)
+            exists = (
+                session.query(ResumeExperience)
+                .filter_by(resume_id=resume.id, experience_id=exp.id)
+                .first()
+            )
+            if not exists:
+                session.add(ResumeExperience(resume_id=resume.id, experience_id=exp.id))
+                session.commit()
+
+            # Nested descriptions for this experience
+            for d in (item.get("descriptions") or []):
+                if not isinstance(d, dict):
+                    continue
+                desc = None
+                did = _int_or_none(d.get("id"))
+                if did:
+                    desc = Description.get(did)
+                if desc is None:
+                    content = d.get("content")
+                    if not content:
+                        continue
+                    # De-dup by exact content
+                    desc = session.query(Description).filter_by(content=content).first()
+                    if not desc:
+                        desc = Description(content=content)
+                        session.add(desc)
+                        session.commit()
+                # Link with optional order
+                order = d.get("order")
+                if order is None and isinstance(d.get("meta"), dict):
+                    order = d["meta"].get("order")
+                try:
+                    order = int(order) if order is not None else 0
+                except (TypeError, ValueError):
+                    order = 0
+                link = (
+                    session.query(ExperienceDescription)
+                    .filter_by(experience_id=exp.id, description_id=desc.id)
+                    .first()
+                )
+                if not link:
+                    session.add(
+                        ExperienceDescription(
+                            experience_id=exp.id, description_id=desc.id, order=order
+                        )
+                    )
+                    session.commit()
+
+        # Upsert Educations and link
+        for item in educations_in or []:
+            if not isinstance(item, dict):
+                continue
+            edu = None
+            eid = _int_or_none(item.get("id"))
+            if eid:
+                edu = Education.get(eid)
+            if edu is None:
+                lookup = {
+                    "institution": item.get("institution"),
+                    "degree": item.get("degree"),
+                    "major": item.get("major"),
+                    "minor": item.get("minor"),
+                    "issue_date": _parse_date(item.get("issue_date")),
+                }
+                # For lookup, None values ignored; but include issue_date only if parsed
+                lookup = {k: v for k, v in lookup.items() if v is not None}
+                edu = session.query(Education).filter_by(**lookup).first()
+                if not edu:
+                    create_attrs = {
+                        "institution": item.get("institution"),
+                        "degree": item.get("degree"),
+                        "major": item.get("major"),
+                        "minor": item.get("minor"),
+                        "issue_date": _parse_date(item.get("issue_date")),
+                    }
+                    create_attrs = {k: v for k, v in create_attrs.items() if v is not None}
+                    edu = Education(**create_attrs)
+                    session.add(edu)
+                    session.commit()
+            session.add(ResumeEducation(resume_id=resume.id, education_id=edu.id))
+            session.commit()
+
+        # Upsert Certifications and link
+        for item in certifications_in or []:
+            if not isinstance(item, dict):
+                continue
+            cert = None
+            cid = _int_or_none(item.get("id"))
+            if cid:
+                cert = Certification.get(cid)
+            if cert is None:
+                lookup = {
+                    "issuer": item.get("issuer"),
+                    "title": item.get("title"),
+                    "issue_date": _parse_date(item.get("issue_date")),
+                }
+                lookup = {k: v for k, v in lookup.items() if v is not None}
+                cert = session.query(Certification).filter_by(**lookup).first()
+                if not cert:
+                    create_attrs = {
+                        "issuer": item.get("issuer"),
+                        "title": item.get("title"),
+                        "issue_date": _parse_date(item.get("issue_date")),
+                        "content": item.get("content"),
+                    }
+                    create_attrs = {k: v for k, v in create_attrs.items() if v is not None}
+                    cert = Certification(**create_attrs)
+                    session.add(cert)
+                    session.commit()
+            session.add(ResumeCertification(resume_id=resume.id, certification_id=cert.id))
+            session.commit()
+
+        # Refresh relationships so response includes all links
+        try:
+            session.expire(resume, ["experiences", "educations", "certifications"])
+        except Exception:
+            pass
+
+        payload = {"data": ser.to_resource(resume)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([resume], include_rels)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -462,8 +661,60 @@ class ResumeViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [SummarySerializer().to_resource(s) for s in (obj.summaries or [])]
-        return Response({"data": data})
+
+        ser = SummarySerializer()
+        # Parent context available if serializers want to customize behavior
+        if hasattr(ser, "set_parent_context"):
+            ser.set_parent_context("resume", obj.id, "summaries")
+
+        items = list(obj.summaries or [])
+        data = [ser.to_resource(s) for s in items]
+
+        # Build included only when ?include=... is provided
+        inc_param = request.query_params.get("include")
+        include_rels = [s.strip() for s in inc_param.split(",") if s.strip()] if inc_param else []
+
+        included = []
+        if include_rels:
+            seen = set()
+            rel_keys = set(getattr(ser, "relationships", {}).keys())
+
+            def _normalize_rel(name: str) -> str:
+                if name in rel_keys:
+                    return name
+                if not name.endswith("s") and f"{name}s" in rel_keys:
+                    return f"{name}s"
+                if (
+                    name.endswith("y")
+                    and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
+                    and f"{name[:-1]}ies" in rel_keys
+                ):
+                    return f"{name[:-1]}ies"
+                return name
+
+            for sm in items:
+                for rel in include_rels:
+                    rel = _normalize_rel(rel)
+                    rel_type, targets = ser.get_related(sm, rel)
+                    if not rel_type:
+                        continue
+                    ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                    if not ser_cls:
+                        continue
+                    rel_ser = ser_cls()
+                    if hasattr(rel_ser, "set_parent_context"):
+                        rel_ser.set_parent_context(ser.type, sm.id, rel)
+                    for t in targets:
+                        key = (rel_type, str(t.id))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        included.append(rel_ser.to_resource(t))
+
+        payload = {"data": data}
+        if included:
+            payload["included"] = included
+        return Response(payload)
 
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
@@ -475,18 +726,29 @@ class ResumeViewSet(BaseSAViewSet):
         items = list(obj.experiences or [])
         data = [ser.to_resource(e) for e in items]
 
-        # Build included using ExperienceSerializer so descriptions (and other first-level rels) are returned
+        # Build included only when ?include=... is provided
         inc_param = request.query_params.get("include")
-        if inc_param:
-            include_rels = [s.strip() for s in inc_param.split(",") if s.strip()]
-        else:
-            include_rels = list(getattr(ser, "relationships", {}).keys())
+        include_rels = [s.strip() for s in inc_param.split(",") if s.strip()] if inc_param else []
 
         included = []
         if include_rels:
             seen = set()
+            rel_keys = set(getattr(ser, "relationships", {}).keys())
+            def _normalize_rel(name: str) -> str:
+                if name in rel_keys:
+                    return name
+                if not name.endswith("s") and f"{name}s" in rel_keys:
+                    return f"{name}s"
+                if (
+                    name.endswith("y")
+                    and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
+                    and f"{name[:-1]}ies" in rel_keys
+                ):
+                    return f"{name[:-1]}ies"
+                return name
             for exp in items:
                 for rel in include_rels:
+                    rel = _normalize_rel(rel)
                     rel_type, targets = ser.get_related(exp, rel)
                     if not rel_type:
                         continue
@@ -826,6 +1088,16 @@ class ExperienceViewSet(BaseSAViewSet):
     model = Experience
     serializer_class = ExperienceSerializer
 
+    @action(detail=True, methods=["get"])
+    def descriptions(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = DescriptionSerializer()
+        ser.set_parent_context("experience", obj.id, "descriptions")
+        data = [ser.to_resource(d) for d in (obj.descriptions or [])]
+        return Response({"data": data})
+
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -867,22 +1139,112 @@ class ExperienceViewSet(BaseSAViewSet):
 
         session = self.get_session()
 
-        # Create Experience
-        exp = Experience(**attrs)
-        session.add(exp)
-        session.commit()  # ensure exp.id is available
+        # Use existing Experience if client supplies an id; otherwise create a new one
+        provided_id = node.get("id")
+        exp = None
+        if provided_id is not None:
+            try:
+                exp = Experience.get(int(provided_id))
+            except (TypeError, ValueError):
+                exp = None
+            if not exp:
+                return Response(
+                    {"errors": [{"detail": f"Invalid experience ID: {provided_id}"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            exp = Experience(**attrs)
+            session.add(exp)
+            session.commit()  # ensure exp.id is available
 
-        # Populate join table
+        # Populate join table (avoid duplicates)
         for rid in resume_ids:
-            link = ResumeExperience(resume_id=rid, experience_id=exp.id)
-            session.add(link)
+            exists = (
+                session.query(ResumeExperience)
+                .filter_by(resume_id=rid, experience_id=exp.id)
+                .first()
+            )
+            if not exists:
+                session.add(ResumeExperience(resume_id=rid, experience_id=exp.id))
         session.commit()
+
+        # Ensure relationships reflect the new joins
+        session.expire(exp, ["resumes"])
 
         payload = {"data": ser.to_resource(exp)}
         include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included([exp], include_rels)
         return Response(payload, status=status.HTTP_201_CREATED)
+
+    def _upsert(self, request, pk, partial=False):
+        session = self.get_session()
+        exp = self.model.get(int(pk))
+        if not exp:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update scalar attributes (including company via relationship_fks)
+        for k, v in attrs.items():
+            setattr(exp, k, v)
+        session.add(exp)
+        session.commit()
+
+        # Parse resume relationship to add join(s)
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        relationships = node.get("relationships") or {}
+
+        res_rel = relationships.get("resumes") or relationships.get("resume") or {}
+        resume_ids = []
+        if isinstance(res_rel, dict):
+            d = res_rel.get("data")
+            items = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("id")
+                if rid is None:
+                    continue
+                try:
+                    resume_ids.append(int(rid))
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        # Validate resumes and create missing links
+        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        if invalid:
+            return Response(
+                {"errors": [{"detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for rid in resume_ids:
+            exists = (
+                session.query(ResumeExperience)
+                .filter_by(resume_id=rid, experience_id=exp.id)
+                .first()
+            )
+            if not exists:
+                session.add(ResumeExperience(resume_id=rid, experience_id=exp.id))
+        session.commit()
+
+        # Refresh relationships so response includes all linked resumes
+        session.expire(exp, ["resumes"])
+
+        payload = {"data": ser.to_resource(exp)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([exp], include_rels)
+        return Response(payload)
 
 
 class EducationViewSet(BaseSAViewSet):
@@ -940,6 +1302,9 @@ class EducationViewSet(BaseSAViewSet):
             link = ResumeEducation(resume_id=rid, education_id=edu.id)
             session.add(link)
         session.commit()
+
+        # Ensure relationships reflect the new joins
+        session.expire(edu, ["resumes"])
 
         payload = {"data": ser.to_resource(edu)}
         include_rels = self._parse_include(request)
@@ -1004,6 +1369,9 @@ class CertificationViewSet(BaseSAViewSet):
             session.add(link)
         session.commit()
 
+        # Ensure relationships reflect the new joins
+        session.expire(cert, ["resumes"])
+
         payload = {"data": ser.to_resource(cert)}
         include_rels = self._parse_include(request)
         if include_rels:
@@ -1025,6 +1393,8 @@ class DescriptionViewSet(BaseSAViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         node = (data.get("data") or {})
         relationships = node.get("relationships") or {}
+        attrs_node = node.get("attributes") or {}
+        global_order = attrs_node.get("order")
 
         exp_rel = relationships.get("experiences") or relationships.get("experience") or {}
         exp_items = []  # list of tuples (experience_id, order)
@@ -1045,13 +1415,18 @@ class DescriptionViewSet(BaseSAViewSet):
                         {"errors": [{"detail": f"Invalid experience id: {rid}"}]},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                order = 0
+                order = None
                 meta = it.get("meta")
                 if isinstance(meta, dict) and "order" in meta:
                     try:
-                        order = int(meta.get("order", 0))
+                        order = int(meta.get("order"))
                     except (TypeError, ValueError):
-                        order = 0
+                        order = None
+                if order is None and global_order is not None:
+                    try:
+                        order = int(global_order)
+                    except (TypeError, ValueError):
+                        order = None
                 exp_items.append((eid, order))
 
         # Validate referenced experiences before creating description
@@ -1072,16 +1447,111 @@ class DescriptionViewSet(BaseSAViewSet):
         # Populate join table with optional per-link order
         for eid, order in exp_items:
             link = ExperienceDescription(
-                experience_id=eid, description_id=desc.id, order=order
+                experience_id=eid, description_id=desc.id, order=(order if order is not None else 0)
             )
             session.add(link)
         session.commit()
+
+        # Ensure relationships reflect the new joins
+        session.expire(desc, ["experiences"])
 
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included([desc], include_rels)
         return Response(payload, status=status.HTTP_201_CREATED)
+
+    def _upsert(self, request, pk, partial=False):
+        session = self.get_session()
+        desc = self.model.get(int(pk))
+        if not desc:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)  # handles 'content'
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update scalar attributes
+        for k, v in attrs.items():
+            setattr(desc, k, v)
+        session.add(desc)
+        session.commit()
+
+        # Handle experiences relationship and per-link 'order'
+        data = request.data if isinstance(request.data, dict) else {}
+        node = (data.get("data") or {})
+        relationships = node.get("relationships") or {}
+        attrs_node = node.get("attributes") or {}
+        global_order = attrs_node.get("order")
+
+        exp_rel = relationships.get("experiences") or relationships.get("experience") or {}
+        if isinstance(exp_rel, dict):
+            d = exp_rel.get("data")
+            items = d if isinstance(d, list) else ([d] if isinstance(d, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                rid = it.get("id")
+                if rid is None:
+                    continue
+                try:
+                    eid = int(rid)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": f"Invalid experience id: {rid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if Experience.get(eid) is None:
+                    return Response(
+                        {"errors": [{"detail": f"Invalid experience ID: {eid}"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                # Determine order: meta.order takes precedence; fallback to attributes.order
+                order_val = None
+                meta = it.get("meta")
+                if isinstance(meta, dict) and "order" in meta:
+                    try:
+                        order_val = int(meta.get("order"))
+                    except (TypeError, ValueError):
+                        order_val = None
+                if order_val is None and global_order is not None:
+                    try:
+                        order_val = int(global_order)
+                    except (TypeError, ValueError):
+                        order_val = None
+
+                link = (
+                    session.query(ExperienceDescription)
+                    .filter_by(experience_id=eid, description_id=desc.id)
+                    .first()
+                )
+                if not link:
+                    session.add(
+                        ExperienceDescription(
+                            experience_id=eid,
+                            description_id=desc.id,
+                            order=(order_val if order_val is not None else 0),
+                        )
+                    )
+                else:
+                    if order_val is not None:
+                        link.order = order_val
+                    session.add(link)
+            session.commit()
+
+        try:
+            session.expire(desc, ["experiences"])
+        except Exception:
+            pass
+
+        payload = {"data": ser.to_resource(desc)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([desc], include_rels)
+        return Response(payload)
 
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
