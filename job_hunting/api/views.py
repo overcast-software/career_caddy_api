@@ -65,10 +65,26 @@ class BaseSAViewSet(viewsets.ViewSet):
         return self.serializer_class()
 
     def _parse_include(self, request):
+        raw = []
         inc = request.query_params.get("include")
-        if not inc:
+        incs = request.query_params.get("includes")
+        if inc:
+            raw.append(str(inc))
+        if incs and incs != inc:
+            raw.append(str(incs))
+        if not raw:
             return []
-        return [s.strip() for s in str(inc).split(",") if s and s.strip()]
+        parts = []
+        for chunk in raw:
+            parts.extend([s.strip() for s in chunk.split(",") if s and s.strip()])
+        # de-duplicate while preserving order
+        seen = set()
+        out = []
+        for p in parts:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
 
     def _build_included(self, objs, include_rels):
         included = []
@@ -109,6 +125,28 @@ class BaseSAViewSet(viewsets.ViewSet):
                         continue
                     seen.add(key)
                     included.append(rel_ser.to_resource(t))
+
+                    # Auto-include children of experience (descriptions and company)
+                    if rel_type == "experience":
+                        exp_child_ser = ExperienceSerializer()
+                        if hasattr(exp_child_ser, "set_parent_context"):
+                            exp_child_ser.set_parent_context("experience", t.id, None)
+                        for child_rel in ("descriptions", "company"):
+                            c_type, c_targets = exp_child_ser.get_related(t, child_rel)
+                            if not c_type:
+                                continue
+                            c_ser_cls = TYPE_TO_SERIALIZER.get(c_type)
+                            if not c_ser_cls:
+                                continue
+                            c_ser = c_ser_cls()
+                            if hasattr(c_ser, "set_parent_context"):
+                                c_ser.set_parent_context("experience", t.id, child_rel)
+                            for c in c_targets:
+                                c_key = (c_type, str(c.id))
+                                if c_key in seen:
+                                    continue
+                                seen.add(c_key)
+                                included.append(c_ser.to_resource(c))
         return included
 
     def paginate(self, items):
@@ -387,14 +425,29 @@ class ResumeViewSet(BaseSAViewSet):
     model = Resume
     serializer_class = ResumeSerializer
 
+    def list(self, request):
+        session = self.get_session()
+        items = session.query(self.model).all()
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        # Default to include all resume relationships if none specified
+        ser_rels = list(getattr(ser, "relationships", {}).keys())
+        include_rels = self._parse_include(request) or ser_rels
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels)
+        return Response(payload)
+
     def retrieve(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
-        # Default to include summaries if none specified
-        include_rels = self._parse_include(request) or ["summaries"]
+        # Default to include all resume relationships if none specified
+        ser_rels = list(getattr(ser, "relationships", {}).keys())
+        include_rels = self._parse_include(request) or ser_rels
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels)
         return Response(payload)
@@ -848,10 +901,7 @@ class ResumeViewSet(BaseSAViewSet):
         data = [ser.to_resource(s) for s in items]
 
         # Build included only when ?include=... is provided
-        inc_param = request.query_params.get("include")
-        include_rels = (
-            [s.strip() for s in inc_param.split(",") if s.strip()] if inc_param else []
-        )
+        include_rels = self._parse_include(request)
 
         included = []
         if include_rels:
@@ -936,10 +986,7 @@ class ResumeViewSet(BaseSAViewSet):
         data = [ser.to_resource(e) for e in items]
 
         # Build included only when ?include=... is provided
-        inc_param = request.query_params.get("include")
-        include_rels = (
-            [s.strip() for s in inc_param.split(",") if s.strip()] if inc_param else []
-        )
+        include_rels = self._parse_include(request)
 
         included = []
         if include_rels:
