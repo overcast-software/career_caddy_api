@@ -17,3 +17,23 @@ class ResumeSummaries(BaseModel):
     # Relationships
     resume = relationship("Resume", back_populates="resume_summaries")
     summary = relationship("Summary", back_populates="resume_summaries")
+
+    @classmethod
+    def ensure_single_active_for_resume(cls, resume_id, session=None):
+        session = session or cls.get_session()
+        try:
+            rid = int(resume_id)
+        except (TypeError, ValueError):
+            return
+        links = session.query(cls).filter_by(resume_id=rid).all()
+        if not links:
+            return
+        actives = [l for l in links if bool(getattr(l, "active", False))]
+        if len(actives) == 1:
+            return
+        if len(actives) == 0:
+            keep_id = max(l.id for l in links)
+        else:
+            keep_id = max(l.id for l in actives)
+        session.query(cls).filter_by(resume_id=rid).update({cls.active: False})
+        session.query(cls).filter_by(id=keep_id).update({cls.active: True})

@@ -13,3 +13,4 @@ setuptools>=70.0
 markdownify
 sqlalchemy
 dateparser
+python-docx>=0.8.11

@@ -1,5 +1,6 @@
 from jinja2 import Environment, FileSystemLoader
 from job_hunting.lib.models.cover_letter import CoverLetter
+from job_hunting.lib.services.db_export_service import DbExportService
 
 
 class CoverLetterService:
@@ -11,11 +12,13 @@ class CoverLetterService:
     def generate_cover_letter(self):
         env = Environment(loader=FileSystemLoader("templates"))
         tmpl = env.get_template("cover_letter_prompt.j2")
+        exporter = DbExportService()
+        resume_markdown = exporter.resume_markdown_export(self.resume)
         prompt = tmpl.render(
             job_title=self.job_post.title,
-            company_name=self.job_post.company.name,
+            company_name=getattr(self.job_post.company, "name", ""),
             job_description=self.job_post.description,
-            resume=self.resume.content,
+            resume=resume_markdown,
         )
 
         completion = self.ai_client.chat.completions.create(

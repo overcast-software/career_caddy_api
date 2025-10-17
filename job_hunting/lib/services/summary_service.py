@@ -1,5 +1,6 @@
 from job_hunting.lib.models import JobPost, Resume, Summary
 from jinja2 import Environment, FileSystemLoader
+from .db_export_service import DbExportService
 
 
 class SummaryService:
@@ -11,9 +12,13 @@ class SummaryService:
         self.ai_client = ai_client
 
     def generate_summary(self) -> Summary:
+        exporter = DbExportService()
+        resume_markdown = exporter.resume_markdown_export(self.resume)
+
         template = self.env.get_template("summary_service_prompt.j2")
+
         prompt = template.render(
-            job_description=self.job.description, resume=self.resume.content
+            job_description=self.job.description, resume=resume_markdown
         )
         response = self.ai_client.chat.completions.create(
             model="gpt-5",
@@ -31,7 +36,6 @@ class SummaryService:
         )
         content = response.choices[0].message.content.strip()
         new_summary = Summary(
-            resume_id=self.resume.id,
             job_post_id=self.job.id,
             user_id=self.resume.user_id,
             content=content,
