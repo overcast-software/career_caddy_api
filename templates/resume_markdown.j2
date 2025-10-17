@@ -1,0 +1,32 @@
+# {{ resume.user.name }}
+## {{ resume.title }}
+Email: {{ resume.user.email }}
+
+{% if resume.active_skill %}
+### Skills
+- {{ resume.active_skill }}
+{% endif %}
+
+### Experience
+{% for experience in resume.experiences %}
+#### {{ experience.title }}
+- **Company:** {{ experience.company.name }}
+  * Description:
+    {% for description in experience.descriptions %}
+    - {{ description.content }}
+    {% endfor %}
+{% endfor %}
+
+### Certifications
+{% for cert in resume.certifications %}
+- {{ cert.title }}{% if cert.issuer %} ({{ cert.issuer }}){% endif %}
+{% endfor %}
+
+### Education
+{% for edu in resume.educations %}
+- **Degree:** {{ edu.degree }}
+- **Institution:** {{ edu.institution }}
+- **Major:** {{ edu.major }}
+- **Minor:** {{ edu.minor }}
+- **Issued Date:** {{ edu.issue_date }}
+{% endfor %}

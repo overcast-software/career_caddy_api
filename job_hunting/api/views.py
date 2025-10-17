@@ -12,6 +12,7 @@ from job_hunting.lib.ai_client import ai_client
 from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.lib.services.cover_letter_service import CoverLetterService
 from job_hunting.lib.services.generic_service import GenericService
+from job_hunting.lib.services.db_export_service import DbExportService
 
 from job_hunting.lib.models import (
     User,
@@ -1098,11 +1099,15 @@ class ScoreViewSet(BaseSAViewSet):
         jp = JobPost.get(job_post_id)
         resume = Resume.get(resume_id)
 
+        # Export resume to markdown for improved scoring context
+        exporter = DbExportService()
+        resume_markdown = exporter.resume_markdown_export(resume)
+
         myScore, is_created = Score.first_or_initialize(
             job_post_id=job_post_id, resume_id=resume_id, user_id=user_id
         )
 
-        evaluation = myJobScorer.score_job_match(jp.description, resume.content)
+        evaluation = myJobScorer.score_job_match(jp.description, resume_markdown)
         score_value, explanation = self._parse_eval(evaluation)
         myScore.explanation = explanation
         myScore.score = score_value
