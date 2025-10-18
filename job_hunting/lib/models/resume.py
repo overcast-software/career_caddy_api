@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, Text, ForeignKey, String
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from .base import BaseModel, Base
 
 
 class Resume(BaseModel):
@@ -20,15 +20,22 @@ class Resume(BaseModel):
         secondary="resume_summaries",
         back_populates="resumes",
         overlaps="resume_summaries,summary",
+        passive_deletes=True,
     )
 
-    resume_summaries = relationship("ResumeSummaries", back_populates="resume")
+    resume_summaries = relationship(
+        "ResumeSummaries",
+        back_populates="resume",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     experiences = relationship(
         "Experience",
         secondary="resume_experience",
         back_populates="resumes",
         overlaps="experience,resume",
+        order_by=lambda: Base.metadata.tables["resume_experience"].c.order,
     )
 
     certifications = relationship(
@@ -41,6 +48,19 @@ class Resume(BaseModel):
         "Education",
         secondary="resume_education",
         back_populates="resumes",
+    )
+
+    skills = relationship(
+        "Skill",
+        secondary="resume_skill",
+        back_populates="resumes",
+    )
+
+    resume_skills = relationship(
+        "ResumeSkill",
+        back_populates="resume",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     @classmethod

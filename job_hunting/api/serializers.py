@@ -17,6 +17,8 @@ from job_hunting.lib.models import (
     Certification,
     Description,
     ExperienceDescription,
+    Skill,
+    ResumeSkill,
 )
 
 
@@ -193,6 +195,7 @@ class ResumeSerializer(BaseSASerializer):
             "type": "certification",
             "uselist": True,
         },
+        "skills": {"attr": "skills", "type": "skill", "uselist": True},
     }
     relationship_fks = {"user": "user_id"}
 
@@ -510,6 +513,35 @@ class DescriptionSerializer(BaseSASerializer):
         return res
 
 
+class SkillSerializer(BaseSASerializer):
+    type = "skill"
+    model = Skill
+    attributes = ["text"]
+    relationships = {
+        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
+    }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # If included under a resume, expose per-link 'active' from resume_skill join
+        try:
+            ctx = getattr(self, "_parent_context", None)
+            if ctx and ctx.get("parent_type") == "resume":
+                resume_id = ctx.get("parent_id")
+                if resume_id:
+                    session = self.model.get_session()
+                    link = (
+                        session.query(ResumeSkill)
+                        .filter_by(resume_id=int(resume_id), skill_id=obj.id)
+                        .first()
+                    )
+                    if link and hasattr(link, "active"):
+                        res.setdefault("attributes", {})["active"] = bool(link.active)
+        except Exception:
+            pass
+        return res
+
+
 TYPE_TO_SERIALIZER = {
     "user": UserSerializer,
     "resume": ResumeSerializer,
@@ -524,4 +556,5 @@ TYPE_TO_SERIALIZER = {
     "education": EducationSerializer,
     "certification": CertificationSerializer,
     "description": DescriptionSerializer,
+    "skill": SkillSerializer,
 }

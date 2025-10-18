@@ -15,6 +15,12 @@ class Summary(BaseModel):
         secondary="resume_summaries",
         back_populates="summaries",
         overlaps="resume_summaries,resume",
+        passive_deletes=True,
     )  # many-to-many via resume_summaries
     user = relationship("User", back_populates="summaries")
-    resume_summaries = relationship("ResumeSummaries", back_populates="summary")
+    resume_summaries = relationship(
+        "ResumeSummaries",
+        back_populates="summary",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

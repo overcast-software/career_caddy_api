@@ -34,6 +34,8 @@ from job_hunting.lib.models import (
     ResumeCertification,
     ResumeSummaries,
     ResumeExperience,
+    Skill,
+    ResumeSkill,
 )
 from .serializers import (
     UserSerializer,
@@ -360,7 +362,7 @@ class SummaryViewSet(BaseSAViewSet):
         session = self.get_session()
         # Deactivate existing links, then create new active link
         session.query(ResumeSummaries).filter_by(resume_id=resume.id).update(
-            {ResumeSummaries.active: False}
+            {ResumeSummaries.active: False}, synchronize_session=False
         )
         session.add(
             ResumeSummaries(resume_id=resume.id, summary_id=summary.id, active=True)
@@ -499,7 +501,7 @@ class ResumeViewSet(BaseSAViewSet):
                 session.query(ResumeSummaries).filter(
                     ResumeSummaries.resume_id == obj.id,
                     ResumeSummaries.id != active_link.id,
-                ).update({ResumeSummaries.active: False})
+                ).update({ResumeSummaries.active: False}, synchronize_session=False)
                 active_link.active = True
                 session.add(active_link)
                 session.commit()
@@ -512,7 +514,7 @@ class ResumeViewSet(BaseSAViewSet):
                 )
                 sm.save()
                 session.query(ResumeSummaries).filter_by(resume_id=obj.id).update(
-                    {ResumeSummaries.active: False}
+                    {ResumeSummaries.active: False}, synchronize_session=False
                 )
                 session.add(
                     ResumeSummaries(resume_id=obj.id, summary_id=sm.id, active=True)
@@ -738,6 +740,75 @@ class ResumeViewSet(BaseSAViewSet):
                     ResumeCertification.certification_id.in_(list(to_remove)),
                 ).delete(synchronize_session=False)
 
+        # Skills: reconcile join set if provided
+        skills_in = node.get("skills") or data.get("skills")
+        if skills_in is not None:
+            desired_active_by_id = {}
+            invalid = []
+            for item in skills_in or []:
+                if not isinstance(item, dict):
+                    continue
+                s_node = (item.get("data") or item) or {}
+                sid = _int_or_none(s_node.get("id"))
+                skill = None
+                if sid is not None:
+                    skill = Skill.get(sid)
+                    if not skill:
+                        invalid.append(sid)
+                        continue
+                else:
+                    s_attrs = s_node.get("attributes") or {}
+                    text = s_attrs.get("text") or s_node.get("text")
+                    if not text:
+                        continue
+                    # Create or find by text
+                    skill, _ = Skill.first_or_create(session=session, text=str(text).strip())
+
+                # Determine desired active flag (default True)
+                active_val = (s_node.get("attributes") or {}).get("active")
+                active_val = bool(active_val) if active_val is not None else True
+                desired_active_by_id[skill.id] = active_val
+
+            if invalid:
+                return Response(
+                    {"errors": [{"detail": f"Invalid skill ID(s): {', '.join(map(str, invalid))}"}]},
+                    status=400,
+                )
+
+            existing_links = session.query(ResumeSkill).filter_by(resume_id=obj.id).all()
+            existing_ids = {l.skill_id for l in existing_links}
+            desired_ids = set(desired_active_by_id.keys())
+
+            to_add = desired_ids - existing_ids
+            to_remove = existing_ids - desired_ids
+            to_update = desired_ids & existing_ids
+
+            # Remove undesired links
+            if to_remove:
+                session.query(ResumeSkill).filter(
+                    ResumeSkill.resume_id == obj.id,
+                    ResumeSkill.skill_id.in_(list(to_remove)),
+                ).delete(synchronize_session=False)
+
+            # Add missing links
+            for sid in to_add:
+                ResumeSkill.first_or_create(
+                    session=session,
+                    resume_id=obj.id,
+                    skill_id=sid,
+                    defaults={"active": desired_active_by_id[sid]},
+                )
+
+            # Update 'active' where needed
+            for link in existing_links:
+                if link.skill_id in to_update:
+                    desired_active = desired_active_by_id[link.skill_id]
+                    if bool(link.active) != bool(desired_active):
+                        link.active = bool(desired_active)
+                        session.add(link)
+
+            session.commit()
+
         # Summaries: reconcile join set if provided (preserve current active if still present)
         summaries_in = node.get("summaries") or data.get("summaries")
         if summaries_in is not None:
@@ -794,10 +865,10 @@ class ResumeViewSet(BaseSAViewSet):
                     keep_sid = active_remaining[0]
                     session.query(ResumeSummaries).filter(
                         ResumeSummaries.resume_id == obj.id
-                    ).update({ResumeSummaries.active: False})
+                    ).update({ResumeSummaries.active: False}, synchronize_session=False)
                     session.query(ResumeSummaries).filter_by(
                         resume_id=obj.id, summary_id=keep_sid
-                    ).update({ResumeSummaries.active: True})
+                    ).update({ResumeSummaries.active: True}, synchronize_session=False)
 
         # Final commit and refresh relationships for response
         session.commit()
@@ -806,7 +877,7 @@ class ResumeViewSet(BaseSAViewSet):
         session.commit()
         try:
             session.expire(
-                obj, ["experiences", "educations", "certifications", "summaries"]
+                obj, ["experiences", "educations", "certifications", "summaries", "skills"]
             )
         except Exception:
             pass
@@ -1136,6 +1207,34 @@ class ResumeViewSet(BaseSAViewSet):
             )
             session.commit()
 
+        # Upsert Skills and link
+        skills_in = node.get("skills") or data.get("skills") or []
+        for item in skills_in or []:
+            if not isinstance(item, dict):
+                continue
+            s_node = (item.get("data") or item) or {}
+            # Resolve or create skill
+            skill = None
+            sid = _int_or_none(s_node.get("id"))
+            if sid:
+                skill = Skill.get(sid)
+            if skill is None:
+                s_attrs = s_node.get("attributes") or {}
+                text = s_attrs.get("text") or s_node.get("text")
+                if not text:
+                    continue  # ignore invalid entries
+                skill, _ = Skill.first_or_create(session=session, text=str(text).strip())
+            # Determine 'active' (default True)
+            active_val = (s_node.get("attributes") or {}).get("active")
+            active_val = bool(active_val) if active_val is not None else True
+            ResumeSkill.first_or_create(
+                session=session,
+                resume_id=resume.id,
+                skill_id=skill.id,
+                defaults={"active": active_val},
+            )
+        session.commit()
+
         # Upsert Summaries and link
         active_set = False
         for item in summaries_in or []:
@@ -1233,7 +1332,7 @@ class ResumeViewSet(BaseSAViewSet):
         # Refresh relationships so response includes all links
         try:
             session.expire(
-                resume, ["experiences", "educations", "certifications", "summaries"]
+                resume, ["experiences", "educations", "certifications", "summaries", "skills"]
             )
         except Exception:
             pass
@@ -1336,7 +1435,7 @@ class ResumeViewSet(BaseSAViewSet):
 
             session = self.get_session()
             session.query(ResumeSummaries).filter_by(resume_id=obj.id).update(
-                {ResumeSummaries.active: False}
+                {ResumeSummaries.active: False}, synchronize_session=False
             )
             session.add(
                 ResumeSummaries(resume_id=obj.id, summary_id=summary.id, active=True)
@@ -1694,7 +1793,7 @@ class JobPostViewSet(BaseSAViewSet):
 
             session = self.get_session()
             session.query(ResumeSummaries).filter_by(resume_id=resume.id).update(
-                {ResumeSummaries.active: False}
+                {ResumeSummaries.active: False}, synchronize_session=False
             )
             session.add(
                 ResumeSummaries(resume_id=resume.id, summary_id=summary.id, active=True)

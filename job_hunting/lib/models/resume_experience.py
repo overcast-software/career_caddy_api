@@ -8,6 +8,7 @@ class ResumeExperience(BaseModel):
     id = Column(Integer, primary_key=True, autoincrement=True)
     resume_id = Column(Integer, ForeignKey("resume.id", ondelete="CASCADE"), nullable=False)
     experience_id = Column(Integer, ForeignKey("experience.id", ondelete="CASCADE"), nullable=False)
+    order = Column(Integer, nullable=False, default=0)
 
     # Optional relationships (not required for the secondary mapping)
     resume = relationship("Resume")

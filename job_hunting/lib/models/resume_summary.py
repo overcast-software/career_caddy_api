@@ -18,6 +18,8 @@ class ResumeSummaries(BaseModel):
     resume = relationship("Resume", back_populates="resume_summaries")
     summary = relationship("Summary", back_populates="resume_summaries")
 
+    __mapper_args__ = {"confirm_deleted_rows": False}
+
     @classmethod
     def ensure_single_active_for_resume(cls, resume_id, session=None):
         session = session or cls.get_session()
@@ -35,5 +37,9 @@ class ResumeSummaries(BaseModel):
             keep_id = max(l.id for l in links)
         else:
             keep_id = max(l.id for l in actives)
-        session.query(cls).filter_by(resume_id=rid).update({cls.active: False})
-        session.query(cls).filter_by(id=keep_id).update({cls.active: True})
+        session.query(cls).filter_by(resume_id=rid).update(
+            {cls.active: False}, synchronize_session=False
+        )
+        session.query(cls).filter_by(id=keep_id).update(
+            {cls.active: True}, synchronize_session=False
+        )
