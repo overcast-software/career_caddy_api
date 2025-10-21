@@ -12,6 +12,7 @@ class Experience(BaseModel):
     end_date = Column(Date, nullable=True)
     content = Column(Text, nullable=True)
     location = Column(String, nullable=True)
+    summary = Column(String, nullable=False)
     company_id = Column(Integer, ForeignKey("company.id"), nullable=False)
     # Many-to-many with Resume via resume_experience
     resumes = relationship(
@@ -41,6 +42,7 @@ class Experience(BaseModel):
         # Basic fields
         exp_dict["title"] = getattr(self, "title", "") or ""
         exp_dict["location"] = getattr(self, "location", "") or ""
+        exp_dict["summary"] = self.summary
         
         # Dates
         start_date = getattr(self, "start_date", None)
