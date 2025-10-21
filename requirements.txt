@@ -14,3 +14,4 @@ markdownify
 sqlalchemy
 dateparser
 python-docx>=0.8.11
+docxtpl>=0.16

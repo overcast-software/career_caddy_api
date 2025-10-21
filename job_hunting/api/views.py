@@ -14,6 +14,7 @@ from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.lib.services.cover_letter_service import CoverLetterService
 from job_hunting.lib.services.generic_service import GenericService
 from job_hunting.lib.services.db_export_service import DbExportService
+from job_hunting.lib.services.resume_export_service import ResumeExportService
 
 from job_hunting.lib.models import (
     User,
@@ -1602,6 +1603,86 @@ class ResumeViewSet(BaseSAViewSet):
         ser.set_parent_context("resume", obj.id, "educations")
         data = [ser.to_resource(e) for e in (obj.educations or [])]
         return Response({"data": data})
+
+    @action(detail=True, methods=["get"], url_path="export")
+    def export(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        
+        format_param = request.query_params.get("format", "docx").lower()
+        template_path_param = request.query_params.get("template_path")
+        
+        if format_param == "md":
+            # Export as markdown
+            exporter = DbExportService()
+            markdown_content = exporter.resume_markdown_export(obj)
+            
+            # Generate filename
+            import re
+            filename_parts = ["resume", str(obj.id)]
+            try:
+                if getattr(obj, "user", None) and getattr(obj.user, "name", None):
+                    name = str(obj.user.name)
+                    sanitized_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name)
+                    if sanitized_name:
+                        filename_parts.append(sanitized_name)
+                if getattr(obj, "title", None):
+                    title = str(obj.title)
+                    sanitized_title = re.sub(r"[^A-Za-z0-9_-]+", "-", title)
+                    if sanitized_title:
+                        filename_parts.append(sanitized_title)
+            except Exception:
+                pass
+            filename = "-".join([p for p in filename_parts if p]) + ".md"
+            
+            response = HttpResponse(
+                markdown_content.encode('utf-8'),
+                content_type="text/markdown; charset=utf-8"
+            )
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+        
+        else:
+            # Export as DOCX (default)
+            try:
+                svc = ResumeExportService()
+                data = svc.render_docx(obj, template_path=template_path_param)
+            except ImportError:
+                return Response(
+                    {"errors": [{"detail": "DOCX export requires 'docxtpl' to be installed"}]},
+                    status=status.HTTP_501_NOT_IMPLEMENTED,
+                )
+            except Exception as e:
+                return Response(
+                    {"errors": [{"detail": str(e)}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            
+            # Generate filename
+            import re
+            filename_parts = ["resume", str(obj.id)]
+            try:
+                if getattr(obj, "user", None) and getattr(obj.user, "name", None):
+                    name = str(obj.user.name)
+                    sanitized_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name)
+                    if sanitized_name:
+                        filename_parts.append(sanitized_name)
+                if getattr(obj, "title", None):
+                    title = str(obj.title)
+                    sanitized_title = re.sub(r"[^A-Za-z0-9_-]+", "-", title)
+                    if sanitized_title:
+                        filename_parts.append(sanitized_title)
+            except Exception:
+                pass
+            filename = "-".join([p for p in filename_parts if p]) + ".docx"
+            
+            response = HttpResponse(
+                data,
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
 
 
 class ScoreViewSet(BaseSAViewSet):

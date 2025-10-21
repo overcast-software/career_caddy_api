@@ -1,6 +1,10 @@
+from typing import Optional, TYPE_CHECKING
 from sqlalchemy import Column, Integer, Text, ForeignKey, String
 from sqlalchemy.orm import relationship
 from .base import BaseModel, Base
+
+if TYPE_CHECKING:
+    from .summary import Summary
 
 
 class Resume(BaseModel):
@@ -183,3 +187,88 @@ class Resume(BaseModel):
             pass
 
         return "\n\n".join([p for p in parts if p])
+
+    def active_summary(self) -> Optional['Summary']:
+        """Return the linked Summary where ResumeSummaries.active == True if present; 
+        otherwise the first linked summary; otherwise None."""
+        try:
+            # Find active summary
+            active_link = next(
+                (l for l in (getattr(self, "resume_summaries", []) or []) 
+                 if getattr(l, "active", False)),
+                None,
+            )
+            if active_link and getattr(active_link, "summary", None):
+                return active_link.summary
+            
+            # Fallback to first linked summary if no active one
+            if getattr(self, "resume_summaries", None):
+                first_link = next(iter(self.resume_summaries), None)
+                if first_link and getattr(first_link, "summary", None):
+                    return first_link.summary
+        except Exception:
+            pass
+        return None
+
+    def active_summary_content(self) -> str:
+        """Return content from active_summary() or empty string."""
+        summary = self.active_summary()
+        if summary:
+            return getattr(summary, "content", "") or ""
+        return ""
+
+    def to_export_context(self) -> dict:
+        """Build and return the template context dict for export."""
+        context = {}
+        
+        # Header
+        header = {}
+        try:
+            header["name"] = getattr(self.user, "name", "") if getattr(self, "user", None) else ""
+        except Exception:
+            header["name"] = ""
+        header["title"] = getattr(self, "title", "") or ""
+        context["header"] = header
+        
+        # Summary
+        context["summary"] = self.active_summary_content().strip()
+        
+        # Experiences
+        experiences = []
+        try:
+            for exp in (getattr(self, "experiences", []) or []):
+                experiences.append(exp.to_export_dict())
+        except Exception:
+            pass
+        context["experiences"] = experiences
+        
+        # Educations
+        educations = []
+        try:
+            for edu in (getattr(self, "educations", []) or []):
+                educations.append(edu.to_export_dict())
+        except Exception:
+            pass
+        context["educations"] = educations
+        
+        # Certifications
+        certifications = []
+        try:
+            for cert in (getattr(self, "certifications", []) or []):
+                certifications.append(cert.to_export_dict())
+        except Exception:
+            pass
+        context["certifications"] = certifications
+        
+        # Skills
+        skills = []
+        try:
+            for skill in (getattr(self, "skills", []) or []):
+                skill_value = skill.to_export_value()
+                if skill_value:
+                    skills.append(skill_value)
+        except Exception:
+            pass
+        context["skills"] = skills
+        
+        return context

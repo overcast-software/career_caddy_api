@@ -19,3 +19,10 @@ class Skill(BaseModel):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    def to_export_value(self) -> str:
+        """Return the skill text for export, or empty string if not meaningful."""
+        text = getattr(self, "text", None)
+        if text:
+            return str(text)
+        return str(self) if str(self) and str(self) != "None" else ""
