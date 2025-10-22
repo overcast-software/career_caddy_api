@@ -233,6 +233,7 @@ class JobPostSerializer(BaseSASerializer):
         "posted_date",
         "extraction_date",
         "created_at",
+        "link",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},

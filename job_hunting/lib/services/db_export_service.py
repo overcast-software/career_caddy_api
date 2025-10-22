@@ -1,15 +1,82 @@
 from jinja2 import Environment, FileSystemLoader
-from job_hunting.lib.models import Resume
+from job_hunting.lib.models import Resume, Skill, ResumeSkill
 
 
 class DbExportService:
     def __init__(self):
         self.env = Environment(loader=FileSystemLoader("templates"))
 
+    def _build_skills_list(self, resume):
+        """Build a normalized list of skills for the resume, preferring active skills."""
+        skills = []
+        try:
+            session = Resume.get_session()
+            links = session.query(ResumeSkill).filter_by(resume_id=resume.id).all()
+            
+            # Check if any links have active attribute set
+            has_active_flags = any(getattr(link, 'active', None) is not None for link in links)
+            
+            # Filter to active only if active flags exist, otherwise include all
+            if has_active_flags:
+                links = [link for link in links if getattr(link, 'active', False)]
+            
+            seen = set()
+            for link in links:
+                skill = None
+                try:
+                    skill = getattr(link, 'skill', None)
+                    if skill is None:
+                        skill = Skill.get(link.skill_id)
+                except Exception:
+                    continue
+                
+                if skill is None:
+                    continue
+                
+                # Get display value
+                try:
+                    if hasattr(skill, 'to_export_value') and callable(skill.to_export_value):
+                        value = skill.to_export_value()
+                    else:
+                        value = getattr(skill, 'text', '')
+                except Exception:
+                    value = getattr(skill, 'text', '')
+                
+                # Normalize and deduplicate
+                value = str(value).strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    skills.append(value)
+                    
+        except Exception:
+            # Fallback to resume.skills if join query fails
+            try:
+                resume_skills = getattr(resume, 'skills', []) or []
+                seen = set()
+                for skill in resume_skills:
+                    try:
+                        if hasattr(skill, 'to_export_value') and callable(skill.to_export_value):
+                            value = skill.to_export_value()
+                        else:
+                            value = getattr(skill, 'text', '')
+                    except Exception:
+                        value = getattr(skill, 'text', '')
+                    
+                    value = str(value).strip()
+                    if value and value not in seen:
+                        seen.add(value)
+                        skills.append(value)
+            except Exception:
+                pass
+        
+        return skills
+
     def resume_markdown_export(self, resume: Resume) -> str:
+        skills = self._build_skills_list(resume)
+        
         try:
             template = self.env.get_template("resume_markdown.j2")
-            return template.render(resume=resume).strip()
+            return template.render(resume=resume, skills=skills).strip()
         except Exception:
             # Fallback to programmatic builder
             pass

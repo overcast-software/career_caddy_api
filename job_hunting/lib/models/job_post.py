@@ -13,7 +13,11 @@ class JobPost(BaseModel):
     title = Column(String)
     company_id = Column(Integer, ForeignKey("company.id"))
     posted_date = Column(DateTime, default=datetime.utcnow)
-    extraction_date = Column(DateTime)
+    extraction_date = Column(DateTime)  # created_at is sufficient
+    # link for job post.
+    # wanted to get from scrape but sometimes
+    # it's not worth scraping.
+    link = Column(String)
 
     # Relationships
     company = relationship("Company", back_populates="job_posts")
