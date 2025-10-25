@@ -1,7 +1,10 @@
 import asyncio
 import re
 import dateparser
-from django.http import HttpResponse
+import json
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.contrib.auth import get_user_model
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
@@ -17,7 +20,6 @@ from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.resume_export_service import ResumeExportService
 
 from job_hunting.lib.models import (
-    User,
     Resume,
     Score,
     JobPost,
@@ -39,7 +41,7 @@ from job_hunting.lib.models import (
     ResumeSkill,
 )
 from .serializers import (
-    UserSerializer,
+    DjangoUserSerializer,
     ResumeSerializer,
     ScoreSerializer,
     JobPostSerializer,
@@ -55,6 +57,56 @@ from .serializers import (
     TYPE_TO_SERIALIZER,
     _parse_date,
 )
+
+
+@csrf_exempt
+def healthcheck(request):
+    # Compute bootstrap gate
+    try:
+        User = get_user_model()
+        user_count = User.objects.count()
+    except Exception:
+        # If Django ORM isn't initialized yet, still report ok but unknown gate
+        user_count = None
+
+    if request.method == "GET":
+        return JsonResponse({"status": "ok", "bootstrap_open": (user_count == 0)})
+
+    if request.method == "POST":
+        # Close bootstrap once any user exists
+        if user_count and user_count > 0:
+            return JsonResponse({"error": "bootstrap closed"}, status=403)
+
+        # Accept both plain JSON and JSON:API envelopes
+        try:
+            body = (request.body or b"").decode("utf-8")
+            payload = json.loads(body) if body else {}
+        except Exception:
+            payload = {}
+
+        attrs = payload.get("data", {}).get("attributes", {}) if isinstance(payload.get("data"), dict) else payload
+        username = (attrs.get("username") or attrs.get("name") or "admin").strip()
+        email = (attrs.get("email") or "").strip() or None
+        password = (attrs.get("password") or "admin").strip()
+        first_name = (attrs.get("first_name") or attrs.get("name") or "").strip()
+        last_name = (attrs.get("last_name") or "").strip()
+
+        User = get_user_model()
+        user = User.objects.create_superuser(
+            username=username,
+            email=email,
+            password=password
+        )
+        if first_name:
+            user.first_name = first_name
+        if last_name:
+            user.last_name = last_name
+        user.save()
+
+        # Close the gate implicitly because a user now exists
+        return JsonResponse({"data": DjangoUserSerializer().to_resource(user)}, status=201)
+
+    return JsonResponse({"error": "method not allowed"}, status=405)
 
 
 class BaseSAViewSet(viewsets.ViewSet):
@@ -380,52 +432,222 @@ class SummaryViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
-class UserViewSet(BaseSAViewSet):
-    model = User
-    serializer_class = UserSerializer
+class DjangoUserViewSet(viewsets.ViewSet):
+    permission_classes = [AllowAny]
+    parser_classes = [VndApiJSONParser, JSONParser]
+
+    def get_serializer(self):
+        return DjangoUserSerializer()
+
+    def _parse_include(self, request):
+        raw = []
+        inc = request.query_params.get("include")
+        incs = request.query_params.get("includes")
+        if inc:
+            raw.append(str(inc))
+        if incs and incs != inc:
+            raw.append(str(incs))
+        if not raw:
+            return []
+        parts = []
+        for chunk in raw:
+            parts.extend([s.strip() for s in chunk.split(",") if s and s.strip()])
+        # de-duplicate while preserving order
+        seen = set()
+        out = []
+        for p in parts:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    def _build_included(self, objs, include_rels):
+        included = []
+        seen = set()  # (type, id)
+        primary_ser = self.get_serializer()
+
+        for obj in objs:
+            for rel in include_rels:
+                rel_type, targets = primary_ser.get_related(obj, rel)
+                if not rel_type:
+                    continue
+                ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                if not ser_cls:
+                    continue
+                rel_ser = ser_cls()
+                for t in targets:
+                    key = (rel_type, str(t.id))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    included.append(rel_ser.to_resource(t))
+        return included
+
+    def list(self, request):
+        User = get_user_model()
+        users = User.objects.all()
+        ser = self.get_serializer()
+        data = [ser.to_resource(u) for u in users]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(users, include_rels)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(user)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([user], include_rels)
+        return Response(payload)
+
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        username = attrs.get("username")
+        password = attrs.get("password")
+        email = attrs.get("email", "")
+        first_name = attrs.get("first_name", "")
+        last_name = attrs.get("last_name", "")
+
+        if not username:
+            return Response({"errors": [{"detail": "Username is required"}]}, status=400)
+        if not password:
+            return Response({"errors": [{"detail": "Password is required"}]}, status=400)
+
+        User = get_user_model()
+        
+        # Check uniqueness
+        if User.objects.filter(username=username).exists():
+            return Response({"errors": [{"detail": "Username already exists"}]}, status=400)
+        if email and User.objects.filter(email=email).exists():
+            return Response({"errors": [{"detail": "Email already exists"}]}, status=400)
+
+        user = User(
+            username=username,
+            email=email,
+            first_name=first_name,
+            last_name=last_name
+        )
+        user.set_password(password)
+        user.save()
+
+        return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
+
+    def update(self, request, pk=None):
+        return self._upsert(request, pk, partial=False)
+
+    def partial_update(self, request, pk=None):
+        return self._upsert(request, pk, partial=True)
+
+    def _upsert(self, request, pk, partial=False):
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        # Update allowed fields
+        if "email" in attrs:
+            user.email = attrs["email"]
+        if "first_name" in attrs:
+            user.first_name = attrs["first_name"]
+        if "last_name" in attrs:
+            user.last_name = attrs["last_name"]
+        if "password" in attrs:
+            user.set_password(attrs["password"])
+
+        user.save()
+        return Response({"data": ser.to_resource(user)})
+
+    def destroy(self, request, pk=None):
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+            user.delete()
+        except (User.DoesNotExist, ValueError):
+            pass
+        return Response(status=204)
 
     @action(detail=True, methods=["get"])
     def resumes(self, request, pk=None):
-        user = self.model.get(int(pk))
-        if not user:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ResumeSerializer().to_resource(r) for r in (user.resumes or [])]
+        
+        session = Resume.get_session()
+        resumes = session.query(Resume).filter_by(user_id=user.id).all()
+        data = [ResumeSerializer().to_resource(r) for r in resumes]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
-        user = self.model.get(int(pk))
-        if not user:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ScoreSerializer().to_resource(s) for s in (user.scores or [])]
+        
+        session = Score.get_session()
+        scores = session.query(Score).filter_by(user_id=user.id).all()
+        data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"], url_path="cover-letters")
     def cover_letters(self, request, pk=None):
-        user = self.model.get(int(pk))
-        if not user:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [
-            CoverLetterSerializer().to_resource(c) for c in (user.cover_letters or [])
-        ]
+        
+        session = CoverLetter.get_session()
+        cover_letters = session.query(CoverLetter).filter_by(user_id=user.id).all()
+        data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
     def applications(self, request, pk=None):
-        user = self.model.get(int(pk))
-        if not user:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [
-            ApplicationSerializer().to_resource(a) for a in (user.applications or [])
-        ]
+        
+        session = Application.get_session()
+        applications = session.query(Application).filter_by(user_id=user.id).all()
+        data = [ApplicationSerializer().to_resource(a) for a in applications]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
     def summaries(self, request, pk=None):
-        user = self.model.get(int(pk))
-        if not user:
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [SummarySerializer().to_resource(s) for s in (user.summaries or [])]
+        
+        session = Summary.get_session()
+        summaries = session.query(Summary).filter_by(user_id=user.id).all()
+        data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
 
 
@@ -815,6 +1037,7 @@ class ResumeViewSet(BaseSAViewSet):
         if summaries_in is not None:
             desired_ids = set()
             invalid = []
+            desired_active_sid = None
             for item in summaries_in or []:
                 s_node = (item or {}).get("data") or item or {}
                 sid = _int_or_none(s_node.get("id"))
@@ -824,6 +1047,10 @@ class ResumeViewSet(BaseSAViewSet):
                     invalid.append(sid)
                 else:
                     desired_ids.add(sid)
+                    # Check for explicit active flag
+                    active_flag = (s_node.get("attributes") or {}).get("active")
+                    if active_flag is not None and active_flag:
+                        desired_active_sid = sid
             if invalid:
                 return Response(
                     {
@@ -854,22 +1081,32 @@ class ResumeViewSet(BaseSAViewSet):
                     ResumeSummaries.summary_id.in_(list(to_remove)),
                 ).delete(synchronize_session=False)
 
-            # Preserve active on the one that remains, otherwise none active
+            # Update active flag if explicitly requested, otherwise preserve existing active
             session.flush()
-            still_existing = desired_ids
-            if still_existing:
-                # If there is exactly one active that remains, re-assert it and clear others
-                active_remaining = [
-                    sid for sid in still_existing if active_by_id.get(sid)
-                ]
-                if active_remaining:
-                    keep_sid = active_remaining[0]
-                    session.query(ResumeSummaries).filter(
-                        ResumeSummaries.resume_id == obj.id
-                    ).update({ResumeSummaries.active: False}, synchronize_session=False)
-                    session.query(ResumeSummaries).filter_by(
-                        resume_id=obj.id, summary_id=keep_sid
-                    ).update({ResumeSummaries.active: True}, synchronize_session=False)
+            if desired_active_sid is not None:
+                # Set requested summary as active and deactivate all others
+                session.query(ResumeSummaries).filter(
+                    ResumeSummaries.resume_id == obj.id
+                ).update({ResumeSummaries.active: False}, synchronize_session=False)
+                session.query(ResumeSummaries).filter_by(
+                    resume_id=obj.id, summary_id=desired_active_sid
+                ).update({ResumeSummaries.active: True}, synchronize_session=False)
+            else:
+                # Preserve active on the one that remains, otherwise none active
+                still_existing = desired_ids
+                if still_existing:
+                    # If there is exactly one active that remains, re-assert it and clear others
+                    active_remaining = [
+                        sid for sid in still_existing if active_by_id.get(sid)
+                    ]
+                    if active_remaining:
+                        keep_sid = active_remaining[0]
+                        session.query(ResumeSummaries).filter(
+                            ResumeSummaries.resume_id == obj.id
+                        ).update({ResumeSummaries.active: False}, synchronize_session=False)
+                        session.query(ResumeSummaries).filter_by(
+                            resume_id=obj.id, summary_id=keep_sid
+                        ).update({ResumeSummaries.active: True}, synchronize_session=False)
 
         # Final commit and refresh relationships for response
         session.commit()
@@ -947,6 +1184,10 @@ class ResumeViewSet(BaseSAViewSet):
                 data.get("user_id") or data.get("user-id") or data.get("userId")
             )
 
+        # Default to authenticated user if no user_id provided
+        if user_id_val is None and request.user.is_authenticated:
+            user_id_val = request.user.id
+
         if user_id_val is not None:
             try:
                 user_id_int = int(user_id_val)
@@ -955,7 +1196,8 @@ class ResumeViewSet(BaseSAViewSet):
                     {"errors": [{"detail": "Invalid user ID"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            if User.get(user_id_int) is None:
+            User = get_user_model()
+            if not User.objects.filter(id=user_id_int).exists():
                 return Response(
                     {"errors": [{"detail": "Invalid user ID"}]},
                     status=status.HTTP_400_BAD_REQUEST,

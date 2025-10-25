@@ -12,6 +12,7 @@ class Skill(BaseModel):
         "Resume",
         secondary="resume_skill",
         back_populates="skills",
+        overlaps="resume_skills,resume",
     )
     resume_skills = relationship(
         "ResumeSkill",

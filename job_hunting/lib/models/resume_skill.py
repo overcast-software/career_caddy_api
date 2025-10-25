@@ -14,5 +14,5 @@ class ResumeSkill(BaseModel):
         UniqueConstraint("resume_id", "skill_id", name="uq_resume_skill_resume_id_skill_id"),
     )
 
-    resume = relationship("Resume", back_populates="resume_skills")
-    skill = relationship("Skill", back_populates="resume_skills")
+    resume = relationship("Resume", back_populates="resume_skills", overlaps="skills,resumes")
+    skill = relationship("Skill", back_populates="resume_skills", overlaps="skills,resumes")

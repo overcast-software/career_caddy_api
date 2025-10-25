@@ -1,6 +1,6 @@
 # user model
 # has username, email, salted password, id
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Boolean
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -11,6 +11,7 @@ class User(BaseModel):
     name = Column(String, nullable=True)
     email = Column(String, unique=True, nullable=True)
     phone = Column(String, unique=True)
+    is_admin = Column(Boolean, nullable=False, default=False)
 
     # Relationships
     resumes = relationship("Resume", back_populates="user")

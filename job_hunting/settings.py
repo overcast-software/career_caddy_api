@@ -1,4 +1,5 @@
 import os
+from corsheaders.defaults import default_headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,6 +61,7 @@ TEMPLATES = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
         'rest_framework.authentication.TokenAuthentication',
     ],
     'DEFAULT_RENDERER_CLASSES': [
@@ -90,6 +92,8 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:4200',
     'http://127.0.0.1:4200',
 ]
+
+CORS_ALLOW_HEADERS = list(default_headers) + ["x-user-id"]
 
 # Resume export template path
 RESUME_EXPORT_TEMPLATE = os.path.join(BASE_DIR, "templates", "resume_export.docx")

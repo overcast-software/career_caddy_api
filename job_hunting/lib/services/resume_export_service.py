@@ -11,10 +11,11 @@ class ResumeExportService:
         if self.default_template_path is None:
             try:
                 from django.conf import settings
+
                 self.default_template_path = getattr(
-                    settings, 
-                    'RESUME_EXPORT_TEMPLATE', 
-                    os.path.join(settings.BASE_DIR, "templates", "resume_export.docx")
+                    settings,
+                    "RESUME_EXPORT_TEMPLATE",
+                    os.path.join(settings.BASE_DIR, "templates", "resume_export.docx"),
                 )
             except Exception:
                 self.default_template_path = "templates/resume_export.docx"
@@ -27,17 +28,21 @@ class ResumeExportService:
             from docxtpl import DocxTemplate
         except ImportError:
             raise ImportError("DOCX export requires 'docxtpl' to be installed")
-        
+
         # Resolve template path
         path = template_path or self.default_template_path
         if not path:
             raise ValueError("No template path provided")
-        
+
         # Load template and render
         template = DocxTemplate(path)
         context = self.build_context(resume)
-        template.render(context)
-        
+
+        try:
+            template.render(context)
+        except Exception as e:
+            breakpoint()
+
         # Save to BytesIO and return bytes
         buf = BytesIO()
         template.save(buf)

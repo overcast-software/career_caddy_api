@@ -1,8 +1,8 @@
 from datetime import datetime, date
 from typing import Any, Dict, List
 import dateparser
+from django.contrib.auth import get_user_model
 from job_hunting.lib.models import (
-    User,
     Resume,
     Score,
     JobPost,
@@ -35,6 +35,26 @@ def _parse_date(val):
         return val.date() if isinstance(val, datetime) else val
     try:
         return date.fromisoformat(str(val))
+    except Exception:
+        return None
+
+
+def _parse_datetime(val):
+    if val is None or val == "":
+        return None
+    if isinstance(val, datetime):
+        # If timezone-aware, convert to UTC and make naive
+        if val.tzinfo is not None:
+            val = val.utctimetuple()
+            val = datetime(*val[:6])
+        return val
+    try:
+        dt = dateparser.parse(str(val))
+        if dt and dt.tzinfo is not None:
+            # Convert to UTC and make naive
+            dt = dt.utctimetuple()
+            dt = datetime(*dt[:6])
+        return dt
     except Exception:
         return None
 
@@ -145,25 +165,102 @@ class BaseSASerializer:
         return out
 
 
-class UserSerializer(BaseSASerializer):
+class DjangoUserSerializer:
     type = "user"
-    model = User
-    attributes = ["name", "email", "phone"]
-    relationships = {
-        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
-        "scores": {"attr": "scores", "type": "score", "uselist": True},
-        "cover-letters": {
-            "attr": "cover_letters",
-            "type": "cover-letter",
-            "uselist": True,
-        },
-        "applications": {
-            "attr": "applications",
-            "type": "application",
-            "uselist": True,
-        },
-        "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
-    }
+    
+    def accepted_types(self):
+        return {self.type, _pluralize_type(self.type)}
+    
+    def to_resource(self, obj) -> Dict[str, Any]:
+        res = {
+            "type": self.type,
+            "id": str(obj.id),
+            "attributes": {
+                "username": obj.username,
+                "email": obj.email or "",
+                "first_name": obj.first_name or "",
+                "last_name": obj.last_name or "",
+            },
+        }
+        res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
+        
+        # Add relationships structure
+        res["relationships"] = {
+            "resumes": {
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/resumes",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/resumes",
+                },
+            },
+            "scores": {
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/scores",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/scores",
+                },
+            },
+            "cover-letters": {
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/cover-letters",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/cover-letters",
+                },
+            },
+            "applications": {
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/applications",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/applications",
+                },
+            },
+            "summaries": {
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/summaries",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/summaries",
+                },
+            },
+        }
+        return res
+    
+    def get_related(self, obj, rel_name):
+        # Import here to avoid circular imports
+        from job_hunting.lib.models import Resume, Score, CoverLetter, Application, Summary
+        
+        session = Resume.get_session()  # Get SA session
+        
+        if rel_name == "resumes":
+            items = session.query(Resume).filter_by(user_id=obj.id).all()
+            return "resume", items
+        elif rel_name == "scores":
+            items = session.query(Score).filter_by(user_id=obj.id).all()
+            return "score", items
+        elif rel_name == "cover-letters":
+            items = session.query(CoverLetter).filter_by(user_id=obj.id).all()
+            return "cover-letter", items
+        elif rel_name == "applications":
+            items = session.query(Application).filter_by(user_id=obj.id).all()
+            return "application", items
+        elif rel_name == "summaries":
+            items = session.query(Summary).filter_by(user_id=obj.id).all()
+            return "summary", items
+        else:
+            return None, []
+    
+    def parse_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict) or "data" not in payload:
+            raise ValueError("JSON:API payload must contain 'data'")
+        data = payload["data"]
+        expected = self.accepted_types()
+        if data.get("type") not in expected:
+            exp_str = "', '".join(sorted(expected))
+            raise ValueError(f"JSON:API type mismatch: expected one of '{exp_str}'")
+        
+        attrs_in = data.get("attributes", {}) or {}
+        out: Dict[str, Any] = {}
+        
+        # Extract user attributes
+        for k in ["username", "email", "first_name", "last_name", "password"]:
+            if k in attrs_in:
+                out[k] = attrs_in[k]
+        
+        return out
 
 
 class ResumeSerializer(BaseSASerializer):
@@ -201,11 +298,30 @@ class ResumeSerializer(BaseSASerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, 'user_id') and obj.user_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.user_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
+                },
+            }
         # Convenience link to related summaries collection
         res.setdefault("links", {})[
             "summaries"
         ] = f"{_resource_base_path(self.type)}/{obj.id}/summaries"
         return res
+    
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.user_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
 
 
 class ScoreSerializer(BaseSASerializer):
@@ -222,6 +338,29 @@ class ScoreSerializer(BaseSASerializer):
         "job-post": "job_post_id",
         "user": "user_id",
     }
+    
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, 'user_id') and obj.user_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.user_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
+                },
+            }
+        return res
+    
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.user_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
 
 
 class JobPostSerializer(BaseSASerializer):
@@ -299,6 +438,29 @@ class CoverLetterSerializer(BaseSASerializer):
         "resume": "resume_id",
         "job-post": "job_post_id",
     }
+    
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, 'user_id') and obj.user_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.user_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
+                },
+            }
+        return res
+    
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.user_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
 
 
 class ApplicationSerializer(BaseSASerializer):
@@ -317,10 +479,48 @@ class ApplicationSerializer(BaseSASerializer):
     }
     relationship_fks = {
         "user": "user_id",
+        "users": "user_id",
         "job-post": "job_post_id",
+        "job_post": "job_post_id",
+        "job-posts": "job_post_id",
         "resume": "resume_id",
+        "resumes": "resume_id",
         "cover-letter": "cover_letter_id",
+        "cover_letter": "cover_letter_id",
+        "cover-letters": "cover_letter_id",
     }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, 'user_id') and obj.user_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.user_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
+                },
+            }
+        return res
+    
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.user_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
+
+    def parse_payload(self, payload):
+        out = super().parse_payload(payload)
+        if "applied_at" in out:
+            parsed_dt = _parse_datetime(out["applied_at"])
+            if parsed_dt is None and out["applied_at"]:
+                raise ValueError("Invalid applied_at")
+            out["applied_at"] = parsed_dt
+        return out
 
 
 class SummarySerializer(BaseSASerializer):
@@ -338,6 +538,15 @@ class SummarySerializer(BaseSASerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, 'user_id') and obj.user_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.user_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
+                },
+            }
         # If included under a resume, inject per-link 'active' from resume_summary
         try:
             ctx = getattr(self, "_parent_context", None)
@@ -355,6 +564,16 @@ class SummarySerializer(BaseSASerializer):
         except Exception:
             pass
         return res
+    
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.user_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
 
 
 class ExperienceSerializer(BaseSASerializer):
@@ -544,7 +763,7 @@ class SkillSerializer(BaseSASerializer):
 
 
 TYPE_TO_SERIALIZER = {
-    "user": UserSerializer,
+    "user": DjangoUserSerializer,
     "resume": ResumeSerializer,
     "score": ScoreSerializer,
     "job-post": JobPostSerializer,

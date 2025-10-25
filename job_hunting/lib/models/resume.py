@@ -58,6 +58,7 @@ class Resume(BaseModel):
         "Skill",
         secondary="resume_skill",
         back_populates="resumes",
+        overlaps="resume_skills,skill",
     )
 
     resume_skills = relationship(
@@ -82,7 +83,11 @@ class Resume(BaseModel):
         # Active summary (if any)
         try:
             active_link = next(
-                (l for l in (self.resume_summaries or []) if getattr(l, "active", False)),
+                (
+                    l
+                    for l in (self.resume_summaries or [])
+                    if getattr(l, "active", False)
+                ),
                 None,
             )
             if active_link and getattr(active_link, "summary", None):
@@ -95,13 +100,15 @@ class Resume(BaseModel):
         # Experiences
         try:
             exp_sections = []
-            for exp in (self.experiences or []):
+            for exp in self.experiences or []:
                 header_bits = []
                 if getattr(exp, "title", None):
                     header_bits.append(str(exp.title))
                 company_name = ""
                 try:
-                    if getattr(exp, "company", None) and getattr(exp.company, "name", None):
+                    if getattr(exp, "company", None) and getattr(
+                        exp.company, "name", None
+                    ):
                         company_name = exp.company.name
                 except Exception:
                     company_name = ""
@@ -117,13 +124,19 @@ class Resume(BaseModel):
                     date_bits.append(str(exp.end_date))
                 date_range = " - ".join(date_bits) if date_bits else ""
 
-                header = " | ".join([b for b in header_bits if b]) + (f" ({date_range})" if date_range else "")
+                header = " | ".join([b for b in header_bits if b]) + (
+                    f" ({date_range})" if date_range else ""
+                )
 
                 # Descriptions (ordered if possible)
                 lines = []
                 try:
                     if getattr(exp, "descriptions", None):
-                        lines = [d.content.strip() for d in exp.descriptions if getattr(d, "content", None)]
+                        lines = [
+                            d.content.strip()
+                            for d in exp.descriptions
+                            if getattr(d, "content", None)
+                        ]
                 except Exception:
                     lines = []
                 if not lines and getattr(exp, "content", None):
@@ -144,7 +157,7 @@ class Resume(BaseModel):
         # Education
         try:
             edu_lines = []
-            for edu in (self.educations or []):
+            for edu in self.educations or []:
                 bits = []
                 if getattr(edu, "degree", None):
                     bits.append(str(edu.degree))
@@ -170,7 +183,7 @@ class Resume(BaseModel):
         # Certifications
         try:
             cert_lines = []
-            for cert in (self.certifications or []):
+            for cert in self.certifications or []:
                 bits = []
                 if getattr(cert, "title", None):
                     bits.append(str(cert.title))
@@ -188,19 +201,22 @@ class Resume(BaseModel):
 
         return "\n\n".join([p for p in parts if p])
 
-    def active_summary(self) -> Optional['Summary']:
-        """Return the linked Summary where ResumeSummaries.active == True if present; 
+    def active_summary(self) -> Optional["Summary"]:
+        """Return the linked Summary where ResumeSummaries.active == True if present;
         otherwise the first linked summary; otherwise None."""
         try:
             # Find active summary
             active_link = next(
-                (l for l in (getattr(self, "resume_summaries", []) or []) 
-                 if getattr(l, "active", False)),
+                (
+                    l
+                    for l in (getattr(self, "resume_summaries", []) or [])
+                    if getattr(l, "active", False)
+                ),
                 None,
             )
             if active_link and getattr(active_link, "summary", None):
                 return active_link.summary
-            
+
             # Fallback to first linked summary if no active one
             if getattr(self, "resume_summaries", None):
                 first_link = next(iter(self.resume_summaries), None)
@@ -220,55 +236,59 @@ class Resume(BaseModel):
     def to_export_context(self) -> dict:
         """Build and return the template context dict for export."""
         context = {}
-        
+
         # Header
         header = {}
         try:
-            header["name"] = getattr(self.user, "name", "") if getattr(self, "user", None) else ""
+            header["name"] = (
+                getattr(self.user, "name", "") if getattr(self, "user", None) else ""
+            )
         except Exception:
-            header["name"] = ""
+            header["name"] = self.user.name
         header["title"] = getattr(self, "title", "") or ""
+        header["phone"] = self.user.phone
         context["header"] = header
-        
+        context["HEADER"] = header
+
         # Summary
         context["summary"] = self.active_summary_content().strip()
-        
+
         # Experiences
         experiences = []
         try:
-            for exp in (getattr(self, "experiences", []) or []):
+            for exp in getattr(self, "experiences", []) or []:
                 experiences.append(exp.to_export_dict())
         except Exception:
             pass
         context["experiences"] = experiences
-        
+
         # Educations
         educations = []
         try:
-            for edu in (getattr(self, "educations", []) or []):
+            for edu in getattr(self, "educations", []) or []:
                 educations.append(edu.to_export_dict())
         except Exception:
             pass
         context["educations"] = educations
-        
+
         # Certifications
         certifications = []
         try:
-            for cert in (getattr(self, "certifications", []) or []):
+            for cert in getattr(self, "certifications", []) or []:
                 certifications.append(cert.to_export_dict())
         except Exception:
             pass
         context["certifications"] = certifications
-        
+
         # Skills
         skills = []
         try:
-            for skill in (getattr(self, "skills", []) or []):
+            for skill in getattr(self, "skills", []) or []:
                 skill_value = skill.to_export_value()
                 if skill_value:
                     skills.append(skill_value)
         except Exception:
             pass
         context["skills"] = skills
-        
+
         return context
