@@ -7,7 +7,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser
 from .parsers import VndApiJSONParser
@@ -70,41 +70,16 @@ def healthcheck(request):
         user_count = None
 
     if request.method == "GET":
-        return JsonResponse({"status": "ok", "bootstrap_open": (user_count == 0)})
+        return JsonResponse(
+            {
+                "healthy": True,
+                "status": "bootstrapped",
+                "bootstrap_open": (user_count == 0),
+            }
+        )
 
     if request.method == "POST":
-        # Close bootstrap once any user exists
-        if user_count and user_count > 0:
-            return JsonResponse({"error": "bootstrap closed"}, status=403)
-
-        # Accept both plain JSON and JSON:API envelopes
-        try:
-            body = (request.body or b"").decode("utf-8")
-            payload = json.loads(body) if body else {}
-        except Exception:
-            payload = {}
-
-        attrs = payload.get("data", {}).get("attributes", {}) if isinstance(payload.get("data"), dict) else payload
-        username = (attrs.get("username") or attrs.get("name") or "admin").strip()
-        email = (attrs.get("email") or "").strip() or None
-        password = (attrs.get("password") or "admin").strip()
-        first_name = (attrs.get("first_name") or attrs.get("name") or "").strip()
-        last_name = (attrs.get("last_name") or "").strip()
-
-        User = get_user_model()
-        user = User.objects.create_superuser(
-            username=username,
-            email=email,
-            password=password
-        )
-        if first_name:
-            user.first_name = first_name
-        if last_name:
-            user.last_name = last_name
-        user.save()
-
-        # Close the gate implicitly because a user now exists
-        return JsonResponse({"data": DjangoUserSerializer().to_resource(user)}, status=201)
+        return JsonResponse({"error": "method not allowed"}, status=405)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
 
@@ -521,23 +496,28 @@ class DjangoUserViewSet(viewsets.ViewSet):
         last_name = attrs.get("last_name", "")
 
         if not username:
-            return Response({"errors": [{"detail": "Username is required"}]}, status=400)
+            return Response(
+                {"errors": [{"detail": "Username is required"}]}, status=400
+            )
         if not password:
-            return Response({"errors": [{"detail": "Password is required"}]}, status=400)
+            return Response(
+                {"errors": [{"detail": "Password is required"}]}, status=400
+            )
 
         User = get_user_model()
-        
+
         # Check uniqueness
         if User.objects.filter(username=username).exists():
-            return Response({"errors": [{"detail": "Username already exists"}]}, status=400)
+            return Response(
+                {"errors": [{"detail": "Username already exists"}]}, status=400
+            )
         if email and User.objects.filter(email=email).exists():
-            return Response({"errors": [{"detail": "Email already exists"}]}, status=400)
+            return Response(
+                {"errors": [{"detail": "Email already exists"}]}, status=400
+            )
 
         user = User(
-            username=username,
-            email=email,
-            first_name=first_name,
-            last_name=last_name
+            username=username, email=email, first_name=first_name, last_name=last_name
         )
         user.set_password(password)
         user.save()
@@ -585,6 +565,46 @@ class DjangoUserViewSet(viewsets.ViewSet):
             pass
         return Response(status=204)
 
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="bootstrap-superuser",
+        permission_classes=[AllowAny],
+    )
+    def bootstrap_superuser(self, request):
+        User = get_user_model()
+        # Only allow when no users exist
+        if User.objects.count() > 0:
+            return Response({"errors": [{"detail": "bootstrap closed"}]}, status=403)
+
+        # Accept both JSON:API and plain JSON
+        data = request.data if isinstance(request.data, dict) else {}
+        attrs = {}
+        if isinstance(data.get("data"), dict):
+            attrs = data["data"].get("attributes") or {}
+        else:
+            attrs = data or {}
+
+        username = attrs.get("username") or attrs.get("name") or "admin"
+        email = (attrs.get("email") or None) or None
+        password = attrs.get("password") or "admin"
+        first_name = attrs.get("first_name") or attrs.get("name") or ""
+        last_name = attrs.get("last_name") or ""
+
+        user = User.objects.create_superuser(
+            username=username,
+            email=email,
+            password=password,
+        )
+        if first_name:
+            user.first_name = first_name
+        if last_name:
+            user.last_name = last_name
+        user.save()
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=["get"])
     def resumes(self, request, pk=None):
         User = get_user_model()
@@ -592,7 +612,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = Resume.get_session()
         resumes = session.query(Resume).filter_by(user_id=user.id).all()
         data = [ResumeSerializer().to_resource(r) for r in resumes]
@@ -605,7 +625,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = Score.get_session()
         scores = session.query(Score).filter_by(user_id=user.id).all()
         data = [ScoreSerializer().to_resource(s) for s in scores]
@@ -618,7 +638,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = CoverLetter.get_session()
         cover_letters = session.query(CoverLetter).filter_by(user_id=user.id).all()
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
@@ -631,7 +651,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = Application.get_session()
         applications = session.query(Application).filter_by(user_id=user.id).all()
         data = [ApplicationSerializer().to_resource(a) for a in applications]
@@ -644,11 +664,21 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = Summary.get_session()
         summaries = session.query(Summary).filter_by(user_id=user.id).all()
         data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
+
+    @action(detail=False, methods=["get"], url_path="me", permission_classes=[IsAuthenticated])
+    def me(self, request):
+        user = request.user
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(user)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([user], include_rels)
+        return Response(payload)
 
 
 class ResumeViewSet(BaseSAViewSet):
@@ -985,7 +1015,9 @@ class ResumeViewSet(BaseSAViewSet):
                     if not text:
                         continue
                     # Create or find by text
-                    skill, _ = Skill.first_or_create(session=session, text=str(text).strip())
+                    skill, _ = Skill.first_or_create(
+                        session=session, text=str(text).strip()
+                    )
 
                 # Determine desired active flag (default True)
                 active_val = (s_node.get("attributes") or {}).get("active")
@@ -994,11 +1026,19 @@ class ResumeViewSet(BaseSAViewSet):
 
             if invalid:
                 return Response(
-                    {"errors": [{"detail": f"Invalid skill ID(s): {', '.join(map(str, invalid))}"}]},
+                    {
+                        "errors": [
+                            {
+                                "detail": f"Invalid skill ID(s): {', '.join(map(str, invalid))}"
+                            }
+                        ]
+                    },
                     status=400,
                 )
 
-            existing_links = session.query(ResumeSkill).filter_by(resume_id=obj.id).all()
+            existing_links = (
+                session.query(ResumeSkill).filter_by(resume_id=obj.id).all()
+            )
             existing_ids = {l.skill_id for l in existing_links}
             desired_ids = set(desired_active_by_id.keys())
 
@@ -1103,10 +1143,14 @@ class ResumeViewSet(BaseSAViewSet):
                         keep_sid = active_remaining[0]
                         session.query(ResumeSummaries).filter(
                             ResumeSummaries.resume_id == obj.id
-                        ).update({ResumeSummaries.active: False}, synchronize_session=False)
+                        ).update(
+                            {ResumeSummaries.active: False}, synchronize_session=False
+                        )
                         session.query(ResumeSummaries).filter_by(
                             resume_id=obj.id, summary_id=keep_sid
-                        ).update({ResumeSummaries.active: True}, synchronize_session=False)
+                        ).update(
+                            {ResumeSummaries.active: True}, synchronize_session=False
+                        )
 
         # Final commit and refresh relationships for response
         session.commit()
@@ -1115,7 +1159,8 @@ class ResumeViewSet(BaseSAViewSet):
         session.commit()
         try:
             session.expire(
-                obj, ["experiences", "educations", "certifications", "summaries", "skills"]
+                obj,
+                ["experiences", "educations", "certifications", "summaries", "skills"],
             )
         except Exception:
             pass
@@ -1466,7 +1511,9 @@ class ResumeViewSet(BaseSAViewSet):
                 text = s_attrs.get("text") or s_node.get("text")
                 if not text:
                     continue  # ignore invalid entries
-                skill, _ = Skill.first_or_create(session=session, text=str(text).strip())
+                skill, _ = Skill.first_or_create(
+                    session=session, text=str(text).strip()
+                )
             # Determine 'active' (default True)
             active_val = (s_node.get("attributes") or {}).get("active")
             active_val = bool(active_val) if active_val is not None else True
@@ -1575,7 +1622,8 @@ class ResumeViewSet(BaseSAViewSet):
         # Refresh relationships so response includes all links
         try:
             session.expire(
-                resume, ["experiences", "educations", "certifications", "summaries", "skills"]
+                resume,
+                ["experiences", "educations", "certifications", "summaries", "skills"],
             )
         except Exception:
             pass
@@ -1851,17 +1899,18 @@ class ResumeViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         format_param = request.query_params.get("format", "docx").lower()
         template_path_param = request.query_params.get("template_path")
-        
+
         if format_param == "md":
             # Export as markdown
             exporter = DbExportService()
             markdown_content = exporter.resume_markdown_export(obj)
-            
+
             # Generate filename
             import re
+
             filename_parts = ["resume", str(obj.id)]
             try:
                 if getattr(obj, "user", None) and getattr(obj.user, "name", None):
@@ -1877,14 +1926,14 @@ class ResumeViewSet(BaseSAViewSet):
             except Exception:
                 pass
             filename = "-".join([p for p in filename_parts if p]) + ".md"
-            
+
             response = HttpResponse(
-                markdown_content.encode('utf-8'),
-                content_type="text/markdown; charset=utf-8"
+                markdown_content.encode("utf-8"),
+                content_type="text/markdown; charset=utf-8",
             )
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
-        
+
         else:
             # Export as DOCX (default)
             try:
@@ -1892,7 +1941,11 @@ class ResumeViewSet(BaseSAViewSet):
                 data = svc.render_docx(obj, template_path=template_path_param)
             except ImportError:
                 return Response(
-                    {"errors": [{"detail": "DOCX export requires 'docxtpl' to be installed"}]},
+                    {
+                        "errors": [
+                            {"detail": "DOCX export requires 'docxtpl' to be installed"}
+                        ]
+                    },
                     status=status.HTTP_501_NOT_IMPLEMENTED,
                 )
             except Exception as e:
@@ -1900,9 +1953,10 @@ class ResumeViewSet(BaseSAViewSet):
                     {"errors": [{"detail": str(e)}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            
+
             # Generate filename
             import re
+
             filename_parts = ["resume", str(obj.id)]
             try:
                 if getattr(obj, "user", None) and getattr(obj.user, "name", None):
@@ -1918,10 +1972,10 @@ class ResumeViewSet(BaseSAViewSet):
             except Exception:
                 pass
             filename = "-".join([p for p in filename_parts if p]) + ".docx"
-            
+
             response = HttpResponse(
                 data,
-                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
@@ -2230,7 +2284,9 @@ class CoverLetterViewSet(BaseSAViewSet):
         try:
             attrs = ser.parse_payload(data)
         except ValueError as e:
-            return Response({"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"errors": [{"detail": str(e)}]}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         node = data.get("data") or {}
         relationships = node.get("relationships") or {}
@@ -2255,24 +2311,38 @@ class CoverLetterViewSet(BaseSAViewSet):
         # Resolve IDs from attrs (serializer) or relationships fallbacks
         user_id = attrs.get("user_id")
         resume_id = attrs.get("resume_id") or _rel_id("resume", "resumes")
-        job_post_id = attrs.get("job_post_id") or _rel_id("job-post", "job_post", "jobPost", "job-posts", "jobPosts")
+        job_post_id = attrs.get("job_post_id") or _rel_id(
+            "job-post", "job_post", "jobPost", "job-posts", "jobPosts"
+        )
 
         try:
             resume_id = int(resume_id) if resume_id is not None else None
             job_post_id = int(job_post_id) if job_post_id is not None else None
         except (TypeError, ValueError):
-            return Response({"errors": [{"detail": "Invalid resume or job-post ID"}]}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"errors": [{"detail": "Invalid resume or job-post ID"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if resume_id is None or job_post_id is None:
             return Response(
-                {"errors": [{"detail": "Missing required relationships: resume and job-post"}]},
+                {
+                    "errors": [
+                        {
+                            "detail": "Missing required relationships: resume and job-post"
+                        }
+                    ]
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         resume = Resume.get(resume_id)
         job_post = JobPost.get(job_post_id)
         if not resume or not job_post:
-            return Response({"errors": [{"detail": "Invalid resume or job-post ID"}]}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"errors": [{"detail": "Invalid resume or job-post ID"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Default user_id to resume.user_id if not provided
         if user_id is None:
@@ -2308,7 +2378,11 @@ class CoverLetterViewSet(BaseSAViewSet):
             from docx import Document  # python-docx
         except Exception:
             return Response(
-                {"errors": [{"detail": "DOCX export requires 'python-docx' to be installed"}]},
+                {
+                    "errors": [
+                        {"detail": "DOCX export requires 'python-docx' to be installed"}
+                    ]
+                },
                 status=status.HTTP_501_NOT_IMPLEMENTED,
             )
 
@@ -2333,6 +2407,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         content = (cl.content or "").strip()
         if content:
             import re as _re
+
             for para in [p for p in _re.split(r"\n\s*\n", content) if p.strip()]:
                 p = doc.add_paragraph()
                 for line in para.splitlines():
@@ -2357,6 +2432,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         buf.seek(0)
 
         import re as _re2
+
         filename_parts = ["cover-letter", str(cl.id)]
         try:
             if getattr(cl, "job_post", None) and getattr(cl.job_post, "company", None):

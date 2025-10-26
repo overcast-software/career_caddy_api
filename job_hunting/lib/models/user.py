@@ -6,9 +6,10 @@ from .base import BaseModel
 
 
 class User(BaseModel):
-    __tablename__ = "user"
+    __tablename__ = "auth_user"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, nullable=True)
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
     email = Column(String, unique=True, nullable=True)
     phone = Column(String, unique=True)
     is_admin = Column(Boolean, nullable=False, default=False)
