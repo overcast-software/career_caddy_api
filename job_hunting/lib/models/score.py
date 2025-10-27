@@ -12,7 +12,7 @@ class Score(BaseModel):
     explanation = Column(Text, nullable=True)
     resume_id = Column(Integer, ForeignKey("resume.id"))
     job_post_id = Column(Integer, ForeignKey("job_post.id"))
-    user_id = Column(Integer, ForeignKey("user.id"))
+    user_id = Column(Integer, ForeignKey("auth_user.id"))
 
     # Relationships
     resume = relationship("Resume", back_populates="scores")

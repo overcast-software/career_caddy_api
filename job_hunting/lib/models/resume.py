@@ -11,7 +11,7 @@ class Resume(BaseModel):
     __tablename__ = "resume"
     id = Column(Integer, primary_key=True, autoincrement=True)
     content = Column(Text)  # not using anymore
-    user_id = Column(Integer, ForeignKey("user.id"))
+    user_id = Column(Integer, ForeignKey("auth_user.id"))
     file_path = Column(String)
     title = Column(String)
     # Relationships
@@ -239,14 +239,13 @@ class Resume(BaseModel):
 
         # Header
         header = {}
-        try:
-            header["name"] = (
-                getattr(self.user, "name", "") if getattr(self, "user", None) else ""
-            )
-        except Exception:
+        if self.user:
             header["name"] = self.user.name
+            header["phone"] = getattr(self.user, "phone", "")
+        else:
+            header["name"] = ""
+            header["phone"] = ""
         header["title"] = getattr(self, "title", "") or ""
-        header["phone"] = self.user.phone
         context["header"] = header
         context["HEADER"] = header
 

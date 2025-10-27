@@ -9,6 +9,7 @@ class JobPost(BaseModel):
     __tablename__ = "job_post"
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(Integer, ForeignKey("auth_user.id"))
     description = Column(Text)
     title = Column(String)
     company_id = Column(Integer, ForeignKey("company.id"))

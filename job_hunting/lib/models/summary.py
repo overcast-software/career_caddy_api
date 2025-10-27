@@ -7,7 +7,7 @@ class Summary(BaseModel):
     __tablename__ = "summary"
     id = Column(Integer, primary_key=True, autoincrement=True)
     content = Column(Text, nullable=False)
-    user_id = Column(Integer, ForeignKey("user.id"))
+    user_id = Column(Integer, ForeignKey("auth_user.id"))
     job_post_id = Column(Integer, ForeignKey("job_post.id", ondelete="CASCADE"))
     job_post = relationship("JobPost", back_populates="summaries")
     resumes = relationship(
