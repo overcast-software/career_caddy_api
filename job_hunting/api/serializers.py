@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Any, Dict, List
 import dateparser
 from django.contrib.auth import get_user_model
@@ -45,15 +45,13 @@ def _parse_datetime(val):
     if isinstance(val, datetime):
         # If timezone-aware, convert to UTC and make naive
         if val.tzinfo is not None:
-            val = val.utctimetuple()
-            val = datetime(*val[:6])
+            val = val.astimezone(timezone.utc).replace(tzinfo=None)
         return val
     try:
         dt = dateparser.parse(str(val))
         if dt and dt.tzinfo is not None:
             # Convert to UTC and make naive
-            dt = dt.utctimetuple()
-            dt = datetime(*dt[:6])
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
     except Exception:
         return None
@@ -167,10 +165,10 @@ class BaseSASerializer:
 
 class DjangoUserSerializer:
     type = "user"
-    
+
     def accepted_types(self):
         return {self.type, _pluralize_type(self.type)}
-    
+
     def to_resource(self, obj) -> Dict[str, Any]:
         res = {
             "type": self.type,
@@ -183,7 +181,7 @@ class DjangoUserSerializer:
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
-        
+
         # Add relationships structure
         res["relationships"] = {
             "resumes": {
@@ -218,13 +216,19 @@ class DjangoUserSerializer:
             },
         }
         return res
-    
+
     def get_related(self, obj, rel_name):
         # Import here to avoid circular imports
-        from job_hunting.lib.models import Resume, Score, CoverLetter, Application, Summary
-        
+        from job_hunting.lib.models import (
+            Resume,
+            Score,
+            CoverLetter,
+            Application,
+            Summary,
+        )
+
         session = Resume.get_session()  # Get SA session
-        
+
         if rel_name == "resumes":
             items = session.query(Resume).filter_by(user_id=obj.id).all()
             return "resume", items
@@ -242,7 +246,7 @@ class DjangoUserSerializer:
             return "summary", items
         else:
             return None, []
-    
+
     def parse_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(payload, dict) or "data" not in payload:
             raise ValueError("JSON:API payload must contain 'data'")
@@ -251,22 +255,22 @@ class DjangoUserSerializer:
         if data.get("type") not in expected:
             exp_str = "', '".join(sorted(expected))
             raise ValueError(f"JSON:API type mismatch: expected one of '{exp_str}'")
-        
+
         attrs_in = data.get("attributes", {}) or {}
         out: Dict[str, Any] = {}
-        
+
         # Extract user attributes
         for k in ["username", "email", "first_name", "last_name", "password"]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
-        
+
         return out
 
 
 class ResumeSerializer(BaseSASerializer):
     type = "resume"
     model = Resume
-    attributes = ["content", "file_path", "title"]
+    attributes = ["file_path", "title", "name", "notes"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -299,7 +303,7 @@ class ResumeSerializer(BaseSASerializer):
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Ensure user relationship linkage points to Django user
-        if hasattr(obj, 'user_id') and obj.user_id:
+        if hasattr(obj, "user_id") and obj.user_id:
             res.setdefault("relationships", {})["user"] = {
                 "data": {"type": "user", "id": str(obj.user_id)},
                 "links": {
@@ -312,9 +316,9 @@ class ResumeSerializer(BaseSASerializer):
             "summaries"
         ] = f"{_resource_base_path(self.type)}/{obj.id}/summaries"
         return res
-    
+
     def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
             User = get_user_model()
             try:
                 user = User.objects.get(id=obj.user_id)
@@ -338,11 +342,11 @@ class ScoreSerializer(BaseSASerializer):
         "job-post": "job_post_id",
         "user": "user_id",
     }
-    
+
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Ensure user relationship linkage points to Django user
-        if hasattr(obj, 'user_id') and obj.user_id:
+        if hasattr(obj, "user_id") and obj.user_id:
             res.setdefault("relationships", {})["user"] = {
                 "data": {"type": "user", "id": str(obj.user_id)},
                 "links": {
@@ -351,9 +355,9 @@ class ScoreSerializer(BaseSASerializer):
                 },
             }
         return res
-    
+
     def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
             User = get_user_model()
             try:
                 user = User.objects.get(id=obj.user_id)
@@ -391,6 +395,27 @@ class JobPostSerializer(BaseSASerializer):
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
     }
     relationship_fks = {"company": "company_id"}
+
+    def parse_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        out = super().parse_payload(payload)
+
+        # Remove created_at to prevent user from overwriting system timestamps
+        out.pop("created_at", None)
+
+        # Parse and validate datetime fields
+        if "posted_date" in out:
+            parsed_dt = _parse_datetime(out["posted_date"])
+            if parsed_dt is None and out["posted_date"]:
+                raise ValueError("Invalid posted_date")
+            out["posted_date"] = parsed_dt
+
+        if "extraction_date" in out:
+            parsed_dt = _parse_datetime(out["extraction_date"])
+            if parsed_dt is None and out["extraction_date"]:
+                raise ValueError("Invalid extraction_date")
+            out["extraction_date"] = parsed_dt
+
+        return out
 
 
 class ScrapeSerializer(BaseSASerializer):
@@ -438,11 +463,11 @@ class CoverLetterSerializer(BaseSASerializer):
         "resume": "resume_id",
         "job-post": "job_post_id",
     }
-    
+
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Ensure user relationship linkage points to Django user
-        if hasattr(obj, 'user_id') and obj.user_id:
+        if hasattr(obj, "user_id") and obj.user_id:
             res.setdefault("relationships", {})["user"] = {
                 "data": {"type": "user", "id": str(obj.user_id)},
                 "links": {
@@ -451,9 +476,9 @@ class CoverLetterSerializer(BaseSASerializer):
                 },
             }
         return res
-    
+
     def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
             User = get_user_model()
             try:
                 user = User.objects.get(id=obj.user_id)
@@ -493,7 +518,7 @@ class ApplicationSerializer(BaseSASerializer):
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Ensure user relationship linkage points to Django user
-        if hasattr(obj, 'user_id') and obj.user_id:
+        if hasattr(obj, "user_id") and obj.user_id:
             res.setdefault("relationships", {})["user"] = {
                 "data": {"type": "user", "id": str(obj.user_id)},
                 "links": {
@@ -502,9 +527,9 @@ class ApplicationSerializer(BaseSASerializer):
                 },
             }
         return res
-    
+
     def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
             User = get_user_model()
             try:
                 user = User.objects.get(id=obj.user_id)
@@ -539,7 +564,7 @@ class SummarySerializer(BaseSASerializer):
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Ensure user relationship linkage points to Django user
-        if hasattr(obj, 'user_id') and obj.user_id:
+        if hasattr(obj, "user_id") and obj.user_id:
             res.setdefault("relationships", {})["user"] = {
                 "data": {"type": "user", "id": str(obj.user_id)},
                 "links": {
@@ -564,9 +589,9 @@ class SummarySerializer(BaseSASerializer):
         except Exception:
             pass
         return res
-    
+
     def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, 'user_id') and obj.user_id:
+        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
             User = get_user_model()
             try:
                 user = User.objects.get(id=obj.user_id)

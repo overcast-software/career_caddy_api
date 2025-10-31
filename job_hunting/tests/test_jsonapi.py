@@ -64,7 +64,7 @@ class JSONAPITests(APITestCase):
         payload = {
             "data": {
                 "type": "resumes",
-                "attributes": {"content": "My resume body", "file_path": "/tmp/r.txt"},
+                "attributes": {"file_path": "/tmp/r.txt"},
                 "relationships": {
                     "user": {"data": {"type": "users", "id": str(user.id)}}
                 },
@@ -122,7 +122,7 @@ class JSONAPITests(APITestCase):
         session.add(user)
         session.commit()
 
-        resume = Resume(content="Eve resume", user_id=user.id, file_path="/tmp/eve.txt")
+        resume = Resume(user_id=user.id, file_path="/tmp/eve.txt")
         session.add(resume)
         session.commit()
 
@@ -206,7 +206,7 @@ class JSONAPITests(APITestCase):
         session.add(user)
         session.commit()
 
-        resume = Resume(content="Dana resume", user_id=user.id, file_path="/tmp/dana.txt")
+        resume = Resume(user_id=user.id, file_path="/tmp/dana.txt")
         session.add(resume)
         session.commit()
 
@@ -245,7 +245,7 @@ class JSONAPITests(APITestCase):
         session.add(user)
         session.commit()
 
-        resume = Resume(content="R", user_id=user.id, file_path="/tmp/r.txt")
+        resume = Resume(user_id=user.id, file_path="/tmp/r.txt")
         session.add(resume)
         session.commit()
 
@@ -265,3 +265,103 @@ class JSONAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
         self.assertEqual(resp.data["data"][0]["type"], "scores")
+
+    def test_job_post_datetime_parsing_and_created_at_protection(self):
+        session = self.session
+
+        company = Company(name="TestCorp", display_name="Test Corp")
+        session.add(company)
+        session.commit()
+
+        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        session.add(job)
+        session.commit()
+        
+        original_created_at = job.created_at
+
+        # Test valid ISO datetime with Z timezone
+        payload = {
+            "data": {
+                "type": "job-posts",
+                "id": str(job.id),
+                "attributes": {
+                    "posted_date": "2025-10-25T09:37:33.140Z",
+                    "created_at": "2025-10-25T09:37:33.140Z"  # Should be ignored
+                },
+            }
+        }
+        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        # Reload job from database
+        session.refresh(job)
+        
+        # Verify posted_date was parsed and stored as datetime
+        self.assertIsNotNone(job.posted_date)
+        self.assertEqual(job.posted_date.year, 2025)
+        self.assertEqual(job.posted_date.month, 10)
+        self.assertEqual(job.posted_date.day, 25)
+        
+        # Verify created_at was not changed
+        self.assertEqual(job.created_at, original_created_at)
+
+    def test_job_post_invalid_datetime_returns_400(self):
+        session = self.session
+
+        company = Company(name="TestCorp", display_name="Test Corp")
+        session.add(company)
+        session.commit()
+
+        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        session.add(job)
+        session.commit()
+
+        # Test invalid posted_date
+        payload = {
+            "data": {
+                "type": "job-posts",
+                "id": str(job.id),
+                "attributes": {"posted_date": "not a date"},
+            }
+        }
+        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid posted_date", str(resp.data))
+
+        # Test invalid extraction_date
+        payload = {
+            "data": {
+                "type": "job-posts",
+                "id": str(job.id),
+                "attributes": {"extraction_date": "invalid date"},
+            }
+        }
+        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid extraction_date", str(resp.data))
+
+    def test_job_post_null_datetime_allowed(self):
+        session = self.session
+
+        company = Company(name="TestCorp", display_name="Test Corp")
+        session.add(company)
+        session.commit()
+
+        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        session.add(job)
+        session.commit()
+
+        # Test null posted_date (should be allowed)
+        payload = {
+            "data": {
+                "type": "job-posts",
+                "id": str(job.id),
+                "attributes": {"posted_date": None},
+            }
+        }
+        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        
+        # Reload and verify
+        session.refresh(job)
+        self.assertIsNone(job.posted_date)

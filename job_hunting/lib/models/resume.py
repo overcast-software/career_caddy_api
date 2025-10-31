@@ -10,10 +10,11 @@ if TYPE_CHECKING:
 class Resume(BaseModel):
     __tablename__ = "resume"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    content = Column(Text)  # not using anymore
     user_id = Column(Integer, ForeignKey("auth_user.id"))
     file_path = Column(String)
     title = Column(String)
+    name = Column(String)  # internal name
+    notes = Column(Text)  # notes about this flavor resume
     # Relationships
     user = relationship("User", back_populates="resumes")
     scores = relationship("Score", back_populates="resume")
@@ -72,9 +73,7 @@ class Resume(BaseModel):
     def from_path_and_user_id(cls, path, user_id):
         with open(path) as file:
             body = file.read()
-            resume, _ = cls.first_or_create(
-                content=body, file_path=path, user_id=user_id
-            )
+            resume, _ = cls.first_or_create(file_path=path, user_id=user_id)
         return resume
 
     def collated_content(self):

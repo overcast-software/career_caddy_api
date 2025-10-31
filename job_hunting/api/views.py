@@ -54,6 +54,7 @@ from .serializers import (
     EducationSerializer,
     CertificationSerializer,
     DescriptionSerializer,
+    SkillSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
 )
@@ -118,7 +119,7 @@ class BaseSAViewSet(viewsets.ViewSet):
                 out.append(p)
         return out
 
-    def _build_included(self, objs, include_rels):
+    def _build_included(self, objs, include_rels, request=None):
         included = []
         seen = set()  # (type, id)
         primary_ser = self.get_serializer()
@@ -155,6 +156,12 @@ class BaseSAViewSet(viewsets.ViewSet):
                     key = (rel_type, str(t.id))
                     if key in seen:
                         continue
+                    
+                    # Filter cover-letter resources to only include those owned by authenticated user
+                    if rel_type == "cover-letter" and request and hasattr(request, 'user') and request.user.is_authenticated:
+                        if getattr(t, "user_id", None) != request.user.id:
+                            continue
+                    
                     seen.add(key)
                     included.append(rel_ser.to_resource(t))
 
@@ -203,7 +210,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         payload = {"data": data}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels)
+            payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
@@ -214,7 +221,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([obj], include_rels)
+            payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
     def create(self, request):
@@ -403,7 +410,7 @@ class SummaryViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(summary)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([summary], include_rels)
+            payload["included"] = self._build_included([summary], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -466,7 +473,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         payload = {"data": data}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included(users, include_rels)
+            payload["included"] = self._build_included(users, include_rels, request)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
@@ -479,7 +486,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         payload = {"data": ser.to_resource(user)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([user], include_rels)
+            payload["included"] = self._build_included([user], include_rels, request)
         return Response(payload)
 
     def create(self, request):
@@ -677,7 +684,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         payload = {"data": ser.to_resource(user)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([user], include_rels)
+            payload["included"] = self._build_included([user], include_rels, request)
         return Response(payload)
 
 
@@ -696,7 +703,7 @@ class ResumeViewSet(BaseSAViewSet):
         ser_rels = list(getattr(ser, "relationships", {}).keys())
         include_rels = self._parse_include(request) or ser_rels
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels)
+            payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
@@ -709,7 +716,7 @@ class ResumeViewSet(BaseSAViewSet):
         ser_rels = list(getattr(ser, "relationships", {}).keys())
         include_rels = self._parse_include(request) or ser_rels
         if include_rels:
-            payload["included"] = self._build_included([obj], include_rels)
+            payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
@@ -1168,7 +1175,7 @@ class ResumeViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([obj], include_rels)
+            payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
     def create(self, request):
@@ -1631,7 +1638,7 @@ class ResumeViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(resume)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([resume], include_rels)
+            payload["included"] = self._build_included([resume], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"])
@@ -1642,14 +1649,15 @@ class ResumeViewSet(BaseSAViewSet):
         data = [ScoreSerializer().to_resource(s) for s in (obj.scores or [])]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"], url_path="cover-letters")
+    @action(detail=True, methods=["get"], url_path="cover-letters", permission_classes=[IsAuthenticated])
     def cover_letters(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [
-            CoverLetterSerializer().to_resource(c) for c in (obj.cover_letters or [])
-        ]
+        
+        session = CoverLetter.get_session()
+        cover_letters = session.query(CoverLetter).filter_by(resume_id=obj.id, user_id=request.user.id).all()
+        data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
@@ -1739,7 +1747,7 @@ class ResumeViewSet(BaseSAViewSet):
             payload = {"data": ser.to_resource(summary)}
             include_rels = self._parse_include(request)
             if include_rels:
-                payload["included"] = self._build_included([summary], include_rels)
+                payload["included"] = self._build_included([summary], include_rels, request)
             return Response(payload, status=status.HTTP_201_CREATED)
 
         obj = self.model.get(int(pk))
@@ -1826,7 +1834,7 @@ class ResumeViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(summary)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([summary], include_rels)
+            payload["included"] = self._build_included([summary], include_rels, request)
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -1893,6 +1901,61 @@ class ResumeViewSet(BaseSAViewSet):
         ser.set_parent_context("resume", obj.id, "educations")
         data = [ser.to_resource(e) for e in (obj.educations or [])]
         return Response({"data": data})
+
+    @action(detail=True, methods=["get"])
+    def skills(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = SkillSerializer()
+        ser.set_parent_context("resume", obj.id, "skills")
+        items = list(obj.skills or [])
+        data = [ser.to_resource(s) for s in items]
+
+        # Build included only when ?include=... is provided
+        include_rels = self._parse_include(request)
+
+        included = []
+        if include_rels:
+            seen = set()
+            rel_keys = set(getattr(ser, "relationships", {}).keys())
+
+            def _normalize_rel(name: str) -> str:
+                if name in rel_keys:
+                    return name
+                if not name.endswith("s") and f"{name}s" in rel_keys:
+                    return f"{name}s"
+                if (
+                    name.endswith("y")
+                    and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
+                    and f"{name[:-1]}ies" in rel_keys
+                ):
+                    return f"{name[:-1]}ies"
+                return name
+
+            for skill in items:
+                for rel in include_rels:
+                    rel = _normalize_rel(rel)
+                    rel_type, targets = ser.get_related(skill, rel)
+                    if not rel_type:
+                        continue
+                    ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                    if not ser_cls:
+                        continue
+                    rel_ser = ser_cls()
+                    if hasattr(rel_ser, "set_parent_context"):
+                        rel_ser.set_parent_context(ser.type, skill.id, rel)
+                    for t in targets:
+                        key = (rel_type, str(t.id))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        included.append(rel_ser.to_resource(t))
+
+        payload = {"data": data}
+        if included:
+            payload["included"] = included
+        return Response(payload)
 
     @action(detail=True, methods=["get"], url_path="export")
     def export(self, request, pk=None):
@@ -2056,7 +2119,7 @@ class ScoreViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(myScore)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([myScore], include_rels)
+            payload["included"] = self._build_included([myScore], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _parse_eval(self, e):
@@ -2097,14 +2160,15 @@ class JobPostViewSet(BaseSAViewSet):
         data = [ScrapeSerializer().to_resource(s) for s in (obj.scrapes or [])]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"], url_path="cover-letters")
+    @action(detail=True, methods=["get"], url_path="cover-letters", permission_classes=[IsAuthenticated])
     def cover_letters(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [
-            CoverLetterSerializer().to_resource(c) for c in (obj.cover_letters or [])
-        ]
+        
+        session = CoverLetter.get_session()
+        cover_letters = session.query(CoverLetter).filter_by(job_post_id=obj.id, user_id=request.user.id).all()
+        data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"])
@@ -2183,7 +2247,7 @@ class JobPostViewSet(BaseSAViewSet):
             payload = {"data": ser.to_resource(summary)}
             include_rels = self._parse_include(request)
             if include_rels:
-                payload["included"] = self._build_included([summary], include_rels)
+                payload["included"] = self._build_included([summary], include_rels, request)
             return Response(payload, status=status.HTTP_201_CREATED)
 
         obj = self.model.get(int(pk))
@@ -2243,7 +2307,7 @@ class ScrapeViewSet(BaseSAViewSet):
             include_rels = self._parse_include(request)
             payload = {"data": resource}
             if include_rels:
-                payload["included"] = self._build_included([job_post], include_rels)
+                payload["included"] = self._build_included([job_post], include_rels, request)
             return Response(payload, status=status.HTTP_201_CREATED)
 
         # Could not resolve a JobPost yet — return the Scrape so the client can track progress
@@ -2277,6 +2341,92 @@ class CompanyViewSet(BaseSAViewSet):
 class CoverLetterViewSet(BaseSAViewSet):
     model = CoverLetter
     serializer_class = CoverLetterSerializer
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        session = self.get_session()
+        items = session.query(self.model).filter_by(user_id=request.user.id).all()
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        
+        # Verify ownership
+        if obj.user_id != request.user.id:
+            return Response(
+                {"errors": [{"detail": "Forbidden"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def _upsert(self, request, pk, partial=False):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        
+        # Verify ownership
+        if obj.user_id != request.user.id:
+            return Response(
+                {"errors": [{"detail": "Forbidden"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        
+        # Remove any user_id from attrs to prevent ownership changes
+        attrs.pop("user_id", None)
+        
+        # If resume_id is being changed, validate new resume ownership
+        if "resume_id" in attrs:
+            new_resume = Resume.get(attrs["resume_id"])
+            if not new_resume or new_resume.user_id != request.user.id:
+                return Response(
+                    {"errors": [{"detail": "Forbidden"}]},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        
+        for k, v in attrs.items():
+            setattr(obj, k, v)
+        session = self.get_session()
+        session.add(obj)
+        session.commit()
+        return Response({"data": ser.to_resource(obj)})
+
+    def destroy(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response(status=204)
+        
+        # Verify ownership
+        if obj.user_id != request.user.id:
+            return Response(
+                {"errors": [{"detail": "Forbidden"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+        session = self.get_session()
+        session.delete(obj)
+        session.commit()
+        return Response(status=204)
 
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
@@ -2309,7 +2459,6 @@ class CoverLetterViewSet(BaseSAViewSet):
             return None
 
         # Resolve IDs from attrs (serializer) or relationships fallbacks
-        user_id = attrs.get("user_id")
         resume_id = attrs.get("resume_id") or _rel_id("resume", "resumes")
         job_post_id = attrs.get("job_post_id") or _rel_id(
             "job-post", "job_post", "jobPost", "job-posts", "jobPosts"
@@ -2344,9 +2493,15 @@ class CoverLetterViewSet(BaseSAViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Default user_id to resume.user_id if not provided
-        if user_id is None:
-            user_id = getattr(resume, "user_id", None)
+        # Validate that the referenced resume belongs to the authenticated user
+        if resume.user_id != request.user.id:
+            return Response(
+                {"errors": [{"detail": "Forbidden: resume does not belong to the authenticated user"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Force ownership to authenticated user
+        user_id = request.user.id
 
         # Accept provided content; otherwise, generate via AI
         content = attrs_node.get("content")
@@ -2365,14 +2520,21 @@ class CoverLetterViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(cover_letter)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([cover_letter], include_rels)
+            payload["included"] = self._build_included([cover_letter], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=["get"], url_path="export")
+    @action(detail=True, methods=["get"], url_path="export", permission_classes=[IsAuthenticated])
     def export_docx(self, request, pk=None):
         cl = self.model.get(int(pk))
         if not cl:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        # Verify ownership
+        if cl.user_id != request.user.id:
+            return Response(
+                {"errors": [{"detail": "Forbidden"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         try:
             from docx import Document  # python-docx
@@ -2548,7 +2710,7 @@ class ExperienceViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(exp)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([exp], include_rels)
+            payload["included"] = self._build_included([exp], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
@@ -2621,7 +2783,7 @@ class ExperienceViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(exp)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([exp], include_rels)
+            payload["included"] = self._build_included([exp], include_rels, request)
         return Response(payload)
 
 
@@ -2695,7 +2857,7 @@ class EducationViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(edu)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([edu], include_rels)
+            payload["included"] = self._build_included([edu], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -2769,7 +2931,7 @@ class CertificationViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(cert)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([cert], include_rels)
+            payload["included"] = self._build_included([cert], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -2864,7 +3026,7 @@ class DescriptionViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([desc], include_rels)
+            payload["included"] = self._build_included([desc], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
@@ -2960,7 +3122,7 @@ class DescriptionViewSet(BaseSAViewSet):
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([desc], include_rels)
+            payload["included"] = self._build_included([desc], include_rels, request)
         return Response(payload)
 
     @action(detail=True, methods=["get"])

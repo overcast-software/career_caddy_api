@@ -39,7 +39,7 @@ from job_hunting.api.views import (
     healthcheck,
 )
 
-router = routers.DefaultRouter()
+router = routers.DefaultRouter(trailing_slash="/?")
 router.register(r"users", DjangoUserViewSet, basename="users")
 router.register(r"resumes", ResumeViewSet, basename="resumes")
 router.register(r"scores", ScoreViewSet, basename="scores")
