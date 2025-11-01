@@ -15,7 +15,7 @@ Including another URLconf
 """
 
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
 from rest_framework import routers
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
@@ -57,6 +57,7 @@ router.register(r"descriptions", DescriptionViewSet, basename="descriptions")
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
+    re_path(r"^api/v1/companies/(?P<pk>\d+)/job-posts$", CompanyViewSet.as_view({"get": "job_posts"}), name="company-job-posts-noslash"),
     path("api/v1/", include(router.urls)),
     path("api/v1/me/", DjangoUserViewSet.as_view({"get": "me"}), name="me"),
     path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),

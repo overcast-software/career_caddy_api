@@ -1,6 +1,5 @@
 import os
 from io import BytesIO
-from docxtpl import DocxTemplate
 from typing import Optional
 from job_hunting.lib.models import Resume
 
@@ -41,7 +40,7 @@ class ResumeExportService:
         try:
             template.render(context)
         except Exception as e:
-            breakpoint()
+            raise ValueError(f"Template rendering failed: {e}")
 
         # Save to BytesIO and return bytes
         buf = BytesIO()

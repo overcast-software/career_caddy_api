@@ -21,6 +21,23 @@ class BaseModel(Base):
         return cls._session
 
     @classmethod
+    def clear_session(cls):
+        """Clear the session to prevent identity map collisions."""
+        if cls._session is not None:
+            try:
+                cls._session.rollback()
+            except Exception:
+                pass
+            try:
+                cls._session.expunge_all()
+            except Exception:
+                pass
+            try:
+                cls._session.close()
+            except Exception:
+                pass
+
+    @classmethod
     def find_by(cls, session=None, **kwargs):
         if session is None:
             session = cls.get_session()
