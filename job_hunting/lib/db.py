@@ -5,6 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from job_hunting.lib.models.base import BaseModel
 
+logger = logging.getLogger(__name__)
+
 _engine = None
 _session = None
 
@@ -64,7 +66,7 @@ def init_sqlalchemy():
         # Create tables if they don't exist (non-destructive only)
         # Note: This is not a migrations strategy - use Django migrations for schema changes
         if _is_management_command():
-            logging.getLogger(__name__).info(
+            logger.info(
                 "Skipping SQLAlchemy metadata.create_all during Django management command"
             )
         else:
@@ -86,7 +88,5 @@ def init_sqlalchemy():
             raise RuntimeError(error_msg) from e
         else:
             # In development, log warning but allow startup
-            import logging
-
-            logging.getLogger(__name__).warning(error_msg)
+            logger.warning(error_msg)
             return
