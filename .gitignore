@@ -36,8 +36,8 @@ staticfiles/
 # Media files
 /media/
 
-# Django migrations
-*/migrations/*
+# Django migrations (tracked)
+# */migrations/*
 
 # VS Code
 .vscode/

@@ -1,10 +1,11 @@
+from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 from rest_framework import status
 
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
 from job_hunting.lib.models import (
-    User, Resume, Score, JobPost, Scrape, Company, CoverLetter, Application
+    Resume, Score, JobPost, Scrape, Company, CoverLetter, Application
 )
 
 
@@ -25,48 +26,69 @@ class JSONAPITests(APITestCase):
         super().tearDownClass()
 
     def setUp(self):
-        # Hard reset tables for isolation between tests
+        # Hard reset SA tables for isolation between tests
         Base.metadata.drop_all(bind=self.engine)
         Base.metadata.create_all(bind=self.engine)
 
-    def test_create_and_list_users_jsonapi(self):
-        # Initially empty list
-        resp = self.client.get("/api/v1/users/")
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data.get("data"), [])
+        # Create a Django user and authenticate with JWT for protected endpoints
+        User = get_user_model()
+        self.username = "testuser"
+        self.password = "testpass123"
+        self.user = User.objects.create_user(
+            username=self.username, email="testuser@example.com", password=self.password
+        )
+        token = self._obtain_jwt(self.username, self.password)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
-        # Create a user via JSON:API payload
+    def _obtain_jwt(self, username, password):
+        resp = self.client.post(
+            "/api/v1/token/",
+            data={"username": username, "password": password},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.data["access"]
+
+    def test_create_and_list_users_jsonapi(self):
+        # Unauthenticated requests should be rejected for listing users
+        self.client.credentials(HTTP_AUTHORIZATION="")
+        resp = self.client.get("/api/v1/users/")
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Create a user via JSON:API payload (registration is open)
         payload = {
             "data": {
                 "type": "users",
-                "attributes": {"name": "Alice", "email": "alice@example.com"},
+                "attributes": {
+                    "username": "alice",
+                    "email": "alice@example.com",
+                    "password": "s3cr3tpass",
+                    "first_name": "Alice",
+                    "last_name": "Anderson",
+                },
             }
         }
         resp = self.client.post("/api/v1/users/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data["data"]["type"], "users")
+        self.assertIn(resp.data["data"]["type"], ("user", "users"))
         user_id = int(resp.data["data"]["id"])
 
-        # List again, now has one record
+        # Authenticate as the newly created user and list (should only see self)
+        token = self._obtain_jwt("alice", "s3cr3tpass")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         resp = self.client.get("/api/v1/users/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
         self.assertEqual(resp.data["data"][0]["id"], str(user_id))
 
     def test_resume_creation_with_user_relationship_and_scoped_route(self):
-        # Prepare a user
-        session = self.session
-        user = User(name="Bob", email="bob@example.com")
-        session.add(user)
-        session.commit()
-
-        # Create resume with belongs-to relationship via JSON:API
+        # Create resume with belongs-to relationship via JSON:API for the authenticated user
         payload = {
             "data": {
                 "type": "resumes",
                 "attributes": {"file_path": "/tmp/r.txt"},
                 "relationships": {
-                    "user": {"data": {"type": "users", "id": str(user.id)}}
+                    "user": {"data": {"type": "users", "id": str(self.user.id)}}
                 },
             }
         }
@@ -75,7 +97,7 @@ class JSONAPITests(APITestCase):
         resume_id = int(resp.data["data"]["id"])
         self.assertEqual(resp.data["data"]["type"], "resumes")
         # Scoped route: /users/{id}/resumes
-        resp = self.client.get(f"/api/v1/users/{user.id}/resumes/")
+        resp = self.client.get(f"/api/v1/users/{self.user.id}/resumes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         ids = [int(r["id"]) for r in resp.data["data"]]
         self.assertIn(resume_id, ids)
@@ -118,11 +140,8 @@ class JSONAPITests(APITestCase):
         session.add(company)
         session.commit()
 
-        user = User(name="Eve", email="eve@example.com")
-        session.add(user)
-        session.commit()
-
-        resume = Resume(user_id=user.id, file_path="/tmp/eve.txt")
+        # Resume owned by authenticated Django user
+        resume = Resume(user_id=self.user.id, file_path="/tmp/eve.txt")
         session.add(resume)
         session.commit()
 
@@ -134,11 +153,11 @@ class JSONAPITests(APITestCase):
         session.add(scrape)
         session.commit()
 
-        cover = CoverLetter(content="Dear HR", user_id=user.id, resume_id=resume.id, job_post_id=job.id)
+        cover = CoverLetter(content="Dear HR", user_id=self.user.id, resume_id=resume.id, job_post_id=job.id)
         session.add(cover)
         session.commit()
 
-        app = Application(user_id=user.id, job_post_id=job.id, resume_id=resume.id, cover_letter_id=cover.id, status="submitted")
+        app = Application(user_id=self.user.id, job_post_id=job.id, resume_id=resume.id, cover_letter_id=cover.id, status="submitted")
         session.add(app)
         session.commit()
 
@@ -148,7 +167,7 @@ class JSONAPITests(APITestCase):
         self.assertEqual(len(resp.data["data"]), 1)
         self.assertEqual(resp.data["data"][0]["type"], "scrapes")
 
-        # /job-posts/{id}/cover-letters
+        # /job-posts/{id}/cover-letters (only those owned by current user)
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/cover-letters/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
@@ -163,10 +182,6 @@ class JSONAPITests(APITestCase):
     def test_update_and_delete_application_via_jsonapi(self):
         session = self.session
 
-        user = User(name="Carl", email="carl@example.com")
-        session.add(user)
-        session.commit()
-
         company = Company(name="Initech", display_name="Initech LLC")
         session.add(company)
         session.commit()
@@ -175,7 +190,7 @@ class JSONAPITests(APITestCase):
         session.add(job)
         session.commit()
 
-        app = Application(user_id=user.id, job_post_id=job.id, status="submitted")
+        app = Application(user_id=self.user.id, job_post_id=job.id, status="submitted")
         session.add(app)
         session.commit()
 
@@ -202,11 +217,7 @@ class JSONAPITests(APITestCase):
     def test_resume_scoped_cover_letters_and_applications(self):
         session = self.session
 
-        user = User(name="Dana", email="dana@example.com")
-        session.add(user)
-        session.commit()
-
-        resume = Resume(user_id=user.id, file_path="/tmp/dana.txt")
+        resume = Resume(user_id=self.user.id, file_path="/tmp/dana.txt")
         session.add(resume)
         session.commit()
 
@@ -218,15 +229,15 @@ class JSONAPITests(APITestCase):
         session.add(job)
         session.commit()
 
-        cover = CoverLetter(content="Cover Content", user_id=user.id, resume_id=resume.id, job_post_id=job.id)
+        cover = CoverLetter(content="Cover Content", user_id=self.user.id, resume_id=resume.id, job_post_id=job.id)
         session.add(cover)
         session.commit()
 
-        app = Application(user_id=user.id, job_post_id=job.id, resume_id=resume.id, cover_letter_id=cover.id, status="submitted")
+        app = Application(user_id=self.user.id, job_post_id=job.id, resume_id=resume.id, cover_letter_id=cover.id, status="submitted")
         session.add(app)
         session.commit()
 
-        # /resumes/{id}/cover-letters
+        # /resumes/{id}/cover-letters (owned by current user)
         resp = self.client.get(f"/api/v1/resumes/{resume.id}/cover-letters/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
@@ -241,11 +252,7 @@ class JSONAPITests(APITestCase):
     def test_user_scoped_scores(self):
         session = self.session
 
-        user = User(name="Frank", email="frank@example.com")
-        session.add(user)
-        session.commit()
-
-        resume = Resume(user_id=user.id, file_path="/tmp/r.txt")
+        resume = Resume(user_id=self.user.id, file_path="/tmp/r.txt")
         session.add(resume)
         session.commit()
 
@@ -257,11 +264,11 @@ class JSONAPITests(APITestCase):
         session.add(job)
         session.commit()
 
-        score = Score(score=99, explanation="Excellent", resume_id=resume.id, job_post_id=job.id, user_id=user.id)
+        score = Score(score=99, explanation="Excellent", resume_id=resume.id, job_post_id=job.id, user_id=self.user.id)
         session.add(score)
         session.commit()
 
-        resp = self.client.get(f"/api/v1/users/{user.id}/scores/")
+        resp = self.client.get(f"/api/v1/users/{self.user.id}/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
         self.assertEqual(resp.data["data"][0]["type"], "scores")
@@ -276,7 +283,7 @@ class JSONAPITests(APITestCase):
         job = JobPost(title="Engineer", description="Build things", company_id=company.id)
         session.add(job)
         session.commit()
-        
+
         original_created_at = job.created_at
 
         # Test valid ISO datetime with Z timezone
@@ -292,16 +299,16 @@ class JSONAPITests(APITestCase):
         }
         resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        
+
         # Reload job from database
         session.refresh(job)
-        
+
         # Verify posted_date was parsed and stored as datetime
         self.assertIsNotNone(job.posted_date)
         self.assertEqual(job.posted_date.year, 2025)
         self.assertEqual(job.posted_date.month, 10)
         self.assertEqual(job.posted_date.day, 25)
-        
+
         # Verify created_at was not changed
         self.assertEqual(job.created_at, original_created_at)
 
@@ -361,7 +368,7 @@ class JSONAPITests(APITestCase):
         }
         resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        
+
         # Reload and verify
         session.refresh(job)
         self.assertIsNone(job.posted_date)
