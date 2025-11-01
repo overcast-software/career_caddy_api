@@ -12,7 +12,6 @@ class User(BaseModel):
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
     email = Column(String, nullable=True)
-    phone = Column(String, unique=True)
     is_superuser = Column(Boolean, nullable=False, default=False)
     last_login = Column(DateTime)  # created_at is sufficient
     is_staff = Column(Boolean, nullable=False, default=False)
@@ -40,10 +39,6 @@ class User(BaseModel):
         # Fallback to email
         if self.email:
             return self.email.strip()
-
-        # Fallback to phone
-        if self.phone:
-            return self.phone.strip()
 
         # Fallback to empty string
         return ""

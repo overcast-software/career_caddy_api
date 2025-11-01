@@ -614,6 +614,10 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
+        # Extract phone before user creation
+        phone_present = "phone" in attrs
+        phone_val = str(attrs.pop("phone", "") or "").strip() if phone_present else None
+
         username = attrs.get("username")
         password = attrs.get("password")
         email = attrs.get("email", "")
@@ -647,6 +651,13 @@ class DjangoUserViewSet(viewsets.ViewSet):
         user.set_password(password)
         user.save()
 
+        # Handle phone via Profile if provided
+        if phone_present:
+            from job_hunting.profile_models import Profile
+            profile, _ = Profile.objects.get_or_create(user=user)
+            profile.phone = (phone_val[:50] or None) if phone_val else None
+            profile.save()
+
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
@@ -668,6 +679,10 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
+        # Extract phone before user updates
+        phone_present = "phone" in attrs
+        phone_val = str(attrs.pop("phone", "") or "").strip() if phone_present else None
+
         # Update allowed fields
         if "email" in attrs:
             user.email = attrs["email"]
@@ -679,6 +694,14 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user.set_password(attrs["password"])
 
         user.save()
+
+        # Handle phone via Profile if provided
+        if phone_present:
+            from job_hunting.profile_models import Profile
+            profile, _ = Profile.objects.get_or_create(user=user)
+            profile.phone = (phone_val[:50] or None) if phone_val else None
+            profile.save()
+
         return Response({"data": ser.to_resource(user)})
 
     def destroy(self, request, pk=None):
