@@ -1,4 +1,5 @@
 import os
+import sys
 from corsheaders.defaults import default_headers
 from django.core.exceptions import ImproperlyConfigured
 
@@ -8,6 +9,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Environment flags and safety
 SECRET_KEY = os.environ.get('SECRET_KEY', 'your_generated_secret_key')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+TESTING = any(arg in ("test", "pytest") for arg in sys.argv)
 
 # Security check for production
 if not DEBUG and (not SECRET_KEY or SECRET_KEY == 'your_generated_secret_key'):
@@ -23,6 +25,13 @@ if ALLOWED_HOSTS_ENV:
 else:
     # Development default
     ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else []
+
+# Ensure test-friendly hosts when testing
+if TESTING:
+    test_hosts = ['testserver', 'localhost', '127.0.0.1']
+    for host in test_hosts:
+        if host not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(host)
 
 # CSRF trusted origins
 CSRF_TRUSTED_ORIGINS_ENV = os.environ.get('CSRF_TRUSTED_ORIGINS', '')
@@ -155,7 +164,7 @@ if DEBUG:
 CORS_ALLOW_HEADERS = list(default_headers) + ["x-user-id"]
 
 # Security headers (production only)
-if not DEBUG:
+if not DEBUG and not TESTING:
     SECURE_SSL_REDIRECT = True
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SESSION_COOKIE_SECURE = True
@@ -168,6 +177,11 @@ if not DEBUG:
     X_FRAME_OPTIONS = 'DENY'
     SECURE_CONTENT_TYPE_NOSNIFF = True
     REFERRER_POLICY = 'same-origin'
+else:
+    SECURE_SSL_REDIRECT = False
+    if TESTING:
+        SESSION_COOKIE_SECURE = False
+        CSRF_COOKIE_SECURE = False
 
 # SimpleJWT Configuration
 from datetime import timedelta
