@@ -192,13 +192,13 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/cover-letters/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "cover-letters")
+        self.assertEqual(resp.data["data"][0]["type"], "cover-letter")
 
         # /job-posts/{id}/applications
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/applications/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "applications")
+        self.assertEqual(resp.data["data"][0]["type"], "application")
 
     def test_update_and_delete_application_via_jsonapi(self):
         session = self.session
