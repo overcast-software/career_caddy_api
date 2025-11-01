@@ -1,4 +1,3 @@
-import openai
 from jinja2 import Environment, FileSystemLoader
 
 
@@ -23,6 +22,6 @@ class JobScorer:
             )
             evaluation = response.choices[0].message.content.strip()
             return evaluation
-        except openai.OpenAIError as e:
+        except Exception as e:
             print(f"Error scoring job match: {e}")
             return None
