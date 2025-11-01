@@ -76,7 +76,7 @@ class JSONAPITests(APITestCase):
         }
         resp = self.client.post("/api/v1/users/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertIn(resp.data["data"]["type"], ("user", "users"))
+        self.assertIn(resp.data["data"]["type"], ("user", "user"))
         user_id = int(resp.data["data"]["id"])
 
         # Authenticate as the newly created user and list (should only see self)
@@ -101,7 +101,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.post("/api/v1/resumes/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         resume_id = int(resp.data["data"]["id"])
-        self.assertEqual(resp.data["data"]["type"], "resumes")
+        self.assertEqual(resp.data["data"]["type"], "resume")
         # Scoped route: /users/{id}/resumes
         resp = self.client.get(f"/api/v1/users/{self.user.id}/resumes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -126,7 +126,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/companies/{company.id}/job-posts/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "job-posts")
+        self.assertEqual(resp.data["data"][0]["type"], "job-post")
         self.assertEqual(resp.data["data"][0]["id"], str(job.id))
 
         # Add score to job post and check linkage endpoint
@@ -138,7 +138,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/relationships/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(isinstance(resp.data["data"], list))
-        self.assertEqual(resp.data["data"][0]["type"], "scores")
+        self.assertEqual(resp.data["data"][0]["type"], "score")
         self.assertEqual(resp.data["data"][0]["id"], str(score.id))
 
     def test_job_post_child_routes_scrapes_cover_letters_applications(self):
@@ -186,7 +186,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/scrapes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "scrapes")
+        self.assertEqual(resp.data["data"][0]["type"], "scrape")
 
         # /job-posts/{id}/cover-letters (only those owned by current user)
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/cover-letters/")
@@ -277,13 +277,13 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/resumes/{resume.id}/cover-letters/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "cover-letters")
+        self.assertEqual(resp.data["data"][0]["type"], "cover-letter")
 
         # /resumes/{id}/applications
         resp = self.client.get(f"/api/v1/resumes/{resume.id}/applications/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "applications")
+        self.assertEqual(resp.data["data"][0]["type"], "application")
 
     def test_user_scoped_scores(self):
         session = self.session
@@ -313,7 +313,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/users/{self.user.id}/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "scores")
+        self.assertEqual(resp.data["data"][0]["type"], "score")
 
     def test_job_post_datetime_parsing_and_created_at_protection(self):
         session = self.session
