@@ -7,10 +7,11 @@ from .base import BaseModel
 
 class User(BaseModel):
     __tablename__ = "auth_user"
+    __table_args__ = {"extend_existing": True}
     id = Column(Integer, primary_key=True, autoincrement=True)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
-    email = Column(String, unique=True, nullable=True)
+    email = Column(String, nullable=True)
     phone = Column(String, unique=True)
     is_superuser = Column(Boolean, nullable=False, default=False)
     last_login = Column(DateTime)  # created_at is sufficient
