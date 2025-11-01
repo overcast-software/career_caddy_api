@@ -2,11 +2,11 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:13
+    image: postgres:15
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-job_hunting}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -16,19 +16,20 @@ services:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - .:/code
+      - .:/app
     ports:
       - "8000:8000"
     depends_on:
       - db
     environment:
       DEBUG: 'True'
-      SECRET_KEY: ${SECRET_KEY}
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-      DB_HOST: db
-      DB_PORT: 5432
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5432/${DB_NAME:-job_hunting}
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      CORS_ALLOWED_ORIGINS: http://localhost:4200,http://127.0.0.1:4200
+      SCRAPING_ENABLED: 'True'
+      ALLOW_BOOTSTRAP_SUPERUSER: 'True'
+      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-dev-bootstrap-token}
 
 volumes:
   postgres_data:

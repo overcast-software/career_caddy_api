@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.python-version
+
+# Virtualenvs
+env/
+venv/
+.venv/
+
+# Build/test
+build/
+dist/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# Django
+staticfiles/
+media/
+*.log
+
+# Node
+node_modules/
+
+# Playwright caches
+**/playwright/.cache/
+**/playwright/.local-browsers/
+
+# Misc
+*.swp
+.DS_Store

@@ -86,7 +86,7 @@ def healthcheck(request):
 
 
 class BaseSAViewSet(viewsets.ViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [VndApiJSONParser, JSONParser]
     model = None
     serializer_class = None
@@ -415,8 +415,14 @@ class SummaryViewSet(BaseSAViewSet):
 
 
 class DjangoUserViewSet(viewsets.ViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     parser_classes = [VndApiJSONParser, JSONParser]
+    
+    def get_permissions(self):
+        """Allow unauthenticated access for create and bootstrap_superuser actions."""
+        if self.action in ['create', 'bootstrap_superuser']:
+            return [AllowAny()]
+        return super().get_permissions()
 
     def get_serializer(self):
         return DjangoUserSerializer()
@@ -467,7 +473,13 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
     def list(self, request):
         User = get_user_model()
-        users = User.objects.all()
+        
+        # Restrict list to staff users or return only current user
+        if request.user.is_staff:
+            users = User.objects.all()
+        else:
+            users = [request.user]
+            
         ser = self.get_serializer()
         data = [ser.to_resource(u) for u in users]
         payload = {"data": data}
@@ -482,6 +494,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+            
+        # Only allow staff to retrieve other users
+        if not request.user.is_staff and user.id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+            
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(user)}
         include_rels = self._parse_include(request)
@@ -579,6 +596,18 @@ class DjangoUserViewSet(viewsets.ViewSet):
         permission_classes=[AllowAny],
     )
     def bootstrap_superuser(self, request):
+        from django.conf import settings
+        
+        # Check if bootstrap is enabled
+        if not getattr(settings, 'ALLOW_BOOTSTRAP_SUPERUSER', False):
+            return Response({"errors": [{"detail": "Bootstrap disabled"}]}, status=403)
+            
+        # Verify bootstrap token
+        bootstrap_token = getattr(settings, 'BOOTSTRAP_TOKEN', '')
+        provided_token = request.META.get('HTTP_X_BOOTSTRAP_TOKEN', '')
+        if not bootstrap_token or provided_token != bootstrap_token:
+            return Response({"errors": [{"detail": "Invalid bootstrap token"}]}, status=403)
+        
         User = get_user_model()
         # Only allow when no users exist
         if User.objects.count() > 0:
@@ -2262,6 +2291,15 @@ class ScrapeViewSet(BaseSAViewSet):
     serializer_class = ScrapeSerializer
 
     def create(self, request):
+        from django.conf import settings
+        
+        # Check if scraping is enabled
+        if not getattr(settings, 'SCRAPING_ENABLED', False):
+            return Response(
+                {"errors": [{"detail": "Scraping functionality is disabled"}]},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+        
         # Detect a "url" key in either a plain JSON body or JSON:API attributes
         data = request.data if isinstance(request.data, dict) else {}
         url = data.get("url")
