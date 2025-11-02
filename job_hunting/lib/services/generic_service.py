@@ -16,6 +16,6 @@ class GenericService:
         async for scrape in self.scraper.process():
             self.scrape = scrape
             # Process the scrape with the parser
-            parsed_scrape = self.parser.parse(scrape)
-            return parsed_scrape
+            self.parser.parse(scrape)
+            return scrape
         return self.scrape

@@ -5,7 +5,13 @@ from rest_framework import status
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
 from job_hunting.lib.models import (
-    Resume, Score, JobPost, Scrape, Company, CoverLetter, Application
+    Resume,
+    Score,
+    JobPost,
+    Scrape,
+    Company,
+    CoverLetter,
+    Application,
 )
 
 
@@ -70,7 +76,7 @@ class JSONAPITests(APITestCase):
         }
         resp = self.client.post("/api/v1/users/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertIn(resp.data["data"]["type"], ("user", "users"))
+        self.assertIn(resp.data["data"]["type"], ("user", "user"))
         user_id = int(resp.data["data"]["id"])
 
         # Authenticate as the newly created user and list (should only see self)
@@ -95,7 +101,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.post("/api/v1/resumes/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         resume_id = int(resp.data["data"]["id"])
-        self.assertEqual(resp.data["data"]["type"], "resumes")
+        self.assertEqual(resp.data["data"]["type"], "resume")
         # Scoped route: /users/{id}/resumes
         resp = self.client.get(f"/api/v1/users/{self.user.id}/resumes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -110,7 +116,9 @@ class JSONAPITests(APITestCase):
         session.add(company)
         session.commit()
 
-        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        job = JobPost(
+            title="Engineer", description="Build things", company_id=company.id
+        )
         session.add(job)
         session.commit()
 
@@ -118,7 +126,7 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/companies/{company.id}/job-posts/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "job-posts")
+        self.assertEqual(resp.data["data"][0]["type"], "job-post")
         self.assertEqual(resp.data["data"][0]["id"], str(job.id))
 
         # Add score to job post and check linkage endpoint
@@ -127,10 +135,10 @@ class JSONAPITests(APITestCase):
         session.commit()
 
         # Relationship linkage: /job-posts/{id}/relationships/scores
-        resp = self.client.get(f"/api/v1/job-posts/{job.id}/relationships/scores")
+        resp = self.client.get(f"/api/v1/job-posts/{job.id}/relationships/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(isinstance(resp.data["data"], list))
-        self.assertEqual(resp.data["data"][0]["type"], "scores")
+        self.assertEqual(resp.data["data"][0]["type"], "score")
         self.assertEqual(resp.data["data"][0]["id"], str(score.id))
 
     def test_job_post_child_routes_scrapes_cover_letters_applications(self):
@@ -149,15 +157,28 @@ class JSONAPITests(APITestCase):
         session.add(job)
         session.commit()
 
-        scrape = Scrape(url="https://example.com/job", company_id=company.id, job_post_id=job.id)
+        scrape = Scrape(
+            url="https://example.com/job", company_id=company.id, job_post_id=job.id
+        )
         session.add(scrape)
         session.commit()
 
-        cover = CoverLetter(content="Dear HR", user_id=self.user.id, resume_id=resume.id, job_post_id=job.id)
+        cover = CoverLetter(
+            content="Dear HR",
+            user_id=self.user.id,
+            resume_id=resume.id,
+            job_post_id=job.id,
+        )
         session.add(cover)
         session.commit()
 
-        app = Application(user_id=self.user.id, job_post_id=job.id, resume_id=resume.id, cover_letter_id=cover.id, status="submitted")
+        app = Application(
+            user_id=self.user.id,
+            job_post_id=job.id,
+            resume_id=resume.id,
+            cover_letter_id=cover.id,
+            status="submitted",
+        )
         session.add(app)
         session.commit()
 
@@ -165,19 +186,19 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/scrapes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "scrapes")
+        self.assertEqual(resp.data["data"][0]["type"], "scrape")
 
         # /job-posts/{id}/cover-letters (only those owned by current user)
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/cover-letters/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "cover-letters")
+        self.assertEqual(resp.data["data"][0]["type"], "cover-letter")
 
         # /job-posts/{id}/applications
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/applications/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "applications")
+        self.assertEqual(resp.data["data"][0]["type"], "application")
 
     def test_update_and_delete_application_via_jsonapi(self):
         session = self.session
@@ -186,7 +207,9 @@ class JSONAPITests(APITestCase):
         session.add(company)
         session.commit()
 
-        job = JobPost(title="TPS Consultant", description="TPS work", company_id=company.id)
+        job = JobPost(
+            title="TPS Consultant", description="TPS work", company_id=company.id
+        )
         session.add(job)
         session.commit()
 
@@ -202,7 +225,9 @@ class JSONAPITests(APITestCase):
                 "attributes": {"status": "interview"},
             }
         }
-        resp = self.client.patch(f"/api/v1/applications/{app.id}/", data=payload, format="json")
+        resp = self.client.patch(
+            f"/api/v1/applications/{app.id}/", data=payload, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["data"]["attributes"]["status"], "interview")
 
@@ -229,11 +254,22 @@ class JSONAPITests(APITestCase):
         session.add(job)
         session.commit()
 
-        cover = CoverLetter(content="Cover Content", user_id=self.user.id, resume_id=resume.id, job_post_id=job.id)
+        cover = CoverLetter(
+            content="Cover Content",
+            user_id=self.user.id,
+            resume_id=resume.id,
+            job_post_id=job.id,
+        )
         session.add(cover)
         session.commit()
 
-        app = Application(user_id=self.user.id, job_post_id=job.id, resume_id=resume.id, cover_letter_id=cover.id, status="submitted")
+        app = Application(
+            user_id=self.user.id,
+            job_post_id=job.id,
+            resume_id=resume.id,
+            cover_letter_id=cover.id,
+            status="submitted",
+        )
         session.add(app)
         session.commit()
 
@@ -241,13 +277,13 @@ class JSONAPITests(APITestCase):
         resp = self.client.get(f"/api/v1/resumes/{resume.id}/cover-letters/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "cover-letters")
+        self.assertEqual(resp.data["data"][0]["type"], "cover-letter")
 
         # /resumes/{id}/applications
         resp = self.client.get(f"/api/v1/resumes/{resume.id}/applications/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "applications")
+        self.assertEqual(resp.data["data"][0]["type"], "application")
 
     def test_user_scoped_scores(self):
         session = self.session
@@ -264,14 +300,20 @@ class JSONAPITests(APITestCase):
         session.add(job)
         session.commit()
 
-        score = Score(score=99, explanation="Excellent", resume_id=resume.id, job_post_id=job.id, user_id=self.user.id)
+        score = Score(
+            score=99,
+            explanation="Excellent",
+            resume_id=resume.id,
+            job_post_id=job.id,
+            user_id=self.user.id,
+        )
         session.add(score)
         session.commit()
 
         resp = self.client.get(f"/api/v1/users/{self.user.id}/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "scores")
+        self.assertEqual(resp.data["data"][0]["type"], "score")
 
     def test_job_post_datetime_parsing_and_created_at_protection(self):
         session = self.session
@@ -280,7 +322,9 @@ class JSONAPITests(APITestCase):
         session.add(company)
         session.commit()
 
-        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        job = JobPost(
+            title="Engineer", description="Build things", company_id=company.id
+        )
         session.add(job)
         session.commit()
 
@@ -293,11 +337,13 @@ class JSONAPITests(APITestCase):
                 "id": str(job.id),
                 "attributes": {
                     "posted_date": "2025-10-25T09:37:33.140Z",
-                    "created_at": "2025-10-25T09:37:33.140Z"  # Should be ignored
+                    "created_at": "2025-10-25T09:37:33.140Z",  # Should be ignored
                 },
             }
         }
-        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        resp = self.client.patch(
+            f"/api/v1/job-posts/{job.id}/", data=payload, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
         # Reload job from database
@@ -319,7 +365,9 @@ class JSONAPITests(APITestCase):
         session.add(company)
         session.commit()
 
-        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        job = JobPost(
+            title="Engineer", description="Build things", company_id=company.id
+        )
         session.add(job)
         session.commit()
 
@@ -331,7 +379,9 @@ class JSONAPITests(APITestCase):
                 "attributes": {"posted_date": "not a date"},
             }
         }
-        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        resp = self.client.patch(
+            f"/api/v1/job-posts/{job.id}/", data=payload, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Invalid posted_date", str(resp.data))
 
@@ -343,7 +393,9 @@ class JSONAPITests(APITestCase):
                 "attributes": {"extraction_date": "invalid date"},
             }
         }
-        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        resp = self.client.patch(
+            f"/api/v1/job-posts/{job.id}/", data=payload, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Invalid extraction_date", str(resp.data))
 
@@ -354,7 +406,9 @@ class JSONAPITests(APITestCase):
         session.add(company)
         session.commit()
 
-        job = JobPost(title="Engineer", description="Build things", company_id=company.id)
+        job = JobPost(
+            title="Engineer", description="Build things", company_id=company.id
+        )
         session.add(job)
         session.commit()
 
@@ -366,7 +420,9 @@ class JSONAPITests(APITestCase):
                 "attributes": {"posted_date": None},
             }
         }
-        resp = self.client.patch(f"/api/v1/job-posts/{job.id}/", data=payload, format="json")
+        resp = self.client.patch(
+            f"/api/v1/job-posts/{job.id}/", data=payload, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
         # Reload and verify

@@ -170,6 +170,10 @@ class DjangoUserSerializer:
         return {self.type, _pluralize_type(self.type)}
 
     def to_resource(self, obj) -> Dict[str, Any]:
+        # Safely access phone from OneToOne Profile
+        profile = getattr(obj, "profile", None)
+        phone = getattr(profile, "phone", "") if profile else ""
+        
         res = {
             "type": self.type,
             "id": str(obj.id),
@@ -178,6 +182,7 @@ class DjangoUserSerializer:
                 "email": obj.email or "",
                 "first_name": obj.first_name or "",
                 "last_name": obj.last_name or "",
+                "phone": phone or "",
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
@@ -260,7 +265,7 @@ class DjangoUserSerializer:
         out: Dict[str, Any] = {}
 
         # Extract user attributes
-        for k in ["username", "email", "first_name", "last_name", "password"]:
+        for k in ["username", "email", "first_name", "last_name", "password", "phone"]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
 

@@ -1,10 +1,10 @@
 import asyncio
 import re
 import dateparser
-import json
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import JSONParser
 from .parsers import VndApiJSONParser
 from job_hunting.lib.scoring.job_scorer import JobScorer
-from job_hunting.lib.ai_client import ai_client
+from job_hunting.lib.ai_client import get_client, set_api_key
 from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.lib.services.cover_letter_service import CoverLetterService
 from job_hunting.lib.services.generic_service import GenericService
@@ -80,7 +80,58 @@ def healthcheck(request):
         )
 
     if request.method == "POST":
-        return JsonResponse({"error": "method not allowed"}, status=405)
+        # Allow setting the OpenAI API key after bootstrap as well.
+        # Authorization options:
+        # - Authenticated superuser may always set the key
+        # - Or provide the X-BOOTSTRAP-TOKEN matching settings.BOOTSTRAP_TOKEN
+        allow_bootstrap = getattr(settings, "ALLOW_BOOTSTRAP_SUPERUSER", False)
+        bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
+        provided_token = request.META.get("HTTP_X_BOOTSTRAP_TOKEN", "")
+        user = getattr(request, "user", None)
+        is_superuser = bool(
+            user
+            and user.is_authenticated
+            and getattr(user, "is_superuser", False)
+        )
+        token_ok = bool(bootstrap_token and provided_token == bootstrap_token)
+
+        if not (is_superuser or token_ok):
+            # Fallback to original bootstrap gate (no users yet and bootstrap enabled)
+            if not allow_bootstrap or not bootstrap_token:
+                return JsonResponse({"errors": [{"detail": "Bootstrap disabled or invalid token"}]}, status=403)
+            if user_count is not None and user_count > 0:
+                return JsonResponse({"errors": [{"detail": "bootstrap closed"}]}, status=403)
+
+        # Accept API key via header or JSON/JSON:API body
+        api_key = (request.META.get("HTTP_X_OPENAI_API_KEY", "") or "").strip()
+        if not api_key:
+            try:
+                import json
+                data = json.loads(request.body.decode("utf-8") or "{}")
+            except Exception:
+                data = {}
+            attrs = {}
+            if isinstance(data.get("data"), dict):
+                attrs = data["data"].get("attributes") or {}
+            elif isinstance(data, dict):
+                attrs = data
+            api_key = (
+                attrs.get("openai_api_key")
+                or attrs.get("OPENAI_API_KEY")
+                or attrs.get("openaiApiKey")
+                or ""
+            )
+            api_key = str(api_key).strip()
+
+        if not api_key:
+            return JsonResponse({"errors": [{"detail": "Missing openai_api_key"}]}, status=400)
+
+        try:
+            set_api_key(api_key)
+        except Exception as e:
+            return JsonResponse({"errors": [{"detail": str(e)}]}, status=400)
+
+        return JsonResponse({"healthy": True, "openai_api_key_saved": True}, status=201)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
 
@@ -119,10 +170,10 @@ class BaseSAViewSet(viewsets.ViewSet):
                 out.append(p)
         return out
 
-    def _build_included(self, objs, include_rels, request=None):
+    def _build_included(self, objs, include_rels, request=None, primary_serializer=None):
         included = []
         seen = set()  # (type, id)
-        primary_ser = self.get_serializer()
+        primary_ser = primary_serializer or self.get_serializer()
         rel_keys = set(getattr(primary_ser, "relationships", {}).keys())
 
         def _normalize_rel(name: str) -> str:
@@ -156,12 +207,17 @@ class BaseSAViewSet(viewsets.ViewSet):
                     key = (rel_type, str(t.id))
                     if key in seen:
                         continue
-                    
+
                     # Filter cover-letter resources to only include those owned by authenticated user
-                    if rel_type == "cover-letter" and request and hasattr(request, 'user') and request.user.is_authenticated:
+                    if (
+                        rel_type == "cover-letter"
+                        and request
+                        and hasattr(request, "user")
+                        and request.user.is_authenticated
+                    ):
                         if getattr(t, "user_id", None) != request.user.id:
                             continue
-                    
+
                     seen.add(key)
                     included.append(rel_ser.to_resource(t))
 
@@ -391,7 +447,14 @@ class SummaryViewSet(BaseSAViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            summary_service = SummaryService(ai_client, job=job_post, resume=resume)
+            client = get_client(required=False)
+            if client is None:
+                return Response(
+                    {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                    status=503
+                )
+            
+            summary_service = SummaryService(client, job=job_post, resume=resume)
             summary = summary_service.generate_summary()
 
         session = self.get_session()
@@ -417,10 +480,10 @@ class SummaryViewSet(BaseSAViewSet):
 class DjangoUserViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [VndApiJSONParser, JSONParser]
-    
+
     def get_permissions(self):
         """Allow unauthenticated access for create and bootstrap_superuser actions."""
-        if self.action in ['create', 'bootstrap_superuser']:
+        if self.action in ["create", "bootstrap_superuser"]:
             return [AllowAny()]
         return super().get_permissions()
 
@@ -473,13 +536,13 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
     def list(self, request):
         User = get_user_model()
-        
+
         # Restrict list to staff users or return only current user
         if request.user.is_staff:
             users = User.objects.all()
         else:
             users = [request.user]
-            
+
         ser = self.get_serializer()
         data = [ser.to_resource(u) for u in users]
         payload = {"data": data}
@@ -494,11 +557,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user = User.objects.get(id=int(pk))
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-            
+
         # Only allow staff to retrieve other users
         if not request.user.is_staff and user.id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
-            
+
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(user)}
         include_rels = self._parse_include(request)
@@ -506,12 +569,54 @@ class DjangoUserViewSet(viewsets.ViewSet):
             payload["included"] = self._build_included([user], include_rels, request)
         return Response(payload)
 
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="set-openai-api-key",
+        permission_classes=[IsAuthenticated],
+    )
+    def set_openai_api_key(self, request):
+        user = request.user
+        if not getattr(user, "is_superuser", False):
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        # Accept API key via header or JSON/JSON:API body
+        api_key = (request.META.get("HTTP_X_OPENAI_API_KEY", "") or "").strip()
+        if not api_key:
+            data = request.data if isinstance(request.data, dict) else {}
+            attrs = {}
+            if isinstance(data.get("data"), dict):
+                attrs = data["data"].get("attributes") or {}
+            else:
+                attrs = data or {}
+            api_key = (
+                attrs.get("openai_api_key")
+                or attrs.get("OPENAI_API_KEY")
+                or attrs.get("openaiApiKey")
+                or ""
+            )
+            api_key = str(api_key).strip()
+
+        if not api_key:
+            return Response({"errors": [{"detail": "Missing openai_api_key"}]}, status=400)
+
+        try:
+            set_api_key(api_key)
+        except Exception as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        return Response({"meta": {"openai_api_key_saved": True}}, status=201)
+
     def create(self, request):
         ser = self.get_serializer()
         try:
             attrs = ser.parse_payload(request.data)
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        # Extract phone before user creation
+        phone_present = "phone" in attrs
+        phone_val = str(attrs.pop("phone", "") or "").strip() if phone_present else None
 
         username = attrs.get("username")
         password = attrs.get("password")
@@ -546,6 +651,13 @@ class DjangoUserViewSet(viewsets.ViewSet):
         user.set_password(password)
         user.save()
 
+        # Handle phone via Profile if provided
+        if phone_present:
+            from job_hunting.profile_models import Profile
+            profile, _ = Profile.objects.get_or_create(user=user)
+            profile.phone = (phone_val[:50] or None) if phone_val else None
+            profile.save()
+
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
@@ -567,6 +679,10 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
+        # Extract phone before user updates
+        phone_present = "phone" in attrs
+        phone_val = str(attrs.pop("phone", "") or "").strip() if phone_present else None
+
         # Update allowed fields
         if "email" in attrs:
             user.email = attrs["email"]
@@ -578,6 +694,14 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user.set_password(attrs["password"])
 
         user.save()
+
+        # Handle phone via Profile if provided
+        if phone_present:
+            from job_hunting.profile_models import Profile
+            profile, _ = Profile.objects.get_or_create(user=user)
+            profile.phone = (phone_val[:50] or None) if phone_val else None
+            profile.save()
+
         return Response({"data": ser.to_resource(user)})
 
     def destroy(self, request, pk=None):
@@ -597,17 +721,19 @@ class DjangoUserViewSet(viewsets.ViewSet):
     )
     def bootstrap_superuser(self, request):
         from django.conf import settings
-        
+
         # Check if bootstrap is enabled
-        if not getattr(settings, 'ALLOW_BOOTSTRAP_SUPERUSER', False):
+        if not getattr(settings, "ALLOW_BOOTSTRAP_SUPERUSER", False):
             return Response({"errors": [{"detail": "Bootstrap disabled"}]}, status=403)
-            
+
         # Verify bootstrap token
-        bootstrap_token = getattr(settings, 'BOOTSTRAP_TOKEN', '')
-        provided_token = request.META.get('HTTP_X_BOOTSTRAP_TOKEN', '')
+        bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
+        provided_token = request.META.get("HTTP_X_BOOTSTRAP_TOKEN", "")
         if not bootstrap_token or provided_token != bootstrap_token:
-            return Response({"errors": [{"detail": "Invalid bootstrap token"}]}, status=403)
-        
+            return Response(
+                {"errors": [{"detail": "Invalid bootstrap token"}]}, status=403
+            )
+
         User = get_user_model()
         # Only allow when no users exist
         if User.objects.count() > 0:
@@ -626,6 +752,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
         password = attrs.get("password") or "admin"
         first_name = attrs.get("first_name") or attrs.get("name") or ""
         last_name = attrs.get("last_name") or ""
+        # Optional: allow setting OpenAI API key during bootstrap
+        api_key = attrs.get("openai_api_key") or attrs.get("OPENAI_API_KEY") or attrs.get("openaiApiKey")
 
         user = User.objects.create_superuser(
             username=username,
@@ -638,8 +766,21 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user.last_name = last_name
         user.save()
 
+        # Optionally persist the AI API key securely during bootstrap
+        meta = {}
+        if api_key:
+            try:
+                set_api_key(str(api_key).strip())
+                meta["openai_api_key_saved"] = True
+            except Exception as e:
+                meta["openai_api_key_saved"] = False
+                meta["openai_api_key_error"] = str(e)
+
         ser = self.get_serializer()
-        return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
+        payload = {"data": ser.to_resource(user)}
+        if meta:
+            payload["meta"] = meta
+        return Response(payload, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"])
     def resumes(self, request, pk=None):
@@ -706,7 +847,12 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
 
-    @action(detail=False, methods=["get"], url_path="me", permission_classes=[IsAuthenticated])
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="me",
+        permission_classes=[IsAuthenticated],
+    )
     def me(self, request):
         user = request.user
         ser = self.get_serializer()
@@ -1678,14 +1824,23 @@ class ResumeViewSet(BaseSAViewSet):
         data = [ScoreSerializer().to_resource(s) for s in (obj.scores or [])]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"], url_path="cover-letters", permission_classes=[IsAuthenticated])
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="cover-letters",
+        permission_classes=[IsAuthenticated],
+    )
     def cover_letters(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = CoverLetter.get_session()
-        cover_letters = session.query(CoverLetter).filter_by(resume_id=obj.id, user_id=request.user.id).all()
+        cover_letters = (
+            session.query(CoverLetter)
+            .filter_by(resume_id=obj.id, user_id=request.user.id)
+            .all()
+        )
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
@@ -1758,7 +1913,15 @@ class ResumeViewSet(BaseSAViewSet):
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                summary_service = SummaryService(ai_client, job=job_post, resume=obj)
+                
+                client = get_client(required=False)
+                if client is None:
+                    return Response(
+                        {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                        status=503
+                    )
+                
+                summary_service = SummaryService(client, job=job_post, resume=obj)
                 summary = summary_service.generate_summary()
 
             session = self.get_session()
@@ -1776,7 +1939,9 @@ class ResumeViewSet(BaseSAViewSet):
             payload = {"data": ser.to_resource(summary)}
             include_rels = self._parse_include(request)
             if include_rels:
-                payload["included"] = self._build_included([summary], include_rels, request)
+                payload["included"] = self._build_included(
+                    [summary], include_rels, request
+                )
             return Response(payload, status=status.HTTP_201_CREATED)
 
         obj = self.model.get(int(pk))
@@ -2079,7 +2244,15 @@ class ScoreViewSet(BaseSAViewSet):
 
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
-        myJobScorer = JobScorer(ai_client)
+        
+        client = get_client(required=False)
+        if client is None:
+            return Response(
+                {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                status=503
+            )
+        
+        myJobScorer = JobScorer(client)
 
         relationships = (data.get("data") or {}).get("relationships") or {}
 
@@ -2189,14 +2362,23 @@ class JobPostViewSet(BaseSAViewSet):
         data = [ScrapeSerializer().to_resource(s) for s in (obj.scrapes or [])]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"], url_path="cover-letters", permission_classes=[IsAuthenticated])
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="cover-letters",
+        permission_classes=[IsAuthenticated],
+    )
     def cover_letters(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         session = CoverLetter.get_session()
-        cover_letters = session.query(CoverLetter).filter_by(job_post_id=obj.id, user_id=request.user.id).all()
+        cover_letters = (
+            session.query(CoverLetter)
+            .filter_by(job_post_id=obj.id, user_id=request.user.id)
+            .all()
+        )
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
@@ -2258,7 +2440,14 @@ class JobPostViewSet(BaseSAViewSet):
                 )
                 summary.save()
             else:
-                summary_service = SummaryService(ai_client, job=obj, resume=resume)
+                client = get_client(required=False)
+                if client is None:
+                    return Response(
+                        {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                        status=503
+                    )
+                
+                summary_service = SummaryService(client, job=obj, resume=resume)
                 summary = summary_service.generate_summary()
 
             session = self.get_session()
@@ -2276,7 +2465,9 @@ class JobPostViewSet(BaseSAViewSet):
             payload = {"data": ser.to_resource(summary)}
             include_rels = self._parse_include(request)
             if include_rels:
-                payload["included"] = self._build_included([summary], include_rels, request)
+                payload["included"] = self._build_included(
+                    [summary], include_rels, request
+                )
             return Response(payload, status=status.HTTP_201_CREATED)
 
         obj = self.model.get(int(pk))
@@ -2291,15 +2482,14 @@ class ScrapeViewSet(BaseSAViewSet):
     serializer_class = ScrapeSerializer
 
     def create(self, request):
-        from django.conf import settings
-        
+
         # Check if scraping is enabled
-        if not getattr(settings, 'SCRAPING_ENABLED', False):
+        if not getattr(settings, "SCRAPING_ENABLED", False):
             return Response(
                 {"errors": [{"detail": "Scraping functionality is disabled"}]},
                 status=status.HTTP_501_NOT_IMPLEMENTED,
             )
-        
+
         # Detect a "url" key in either a plain JSON body or JSON:API attributes
         data = request.data if isinstance(request.data, dict) else {}
         url = data.get("url")
@@ -2311,10 +2501,17 @@ class ScrapeViewSet(BaseSAViewSet):
 
         # Lazy import to avoid heavy deps at module import time
 
+        client = get_client(required=False)
+        if client is None:
+            return Response(
+                {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                status=503
+            )
+        
         browser_manager = BrowserManager()
         asyncio.run(browser_manager.start_browser(False))
         service = GenericService(
-            url=url, browser=browser_manager, ai_client=ai_client, creds={}
+            url=url, browser=browser_manager, ai_client=client, creds={}
         )
         try:
             try:
@@ -2340,12 +2537,14 @@ class ScrapeViewSet(BaseSAViewSet):
             job_post = None
 
         if job_post:
-            serializer = self.get_serializer()
-            resource = serializer.to_resource(job_post)
+            job_post_serializer = TYPE_TO_SERIALIZER.get("job-post")()
+            resource = job_post_serializer.to_resource(job_post)
             include_rels = self._parse_include(request)
             payload = {"data": resource}
             if include_rels:
-                payload["included"] = self._build_included([job_post], include_rels, request)
+                payload["included"] = self._build_included(
+                    [job_post], include_rels, request, primary_serializer=job_post_serializer
+                )
             return Response(payload, status=status.HTTP_201_CREATED)
 
         # Could not resolve a JobPost yet — return the Scrape so the client can track progress
@@ -2397,14 +2596,14 @@ class CoverLetterViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         # Verify ownership
         if obj.user_id != request.user.id:
             return Response(
                 {"errors": [{"detail": "Forbidden"}]},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        
+
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -2416,23 +2615,23 @@ class CoverLetterViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
+
         # Verify ownership
         if obj.user_id != request.user.id:
             return Response(
                 {"errors": [{"detail": "Forbidden"}]},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        
+
         ser = self.get_serializer()
         try:
             attrs = ser.parse_payload(request.data)
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
-        
+
         # Remove any user_id from attrs to prevent ownership changes
         attrs.pop("user_id", None)
-        
+
         # If resume_id is being changed, validate new resume ownership
         if "resume_id" in attrs:
             new_resume = Resume.get(attrs["resume_id"])
@@ -2441,7 +2640,7 @@ class CoverLetterViewSet(BaseSAViewSet):
                     {"errors": [{"detail": "Forbidden"}]},
                     status=status.HTTP_403_FORBIDDEN,
                 )
-        
+
         for k, v in attrs.items():
             setattr(obj, k, v)
         session = self.get_session()
@@ -2453,14 +2652,14 @@ class CoverLetterViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response(status=204)
-        
+
         # Verify ownership
         if obj.user_id != request.user.id:
             return Response(
                 {"errors": [{"detail": "Forbidden"}]},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        
+
         session = self.get_session()
         session.delete(obj)
         session.commit()
@@ -2534,7 +2733,13 @@ class CoverLetterViewSet(BaseSAViewSet):
         # Validate that the referenced resume belongs to the authenticated user
         if resume.user_id != request.user.id:
             return Response(
-                {"errors": [{"detail": "Forbidden: resume does not belong to the authenticated user"}]},
+                {
+                    "errors": [
+                        {
+                            "detail": "Forbidden: resume does not belong to the authenticated user"
+                        }
+                    ]
+                },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -2552,16 +2757,30 @@ class CoverLetterViewSet(BaseSAViewSet):
             )
             cover_letter.save()
         else:
-            cl_service = CoverLetterService(ai_client, job_post, resume)
+            client = get_client(required=False)
+            if client is None:
+                return Response(
+                    {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                    status=503
+                )
+            
+            cl_service = CoverLetterService(client, job_post, resume)
             cover_letter = cl_service.generate_cover_letter()
 
         payload = {"data": ser.to_resource(cover_letter)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([cover_letter], include_rels, request)
+            payload["included"] = self._build_included(
+                [cover_letter], include_rels, request
+            )
         return Response(payload, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=["get"], url_path="export", permission_classes=[IsAuthenticated])
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="export",
+        permission_classes=[IsAuthenticated],
+    )
     def export_docx(self, request, pk=None):
         cl = self.model.get(int(pk))
         if not cl:

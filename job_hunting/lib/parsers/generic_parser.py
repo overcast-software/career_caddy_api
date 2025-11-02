@@ -1,4 +1,3 @@
-import openai
 from job_hunting.lib.models import Scrape, JobPost, Company
 import sys
 import json
@@ -36,7 +35,7 @@ class GenericParser:
                 defaults={"description": evaluation.get("description")},
             )
             print(f"job post id: {job.id}")
-            scrape.job_id = job.id
+            scrape.job_post_id = job.id
             scrape.save()
         except Exception as e:
             print(e)
@@ -60,6 +59,6 @@ class GenericParser:
                 model="gpt-4o", messages=messages, max_tokens=2000
             )
             return response.choices[0].message.content.strip()
-        except openai.OpenAIError as e:
+        except Exception as e:
             print(f"Error analyzing with ChatGPT: {e}")
-            sys.exit(1)
+            raise
