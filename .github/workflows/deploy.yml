@@ -105,6 +105,21 @@ jobs:
             fi
             echo "IMAGE_REPO=${{ env.IMAGE_REPO }}" > ${{ secrets.DEPLOY_APP_DIR }}/.env
             echo "IMAGE_TAG=${{ github.sha }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            if [ -n "${{ secrets.ALLOWED_HOSTS }}" ]; then
+              echo "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            else
+              echo "ALLOWED_HOSTS=careercaddy.online,www.careercaddy.online,localhost,127.0.0.1" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
+            if [ -n "${{ secrets.CORS_ALLOWED_ORIGINS }}" ]; then
+              echo "CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            else
+              echo "CORS_ALLOWED_ORIGINS=https://careercaddy.online,https://www.careercaddy.online" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
+            if [ -n "${{ secrets.CSRF_TRUSTED_ORIGINS }}" ]; then
+              echo "CSRF_TRUSTED_ORIGINS=${{ secrets.CSRF_TRUSTED_ORIGINS }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            else
+              echo "CSRF_TRUSTED_ORIGINS=https://careercaddy.online,https://www.careercaddy.online" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
             cd ${{ secrets.DEPLOY_APP_DIR }}
             if [ -f docker-compose.prod.yml ]; then
               COMPOSE_FILE=docker-compose.prod.yml
