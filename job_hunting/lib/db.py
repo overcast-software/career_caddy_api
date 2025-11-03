@@ -63,18 +63,8 @@ def init_sqlalchemy():
 
         _engine = create_engine(db_url, connect_args=connect_args, **engine_kwargs)
 
-        # Create tables if they don't exist (non-destructive only)
-        # Note: This is not a migrations strategy - use Django migrations for schema changes
-        if _is_management_command():
-            logger.info(
-                "Skipping SQLAlchemy metadata.create_all during Django management command"
-            )
-        else:
-            tables_to_create = [
-                t for t in BaseModel.metadata.sorted_tables if t.name != "auth_user"
-            ]
-            if tables_to_create:
-                BaseModel.metadata.create_all(bind=_engine, tables=tables_to_create)
+        # Schema creation is now handled separately via ensure_sqlalchemy_schema()
+        # to prevent race conditions during app startup
 
         _session = scoped_session(
             sessionmaker(bind=_engine, autoflush=False, autocommit=False)
@@ -90,3 +80,53 @@ def init_sqlalchemy():
             # In development, log warning but allow startup
             logger.warning(error_msg)
             return
+
+
+def ensure_sqlalchemy_schema(with_advisory_lock=True):
+    """Create SQLAlchemy tables with optional advisory lock for PostgreSQL."""
+    # Ensure engine and session are initialized
+    init_sqlalchemy()
+    
+    if _engine is None:
+        logger.error("SQLAlchemy engine not initialized")
+        return
+    
+    tables_to_create = [
+        t for t in BaseModel.metadata.sorted_tables if t.name != "auth_user"
+    ]
+    
+    if not tables_to_create:
+        logger.info("No SQLAlchemy tables to create")
+        return
+    
+    # Use advisory lock for PostgreSQL to prevent concurrent schema creation
+    if with_advisory_lock and _engine.dialect.name == 'postgresql':
+        # Use a constant key for the advisory lock
+        SCHEMA_LOCK_KEY = 123456789
+        
+        with _engine.connect() as conn:
+            try:
+                # Acquire advisory lock
+                result = conn.execute(
+                    "SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,)
+                )
+                logger.info("Acquired PostgreSQL advisory lock for schema creation")
+                
+                # Create tables with checkfirst=True
+                BaseModel.metadata.create_all(
+                    bind=conn, tables=tables_to_create, checkfirst=True
+                )
+                logger.info("SQLAlchemy schema creation completed")
+                
+            finally:
+                # Release advisory lock
+                conn.execute(
+                    "SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK_KEY,)
+                )
+                logger.info("Released PostgreSQL advisory lock")
+    else:
+        # For non-PostgreSQL or when lock is disabled
+        BaseModel.metadata.create_all(
+            bind=_engine, tables=tables_to_create, checkfirst=True
+        )
+        logger.info("SQLAlchemy schema creation completed (no lock)")

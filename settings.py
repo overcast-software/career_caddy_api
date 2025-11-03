@@ -70,7 +70,8 @@ ALLOWED_HOSTS = list(set(
 
 CORS_ALLOWED_ORIGINS = list(set(
     (globals().get("CORS_ALLOWED_ORIGINS") or []) +
-    [o for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o] +
+    [o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()] +
+    ([os.environ.get("CORS_ALLOWED_ORIGIN").strip()] if os.environ.get("CORS_ALLOWED_ORIGIN") else []) +
     ["https://careercaddy.online"]
 ))
 

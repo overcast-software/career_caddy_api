@@ -14,7 +14,7 @@ services:
 
   web:
     image: ${IMAGE_REPO}:${IMAGE_TAG}
-    command: python manage.py runserver 0.0.0.0:8000
+    command: sh -c "python manage.py ensuredb && python manage.py migrate && python manage.py initsa && gunicorn -c gunicorn.conf.py job_hunting.wsgi:application"
     ports:
       - "127.0.0.1:8025:8000"
     depends_on:
@@ -31,6 +31,8 @@ services:
       ALLOW_BOOTSTRAP_SUPERUSER: ${ALLOW_BOOTSTRAP_SUPERUSER:-False}
       BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GUNICORN_HOST: 0.0.0.0
+      GUNICORN_PORT: "8000"
 
 volumes:
   postgres_data:
