@@ -79,7 +79,7 @@ jobs:
           script: |
             mkdir -p ${{ secrets.DEPLOY_APP_DIR }}
 
-      - name: Copy compose file
+      - name: Copy docker-compose.yml
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
@@ -88,6 +88,7 @@ jobs:
           port: ${{ secrets.DEPLOY_SSH_PORT != '' && secrets.DEPLOY_SSH_PORT || '22' }}
           source: "deploy/docker-compose.yml"
           target: ${{ secrets.DEPLOY_APP_DIR }}
+          strip_components: 1
 
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.3
@@ -105,12 +106,21 @@ jobs:
             echo "IMAGE_REPO=${{ env.IMAGE_REPO }}" > ${{ secrets.DEPLOY_APP_DIR }}/.env
             echo "IMAGE_TAG=${{ github.sha }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
             cd ${{ secrets.DEPLOY_APP_DIR }}
+            if [ -f docker-compose.prod.yml ]; then
+              COMPOSE_FILE=docker-compose.prod.yml
+            elif [ -f docker-compose.yml ]; then
+              COMPOSE_FILE=docker-compose.yml
+            else
+              echo "Error: No docker-compose file found in ${{ secrets.DEPLOY_APP_DIR }}"
+              ls -la
+              exit 1
+            fi
             if docker compose version >/dev/null 2>&1; then
-              docker compose -f docker-compose.prod.yml pull
-              docker compose -f docker-compose.prod.yml up -d --remove-orphans
+              docker compose -f "$COMPOSE_FILE" pull
+              docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
             elif command -v docker-compose >/dev/null 2>&1; then
-              docker-compose -f docker-compose.prod.yml pull
-              docker-compose -f docker-compose.prod.yml up -d --remove-orphans
+              docker-compose -f "$COMPOSE_FILE" pull
+              docker-compose -f "$COMPOSE_FILE" up -d --remove-orphans
             else
               echo "Error: Docker Compose not found"
               exit 1
