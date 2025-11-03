@@ -1,6 +1,6 @@
 import os
 import sys
-from corsheaders.defaults import default_headers
+from corsheaders.defaults import default_headers, default_methods
 from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -44,8 +44,8 @@ USE_TZ = True
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -179,6 +179,7 @@ else:
 CORS_ALLOW_CREDENTIALS = os.environ.get('CORS_ALLOW_CREDENTIALS', 'False') == 'True'
 
 CORS_ALLOW_HEADERS = list(default_headers) + ["x-user-id"]
+CORS_ALLOW_METHODS = list(default_methods)
 
 # Security headers (production only)
 if not DEBUG and not TESTING:

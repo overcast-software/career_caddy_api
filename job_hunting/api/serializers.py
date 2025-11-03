@@ -1,24 +1,26 @@
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List
+
 import dateparser
 from django.contrib.auth import get_user_model
+
 from job_hunting.lib.models import (
-    Resume,
-    Score,
-    JobPost,
-    Scrape,
+    Application,
+    Certification,
     Company,
     CoverLetter,
-    Application,
-    Summary,
-    ResumeSummaries,
-    Experience,
-    Education,
-    Certification,
     Description,
+    Education,
+    Experience,
     ExperienceDescription,
-    Skill,
+    JobPost,
+    Resume,
     ResumeSkill,
+    ResumeSummaries,
+    Score,
+    Scrape,
+    Skill,
+    Summary,
 )
 
 
@@ -173,7 +175,7 @@ class DjangoUserSerializer:
         # Safely access phone from OneToOne Profile
         profile = getattr(obj, "profile", None)
         phone = getattr(profile, "phone", "") if profile else ""
-        
+
         res = {
             "type": self.type,
             "id": str(obj.id),
@@ -225,10 +227,10 @@ class DjangoUserSerializer:
     def get_related(self, obj, rel_name):
         # Import here to avoid circular imports
         from job_hunting.lib.models import (
+            Application,
+            CoverLetter,
             Resume,
             Score,
-            CoverLetter,
-            Application,
             Summary,
         )
 
