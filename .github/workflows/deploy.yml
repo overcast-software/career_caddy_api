@@ -124,6 +124,10 @@ jobs:
             else
               echo "CSRF_TRUSTED_ORIGINS=https://careercaddy.online,https://www.careercaddy.online,https://api.careercaddy.online" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
             fi
+            # OPENAI API key
+            if [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
+              echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
             cd ${{ secrets.DEPLOY_APP_DIR }}
             if [ -f docker-compose.prod.yml ]; then
               COMPOSE_FILE=docker-compose.prod.yml
