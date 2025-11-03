@@ -666,12 +666,17 @@ class DjangoUserViewSet(viewsets.ViewSet):
         user.set_password(password)
         user.save()
 
-        # Handle phone via Profile if provided
+        # Handle phone via SQLAlchemy Profile if provided
         if phone_present:
-            from job_hunting.profile_models import Profile
-            profile, _ = Profile.objects.get_or_create(user=user)
-            profile.phone = (phone_val[:50] or None) if phone_val else None
-            profile.save()
+            from job_hunting.profile_models import Profile as SAProfile
+            session = SAProfile.get_session()
+            prof = session.query(SAProfile).filter_by(user_id=user.id).first()
+            if not prof:
+                prof = SAProfile(user_id=user.id, phone=(phone_val[:50] or None) if phone_val else None)
+            else:
+                prof.phone = (phone_val[:50] or None) if phone_val else None
+            session.add(prof)
+            session.commit()
 
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 
@@ -710,12 +715,17 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         user.save()
 
-        # Handle phone via Profile if provided
+        # Handle phone via SQLAlchemy Profile if provided
         if phone_present:
-            from job_hunting.profile_models import Profile
-            profile, _ = Profile.objects.get_or_create(user=user)
-            profile.phone = (phone_val[:50] or None) if phone_val else None
-            profile.save()
+            from job_hunting.profile_models import Profile as SAProfile
+            session = SAProfile.get_session()
+            prof = session.query(SAProfile).filter_by(user_id=user.id).first()
+            if not prof:
+                prof = SAProfile(user_id=user.id, phone=(phone_val[:50] or None) if phone_val else None)
+            else:
+                prof.phone = (phone_val[:50] or None) if phone_val else None
+            session.add(prof)
+            session.commit()
 
         return Response({"data": ser.to_resource(user)})
 

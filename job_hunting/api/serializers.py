@@ -172,9 +172,16 @@ class DjangoUserSerializer:
         return {self.type, _pluralize_type(self.type)}
 
     def to_resource(self, obj) -> Dict[str, Any]:
-        # Safely access phone from OneToOne Profile
-        profile = getattr(obj, "profile", None)
-        phone = getattr(profile, "phone", "") if profile else ""
+        # Fetch phone from SQLAlchemy Profile by user_id
+        phone = ""
+        try:
+            from job_hunting.profile_models import Profile as SAProfile
+            session = SAProfile.get_session()
+            prof = session.query(SAProfile).filter_by(user_id=obj.id).first()
+            if prof and getattr(prof, "phone", None):
+                phone = prof.phone or ""
+        except Exception:
+            phone = ""
 
         res = {
             "type": self.type,
