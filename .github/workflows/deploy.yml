@@ -115,6 +115,10 @@ jobs:
             else
               echo "CORS_ALLOWED_ORIGINS=https://careercaddy.online,https://www.careercaddy.online" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
             fi
+            # Optional singular env for convenience; settings.py supports both
+            if [ -n "${{ secrets.CORS_ALLOWED_ORIGIN }}" ]; then
+              echo "CORS_ALLOWED_ORIGIN=${{ secrets.CORS_ALLOWED_ORIGIN }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
             if [ -n "${{ secrets.CSRF_TRUSTED_ORIGINS }}" ]; then
               echo "CSRF_TRUSTED_ORIGINS=${{ secrets.CSRF_TRUSTED_ORIGINS }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
             else

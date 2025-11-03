@@ -45,8 +45,8 @@ USE_TZ = True
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -148,11 +148,15 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = False
 
-CORS_ALLOWED_ORIGINS_ENV = os.environ.get('CORS_ALLOWED_ORIGINS', '')
-if CORS_ALLOWED_ORIGINS_ENV:
-    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ALLOWED_ORIGINS_ENV.split(',') if origin.strip()]
-else:
-    CORS_ALLOWED_ORIGINS = []
+cors_allowed_origins_env = os.environ.get('CORS_ALLOWED_ORIGINS', '')
+cors_allowed_origin_env = os.environ.get('CORS_ALLOWED_ORIGIN', '')
+origins_list = []
+if cors_allowed_origins_env:
+    origins_list += [origin.strip() for origin in cors_allowed_origins_env.split(',') if origin.strip()]
+if cors_allowed_origin_env:
+    # Accept comma-separated even if the var name is singular
+    origins_list += [origin.strip() for origin in cors_allowed_origin_env.split(',') if origin.strip()]
+CORS_ALLOWED_ORIGINS = origins_list
 
 # Add localhost origins for development
 if DEBUG:
@@ -160,6 +164,19 @@ if DEBUG:
         'http://localhost:4200',
         'http://127.0.0.1:4200',
     ])
+
+# De-duplicate any origins added above
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys(CORS_ALLOWED_ORIGINS))
+
+# Optional: allow matching origins by regex (comma-separated)
+CORS_ALLOWED_ORIGIN_REGEXES_ENV = os.environ.get('CORS_ALLOWED_ORIGIN_REGEXES', '')
+if CORS_ALLOWED_ORIGIN_REGEXES_ENV:
+    CORS_ALLOWED_ORIGIN_REGEXES = [rgx.strip() for rgx in CORS_ALLOWED_ORIGIN_REGEXES_ENV.split(',') if rgx.strip()]
+else:
+    CORS_ALLOWED_ORIGIN_REGEXES = []
+
+# Whether to allow credentials (cookies/Authorization with CORS)
+CORS_ALLOW_CREDENTIALS = os.environ.get('CORS_ALLOW_CREDENTIALS', 'False') == 'True'
 
 CORS_ALLOW_HEADERS = list(default_headers) + ["x-user-id"]
 
