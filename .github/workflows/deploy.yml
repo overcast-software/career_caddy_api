@@ -86,7 +86,7 @@ jobs:
           username: ${{ secrets.DEPLOY_SSH_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_SSH_PORT != '' && secrets.DEPLOY_SSH_PORT || '22' }}
-          source: "docker-compose.prod.yml"
+          source: "deploy/docker-compose.yml"
           target: ${{ secrets.DEPLOY_APP_DIR }}
 
       - name: Deploy to server
