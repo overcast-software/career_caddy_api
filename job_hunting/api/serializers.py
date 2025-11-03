@@ -255,22 +255,25 @@ class DjangoUserSerializer:
             return None, []
 
     def parse_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict) or "data" not in payload:
-            raise ValueError("JSON:API payload must contain 'data'")
-        data = payload["data"]
-        expected = self.accepted_types()
-        if data.get("type") not in expected:
-            exp_str = "', '".join(sorted(expected))
-            raise ValueError(f"JSON:API type mismatch: expected one of '{exp_str}'")
+        # Accept both JSON:API and flat JSON payloads
+        attrs_in: Dict[str, Any] = {}
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            data = payload["data"]
+            expected = self.accepted_types()
+            if data.get("type") not in expected:
+                exp_str = "', '".join(sorted(expected))
+                raise ValueError(f"JSON:API type mismatch: expected one of '{exp_str}'")
+            attrs_in = (data.get("attributes") or {}) if isinstance(data, dict) else {}
+        elif isinstance(payload, dict):
+            # Flat JSON like {"username": "...", "email": "...", "password": "...", "phone": "..."}
+            attrs_in = payload
+        else:
+            raise ValueError("Invalid payload")
 
-        attrs_in = data.get("attributes", {}) or {}
         out: Dict[str, Any] = {}
-
-        # Extract user attributes
         for k in ["username", "email", "first_name", "last_name", "password", "phone"]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
-
         return out
 
 
