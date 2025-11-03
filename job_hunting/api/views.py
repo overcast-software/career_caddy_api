@@ -83,22 +83,19 @@ def healthcheck(request):
         # Allow setting the OpenAI API key after bootstrap as well.
         # Authorization options:
         # - Authenticated superuser may always set the key
-        # - Or provide the X-BOOTSTRAP-TOKEN matching settings.BOOTSTRAP_TOKEN
         allow_bootstrap = getattr(settings, "ALLOW_BOOTSTRAP_SUPERUSER", False)
         bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
-        provided_token = request.META.get("HTTP_X_BOOTSTRAP_TOKEN", "")
         user = getattr(request, "user", None)
         is_superuser = bool(
             user
             and user.is_authenticated
             and getattr(user, "is_superuser", False)
         )
-        token_ok = bool(bootstrap_token and provided_token == bootstrap_token)
 
-        if not (is_superuser or token_ok):
+        if not is_superuser:
             # Fallback to original bootstrap gate (no users yet and bootstrap enabled)
             if not allow_bootstrap or not bootstrap_token:
-                return JsonResponse({"errors": [{"detail": "Bootstrap disabled or invalid token"}]}, status=403)
+                return JsonResponse({"errors": [{"detail": "Bootstrap disabled"}]}, status=403)
             if user_count is not None and user_count > 0:
                 return JsonResponse({"errors": [{"detail": "bootstrap closed"}]}, status=403)
 
@@ -281,11 +278,23 @@ class BaseSAViewSet(viewsets.ViewSet):
         return Response(payload)
 
     def create(self, request):
-        ser = self.get_serializer()
-        try:
-            attrs = ser.parse_payload(request.data)
-        except ValueError as e:
-            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        # Handle both JSON:API and plain JSON payloads
+        data = request.data if isinstance(request.data, dict) else {}
+        
+        # Check if this is JSON:API format (has "data" wrapper)
+        if "data" in data:
+            # Use JSON:API parser
+            ser = self.get_serializer()
+            try:
+                attrs = ser.parse_payload(request.data)
+            except ValueError as e:
+                return Response({"errors": [{"detail": str(e)}]}, status=400)
+        else:
+            # Handle plain JSON format
+            attrs = {}
+            for key in ["username", "email", "first_name", "last_name", "password", "phone"]:
+                if key in data:
+                    attrs[key] = data[key]
         obj = self.model(**attrs)
         session = self.get_session()
         session.add(obj)
@@ -728,7 +737,21 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         # Verify bootstrap token
         bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
-        provided_token = request.META.get("HTTP_X_BOOTSTRAP_TOKEN", "")
+
+        # Read token from JSON body or query params (header not supported)
+        data = request.data if isinstance(request.data, dict) else {}
+        attrs = {}
+        if isinstance(data.get("data"), dict):
+            attrs = data["data"].get("attributes") or {}
+        else:
+            attrs = data or {}
+        provided_token = (
+            attrs.get("bootstrap_token")
+            or attrs.get("bootstrapToken")
+            or attrs.get("BOOTSTRAP_TOKEN")
+            or request.query_params.get("bootstrap_token", "")
+        )
+
         if not bootstrap_token or provided_token != bootstrap_token:
             return Response(
                 {"errors": [{"detail": "Invalid bootstrap token"}]}, status=403
