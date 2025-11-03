@@ -59,6 +59,7 @@ urlpatterns = [
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/companies/(?P<pk>\d+)/job-posts$", CompanyViewSet.as_view({"get": "job_posts"}), name="company-job-posts-noslash"),
     path("api/v1/", include(router.urls)),
+    path("api/v1/auth/register/", DjangoUserViewSet.as_view({"post": "create"}), name="auth-register"),
     path("api/v1/me/", DjangoUserViewSet.as_view({"get": "me"}), name="me"),
     path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
