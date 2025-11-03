@@ -1,6 +1,10 @@
 import multiprocessing
+import os
 
-bind = "0.0.0.0:8000"
+# Make bind address configurable via environment
+host = os.getenv("GUNICORN_HOST", "127.0.0.1")
+port = os.getenv("GUNICORN_PORT", os.getenv("PORT", "8000"))
+bind = f"{host}:{port}"
 workers = multiprocessing.cpu_count() * 2 + 1
 timeout = 60
 graceful_timeout = 30
