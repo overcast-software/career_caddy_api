@@ -71,11 +71,17 @@ def healthcheck(request):
         user_count = None
 
     if request.method == "GET":
+        if user_count is None:
+            status_str = "unknown"
+            bootstrap_open = None
+        else:
+            bootstrap_open = (user_count == 0)
+            status_str = "bootstrapped" if not bootstrap_open else "bootstrap"
         return JsonResponse(
             {
                 "healthy": True,
-                "status": "bootstrapped",
-                "bootstrap_open": (user_count == 0),
+                "status": status_str,
+                "bootstrap_open": bootstrap_open,
             }
         )
 
