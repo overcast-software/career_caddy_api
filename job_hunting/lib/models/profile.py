@@ -29,13 +29,8 @@ class Profile(BaseModel):
     linkedin = Column(String, nullable=True)
     github = Column(String, nullable=True)
     links = Column(JSON, nullable=True, default={})
-
     # Relationships
     user = relationship("User", back_populates="profile")
-    experiences = relationship("Experience", back_populates="profile")
-    educations = relationship("Education", back_populates="profile")
-    certifications = relationship("Certification", back_populates="profile")
-    skills = relationship("Skill", back_populates="profile")
 
     def to_dict(self):
         """Convert the model instance to a dictionary."""
