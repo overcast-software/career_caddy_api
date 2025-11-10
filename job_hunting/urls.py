@@ -37,6 +37,7 @@ from job_hunting.api.views import (
     CertificationViewSet,
     DescriptionViewSet,
     healthcheck,
+    profile,
 )
 
 router = routers.DefaultRouter(trailing_slash="/?")
@@ -62,6 +63,7 @@ urlpatterns = [
     path("api/v1/auth/register/", DjangoUserViewSet.as_view({"post": "create"}), name="auth-register"),
     path("api/v1/auth/bootstrap-superuser/", DjangoUserViewSet.as_view({"post": "bootstrap_superuser"}), name="auth-bootstrap-superuser"),
     path("api/v1/me/", DjangoUserViewSet.as_view({"get": "me"}), name="me"),
+    path("api/v1/profile/", profile, name="profile"),
     path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/v1/token/verify/", TokenVerifyView.as_view(), name="token_verify"),

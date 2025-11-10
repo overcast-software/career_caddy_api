@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import atexit
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
 from job_hunting.lib.models.base import BaseModel
@@ -18,6 +19,13 @@ def _is_management_command():
 
 def _build_db_url():
     """Build database URL from environment variables or fallback to SQLite."""
+    # Check if we're in test mode
+    if os.environ.get("TESTING"):
+        # Use test database path
+        test_db_path = os.environ.get("TEST_DB_PATH", "/tmp/job_hunting_test.db")
+        _register_test_cleanup(test_db_path)
+        return f"sqlite:///{test_db_path}"
+
     # Check for SQLAlchemy-specific URL first
     sqlalchemy_url = os.environ.get("SQLALCHEMY_DATABASE_URL")
     if sqlalchemy_url:
@@ -82,51 +90,62 @@ def init_sqlalchemy():
             return
 
 
+def _cleanup_test_db(db_path):
+    """Remove test database file if it exists and is in /tmp."""
+    try:
+        if (os.path.exists(db_path) and
+            db_path.startswith("/tmp/") and
+            os.environ.get("TESTING")):
+            os.remove(db_path)
+            logger.info(f"Cleaned up test database: {db_path}")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup test database {db_path}: {e}")
+
+
+def _register_test_cleanup(db_path):
+    """Register cleanup function for test database."""
+    atexit.register(_cleanup_test_db, db_path)
+
+
 def ensure_sqlalchemy_schema(with_advisory_lock=True):
     """Create SQLAlchemy tables with optional advisory lock for PostgreSQL."""
     # Ensure engine and session are initialized
-    init_sqlalchemy()
-    
+    # init_sqlalchemy()
+
     if _engine is None:
         logger.error("SQLAlchemy engine not initialized")
         return
-    
+
     tables_to_create = [
         t for t in BaseModel.metadata.sorted_tables if t.name != "auth_user"
     ]
-    
+
     if not tables_to_create:
         logger.info("No SQLAlchemy tables to create")
         return
-    
+
     # Use advisory lock for PostgreSQL to prevent concurrent schema creation
-    if with_advisory_lock and _engine.dialect.name == 'postgresql':
+    if with_advisory_lock and _engine.dialect.name == "postgresql":
         # Use a constant key for the advisory lock
         SCHEMA_LOCK_KEY = 123456789
-        
+
         with _engine.connect() as conn:
             try:
                 # Acquire advisory lock
-                result = conn.execute(
-                    "SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,)
-                )
+                result = conn.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,))
                 logger.info("Acquired PostgreSQL advisory lock for schema creation")
-                
+
                 # Create tables with checkfirst=True
                 BaseModel.metadata.create_all(
                     bind=conn, tables=tables_to_create, checkfirst=True
                 )
                 logger.info("SQLAlchemy schema creation completed")
-                
+
             finally:
                 # Release advisory lock
-                conn.execute(
-                    "SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK_KEY,)
-                )
+                conn.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK_KEY,))
                 logger.info("Released PostgreSQL advisory lock")
     else:
         # For non-PostgreSQL or when lock is disabled
-        BaseModel.metadata.create_all(
-            bind=_engine, tables=tables_to_create, checkfirst=True
-        )
+        BaseModel.metadata.create_all(bind=_engine, checkfirst=True)
         logger.info("SQLAlchemy schema creation completed (no lock)")

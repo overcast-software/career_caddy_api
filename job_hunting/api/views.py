@@ -6,7 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from rest_framework import viewsets, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser
@@ -60,6 +60,15 @@ from .serializers import (
 )
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def profile(request):
+    """Get the current user's profile information."""
+    ser = DjangoUserSerializer()
+    resource = ser.to_resource(request.user)
+    return Response({"data": resource})
+
+
 @csrf_exempt
 def healthcheck(request):
     # Compute bootstrap gate
@@ -75,7 +84,7 @@ def healthcheck(request):
             status_str = "unknown"
             bootstrap_open = None
         else:
-            bootstrap_open = (user_count == 0)
+            bootstrap_open = user_count == 0
             status_str = "bootstrapped" if not bootstrap_open else "bootstrap"
         return JsonResponse(
             {
@@ -93,23 +102,26 @@ def healthcheck(request):
         bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
         user = getattr(request, "user", None)
         is_superuser = bool(
-            user
-            and user.is_authenticated
-            and getattr(user, "is_superuser", False)
+            user and user.is_authenticated and getattr(user, "is_superuser", False)
         )
 
         if not is_superuser:
             # Fallback to original bootstrap gate (no users yet and bootstrap enabled)
             if not allow_bootstrap or not bootstrap_token:
-                return JsonResponse({"errors": [{"detail": "Bootstrap disabled"}]}, status=403)
+                return JsonResponse(
+                    {"errors": [{"detail": "Bootstrap disabled"}]}, status=403
+                )
             if user_count is not None and user_count > 0:
-                return JsonResponse({"errors": [{"detail": "bootstrap closed"}]}, status=403)
+                return JsonResponse(
+                    {"errors": [{"detail": "bootstrap closed"}]}, status=403
+                )
 
         # Accept API key via header or JSON/JSON:API body
         api_key = (request.META.get("HTTP_X_OPENAI_API_KEY", "") or "").strip()
         if not api_key:
             try:
                 import json
+
                 data = json.loads(request.body.decode("utf-8") or "{}")
             except Exception:
                 data = {}
@@ -127,7 +139,9 @@ def healthcheck(request):
             api_key = str(api_key).strip()
 
         if not api_key:
-            return JsonResponse({"errors": [{"detail": "Missing openai_api_key"}]}, status=400)
+            return JsonResponse(
+                {"errors": [{"detail": "Missing openai_api_key"}]}, status=400
+            )
 
         try:
             set_api_key(api_key)
@@ -173,7 +187,9 @@ class BaseSAViewSet(viewsets.ViewSet):
                 out.append(p)
         return out
 
-    def _build_included(self, objs, include_rels, request=None, primary_serializer=None):
+    def _build_included(
+        self, objs, include_rels, request=None, primary_serializer=None
+    ):
         included = []
         seen = set()  # (type, id)
         primary_ser = primary_serializer or self.get_serializer()
@@ -286,7 +302,7 @@ class BaseSAViewSet(viewsets.ViewSet):
     def create(self, request):
         # Handle both JSON:API and plain JSON payloads
         data = request.data if isinstance(request.data, dict) else {}
-        
+
         # Check if this is JSON:API format (has "data" wrapper)
         if "data" in data:
             # Use JSON:API parser
@@ -298,7 +314,14 @@ class BaseSAViewSet(viewsets.ViewSet):
         else:
             # Handle plain JSON format
             attrs = {}
-            for key in ["username", "email", "first_name", "last_name", "password", "phone"]:
+            for key in [
+                "username",
+                "email",
+                "first_name",
+                "last_name",
+                "password",
+                "phone",
+            ]:
                 if key in data:
                     attrs[key] = data[key]
         obj = self.model(**attrs)
@@ -465,10 +488,14 @@ class SummaryViewSet(BaseSAViewSet):
             client = get_client(required=False)
             if client is None:
                 return Response(
-                    {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                    status=503
+                    {
+                        "errors": [
+                            {"detail": "AI client not configured. Set OPENAI_API_KEY."}
+                        ]
+                    },
+                    status=503,
                 )
-            
+
             summary_service = SummaryService(client, job=job_post, resume=resume)
             summary = summary_service.generate_summary()
 
@@ -613,7 +640,9 @@ class DjangoUserViewSet(viewsets.ViewSet):
             api_key = str(api_key).strip()
 
         if not api_key:
-            return Response({"errors": [{"detail": "Missing openai_api_key"}]}, status=400)
+            return Response(
+                {"errors": [{"detail": "Missing openai_api_key"}]}, status=400
+            )
 
         try:
             set_api_key(api_key)
@@ -668,11 +697,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         # Handle phone via SQLAlchemy Profile if provided
         if phone_present:
-            from job_hunting.profile_models import Profile as SAProfile
-            session = SAProfile.get_session()
-            prof = session.query(SAProfile).filter_by(user_id=user.id).first()
+            from job_hunting.lib.models import Profile
+
+            session = Profile.get_session()
+            prof = session.query(Profile).filter_by(user_id=user.id).first()
             if not prof:
-                prof = SAProfile(user_id=user.id, phone=(phone_val[:50] or None) if phone_val else None)
+                prof = Profile(
+                    user_id=user.id,
+                    phone=(phone_val[:50] or None) if phone_val else None,
+                )
             else:
                 prof.phone = (phone_val[:50] or None) if phone_val else None
             session.add(prof)
@@ -717,11 +750,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         # Handle phone via SQLAlchemy Profile if provided
         if phone_present:
-            from job_hunting.profile_models import Profile as SAProfile
-            session = SAProfile.get_session()
-            prof = session.query(SAProfile).filter_by(user_id=user.id).first()
+            from job_hunting.lib.models.profile import Profile
+
+            session = Profile.get_session()
+            prof = session.query(Profile).filter_by(user_id=user.id).first()
             if not prof:
-                prof = SAProfile(user_id=user.id, phone=(phone_val[:50] or None) if phone_val else None)
+                prof = Profile(
+                    user_id=user.id,
+                    phone=(phone_val[:50] or None) if phone_val else None,
+                )
             else:
                 prof.phone = (phone_val[:50] or None) if phone_val else None
             session.add(prof)
@@ -792,7 +829,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
         first_name = attrs.get("first_name") or attrs.get("name") or ""
         last_name = attrs.get("last_name") or ""
         # Optional: allow setting OpenAI API key during bootstrap
-        api_key = attrs.get("openai_api_key") or attrs.get("OPENAI_API_KEY") or attrs.get("openaiApiKey")
+        api_key = (
+            attrs.get("openai_api_key")
+            or attrs.get("OPENAI_API_KEY")
+            or attrs.get("openaiApiKey")
+        )
 
         user = User.objects.create_superuser(
             username=username,
@@ -1952,14 +1993,20 @@ class ResumeViewSet(BaseSAViewSet):
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                
+
                 client = get_client(required=False)
                 if client is None:
                     return Response(
-                        {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                        status=503
+                        {
+                            "errors": [
+                                {
+                                    "detail": "AI client not configured. Set OPENAI_API_KEY."
+                                }
+                            ]
+                        },
+                        status=503,
                     )
-                
+
                 summary_service = SummaryService(client, job=job_post, resume=obj)
                 summary = summary_service.generate_summary()
 
@@ -2283,14 +2330,18 @@ class ScoreViewSet(BaseSAViewSet):
 
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
-        
+
         client = get_client(required=False)
         if client is None:
             return Response(
-                {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                status=503
+                {
+                    "errors": [
+                        {"detail": "AI client not configured. Set OPENAI_API_KEY."}
+                    ]
+                },
+                status=503,
             )
-        
+
         myJobScorer = JobScorer(client)
 
         relationships = (data.get("data") or {}).get("relationships") or {}
@@ -2482,10 +2533,16 @@ class JobPostViewSet(BaseSAViewSet):
                 client = get_client(required=False)
                 if client is None:
                     return Response(
-                        {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                        status=503
+                        {
+                            "errors": [
+                                {
+                                    "detail": "AI client not configured. Set OPENAI_API_KEY."
+                                }
+                            ]
+                        },
+                        status=503,
                     )
-                
+
                 summary_service = SummaryService(client, job=obj, resume=resume)
                 summary = summary_service.generate_summary()
 
@@ -2543,10 +2600,14 @@ class ScrapeViewSet(BaseSAViewSet):
         client = get_client(required=False)
         if client is None:
             return Response(
-                {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                status=503
+                {
+                    "errors": [
+                        {"detail": "AI client not configured. Set OPENAI_API_KEY."}
+                    ]
+                },
+                status=503,
             )
-        
+
         browser_manager = BrowserManager()
         asyncio.run(browser_manager.start_browser(False))
         service = GenericService(
@@ -2582,7 +2643,10 @@ class ScrapeViewSet(BaseSAViewSet):
             payload = {"data": resource}
             if include_rels:
                 payload["included"] = self._build_included(
-                    [job_post], include_rels, request, primary_serializer=job_post_serializer
+                    [job_post],
+                    include_rels,
+                    request,
+                    primary_serializer=job_post_serializer,
                 )
             return Response(payload, status=status.HTTP_201_CREATED)
 
@@ -2799,10 +2863,14 @@ class CoverLetterViewSet(BaseSAViewSet):
             client = get_client(required=False)
             if client is None:
                 return Response(
-                    {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                    status=503
+                    {
+                        "errors": [
+                            {"detail": "AI client not configured. Set OPENAI_API_KEY."}
+                        ]
+                    },
+                    status=503,
                 )
-            
+
             cl_service = CoverLetterService(client, job_post, resume)
             cover_letter = cl_service.generate_cover_letter()
 
