@@ -1,5 +1,8 @@
 from .base import BaseModel
 from .user import User
+from .profile import Profile
+from .project import Project
+from .project_description import ProjectDescription
 from .resume import Resume
 from .score import Score
 from .job_post import JobPost
@@ -19,3 +22,4 @@ from .description import Description
 from .experience_description import ExperienceDescription
 from .skill import Skill
 from .resume_skill import ResumeSkill
+

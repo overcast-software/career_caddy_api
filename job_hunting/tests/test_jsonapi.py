@@ -12,6 +12,8 @@ from job_hunting.lib.models import (
     Company,
     CoverLetter,
     Application,
+    Profile,
+    Project,
 )
 
 
