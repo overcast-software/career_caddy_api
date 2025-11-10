@@ -14,3 +14,10 @@ class Description(BaseModel):
         back_populates="descriptions",
         order_by=lambda: Base.metadata.tables["experience_description"].c.order,
     )
+
+    project_descriptions = relationship(
+        "ProjectDescription",
+        back_populates="description",
+        order_by=lambda: Base.metadata.tables["project_description"].c.id,
+        cascade="all, delete-orphan",
+    )

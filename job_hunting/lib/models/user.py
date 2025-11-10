@@ -16,6 +16,8 @@ class User(BaseModel):
     last_login = Column(DateTime)  # created_at is sufficient
     is_staff = Column(Boolean, nullable=False, default=False)
     # Relationships
+    profile = relationship("Profile", back_populates="user", uselist=False)
+    projects = relationship("Project", back_populates="user")
     resumes = relationship("Resume", back_populates="user")
     scores = relationship("Score")
     cover_letters = relationship("CoverLetter", back_populates="user")
