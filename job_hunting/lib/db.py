@@ -93,9 +93,11 @@ def init_sqlalchemy():
 def _cleanup_test_db(db_path):
     """Remove test database file if it exists and is in /tmp."""
     try:
-        if (os.path.exists(db_path) and
-            db_path.startswith("/tmp/") and
-            os.environ.get("TESTING")):
+        if (
+            os.path.exists(db_path)
+            and db_path.startswith("/tmp/")
+            and os.environ.get("TESTING")
+        ):
             os.remove(db_path)
             logger.info(f"Cleaned up test database: {db_path}")
     except Exception as e:
