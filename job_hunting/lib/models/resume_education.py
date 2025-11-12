@@ -18,5 +18,5 @@ class ResumeEducation(BaseModel):
     content = Column(Text, nullable=True)
 
     # Relationships
-    resume = relationship("Resume", foreign_keys=[resume_id])
-    education = relationship("Education", foreign_keys=[education_id])
+    resume = relationship("Resume", foreign_keys=[resume_id], overlaps="educations")
+    education = relationship("Education", foreign_keys=[education_id], overlaps="educations")

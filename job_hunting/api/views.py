@@ -2341,8 +2341,8 @@ class ResumeViewSet(BaseSAViewSet):
             )
 
             # Process the resume
-            ingest_service.process()
-            resume = ingest_service.db_resume
+            result = ingest_service.process()
+            resume = result or ingest_service.db_resume
 
             # Guard against None resume from failed ingestion
             if resume is None:

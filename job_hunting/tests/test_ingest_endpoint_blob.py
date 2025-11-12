@@ -1,4 +1,5 @@
 import tempfile
+import unittest
 from unittest.mock import patch, MagicMock
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -170,9 +171,14 @@ class TestIngestEndpointBlob(APITestCase):
         self.assertIn("Failed to process resume", str(response.data))
         self.assertIn("Processing failed", str(response.data))
 
+    @patch("job_hunting.api.views.BaseSAViewSet._build_included")
     @patch("job_hunting.api.views.IngestResume")
-    def test_blob_ingest_with_includes(self, mock_ingest_class):
+    def test_blob_ingest_with_includes(self, mock_ingest_class, mock_build_included):
         """Test ingest endpoint with ?include parameter."""
+        # Prepare a stub included payload
+        included_stub = [{"type": "summary", "id": "123"}]
+        mock_build_included.return_value = included_stub
+
         # Setup mock IngestResume
         mock_ingest_instance = MagicMock()
         stub_resume = Resume()
@@ -196,5 +202,11 @@ class TestIngestEndpointBlob(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn("data", response.data)
-        # Should include relationships in response (even if empty for this test)
-        # The exact structure depends on your serializer implementation
+        self.assertEqual(response.data["data"]["type"], "resume")
+        self.assertIn("included", response.data)
+        self.assertEqual(response.data["included"], included_stub)
+        mock_build_included.assert_called_once()
+
+        # Verify include_rels was truthy
+        include_rels = mock_build_included.call_args[0][2]
+        self.assertTrue(include_rels)

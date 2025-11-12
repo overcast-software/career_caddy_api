@@ -19,5 +19,5 @@ class ResumeCertification(BaseModel):
     content = Column(Text, nullable=True)
 
     # Relationships (view-only to avoid conflicting with the many-to-many)
-    resume = relationship("Resume", foreign_keys=[resume_id])
-    certification = relationship("Certification", foreign_keys=[certification_id])
+    resume = relationship("Resume", foreign_keys=[resume_id], overlaps="certifications")
+    certification = relationship("Certification", foreign_keys=[certification_id], overlaps="certifications")

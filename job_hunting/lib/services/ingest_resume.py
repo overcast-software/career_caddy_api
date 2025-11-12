@@ -362,6 +362,8 @@ class IngestResume:
         print(result.usage())
         # > RunUsage(input_tokens=57, output_tokens=8, requests=1)
 
+        return self.db_resume
+
     def get_agent(self):
         # Prefer OpenAI if OPENAI_API_KEY is set; otherwise fall back to local Ollama.
         try:

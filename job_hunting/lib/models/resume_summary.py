@@ -15,8 +15,8 @@ class ResumeSummaries(BaseModel):
     active = Column(Boolean)
 
     # Relationships
-    resume = relationship("Resume", back_populates="resume_summaries")
-    summary = relationship("Summary", back_populates="resume_summaries")
+    resume = relationship("Resume", back_populates="resume_summaries", overlaps="summaries")
+    summary = relationship("Summary", back_populates="resume_summaries", overlaps="resumes")
 
     __mapper_args__ = {"confirm_deleted_rows": False}
 

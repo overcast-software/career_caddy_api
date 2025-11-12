@@ -17,6 +17,7 @@ class Certification(BaseModel):
         "Resume",
         secondary="resume_certification",
         back_populates="certifications",
+        overlaps="certification,resume",
     )
 
     def to_export_dict(self) -> dict:

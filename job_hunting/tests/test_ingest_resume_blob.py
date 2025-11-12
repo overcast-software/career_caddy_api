@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
-from job_hunting.lib.services.ingest_resume import IngestResume
+from job_hunting.lib.services.ingest_resume import IngestResume, ParsedResume
 
 
 class TestIngestResumeBlob(unittest.TestCase):
@@ -18,7 +18,8 @@ class TestIngestResumeBlob(unittest.TestCase):
             def usage(self):
                 return {}
         self.stub_agent = MagicMock()
-        self.stub_agent.run_sync.return_value = _StubResult(output=MagicMock())
+        parsed_output = ParsedResume(name="Test User", title="Engineer", phone=None, email=None)
+        self.stub_agent.run_sync.return_value = _StubResult(output=parsed_output)
         self._get_agent_patcher = patch('job_hunting.lib.services.ingest_resume.IngestResume.get_agent', return_value=self.stub_agent)
         self._get_agent_patcher.start()
 
