@@ -11,6 +11,9 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"
+      - "${TAILSCALE_IP}:5432:5432"
+
+
 
   web:
     image: ${IMAGE_REPO}:${IMAGE_TAG}
