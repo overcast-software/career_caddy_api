@@ -67,6 +67,10 @@ jobs:
             echo "Error: DEPLOY_APP_DIR secret is not set"
             exit 1
           fi
+          if [ -z "${{ secrets.DB_PASSWORD }}" ] && [ -z "${{ vars.DB_PASSWORD }}" ]; then
+            echo "Error: DB_PASSWORD must be set as either a secret or variable"
+            exit 1
+          fi
           echo "All required secrets are present"
 
       - name: Prepare directory
@@ -127,6 +131,31 @@ jobs:
             # OPENAI API key
             if [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
               echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
+            # Database credentials
+            if [ -n "${{ secrets.DB_NAME }}" ]; then
+              echo "DB_NAME=${{ secrets.DB_NAME }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            else
+              echo "DB_NAME=job_hunting" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
+            if [ -n "${{ secrets.DB_USER }}" ]; then
+              echo "DB_USER=${{ secrets.DB_USER }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            else
+              echo "DB_USER=postgres" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            fi
+            if [ -n "${{ secrets.DB_PASSWORD }}" ]; then
+              echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            elif [ -n "${{ vars.DB_PASSWORD }}" ]; then
+              echo "DB_PASSWORD=${{ vars.DB_PASSWORD }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            else
+              echo "Error: DB_PASSWORD must be set as either a secret or variable"
+              exit 1
+            fi
+            # Tailscale IP (optional)
+            if [ -n "${{ secrets.TAILSCALE_IP }}" ]; then
+              echo "TAILSCALE_IP=${{ secrets.TAILSCALE_IP }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
+            elif [ -n "${{ vars.TAILSCALE_IP }}" ]; then
+              echo "TAILSCALE_IP=${{ vars.TAILSCALE_IP }}" >> ${{ secrets.DEPLOY_APP_DIR }}/.env
             fi
             cd ${{ secrets.DEPLOY_APP_DIR }}
             if [ -f docker-compose.prod.yml ]; then
