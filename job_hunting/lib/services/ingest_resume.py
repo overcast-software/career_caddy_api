@@ -13,9 +13,6 @@ from datetime import date
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.models.openai import OpenAIResponsesModel
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from job_hunting.lib.models.base import Base, BaseModel as ModelBase
 from job_hunting.lib.models.experience import Experience
 from job_hunting.lib.models.experience_description import ExperienceDescription
 from job_hunting.lib.models.education import Education
@@ -148,7 +145,8 @@ class IngestResume:
         """
         self.user = user
         self.resume = resume  # what is this?
-        self.agent = agent or self.get_agent()
+        # Defer agent creation until process() to avoid requiring external API keys during tests
+        self.agent = agent
         self.db_resume = None
 
     def extract_text_from_docx(self, source):
@@ -221,6 +219,8 @@ class IngestResume:
 
     def process(self):
         resume_md = self.extract_text_from_docx(self.resume)
+        if self.agent is None:
+            self.agent = self.get_agent()
         result = self.agent.run_sync(resume_md)
         parsed_resume = result.output
 
@@ -363,15 +363,20 @@ class IngestResume:
         # > RunUsage(input_tokens=57, output_tokens=8, requests=1)
 
     def get_agent(self):
+        # Prefer OpenAI if OPENAI_API_KEY is set; otherwise fall back to local Ollama.
+        try:
+            if os.getenv("OPENAI_API_KEY"):
+                openai_model = OpenAIResponsesModel("gpt-5")
+                return Agent(openai_model, output_type=ParsedResume)
+        except Exception:
+            # Fall back to Ollama if OpenAI model initialization fails for any reason
+            pass
+
         ollama_model = OpenAIChatModel(
             model_name="qwen3-coder",
             provider=OllamaProvider(base_url="http://localhost:11434/v1"),
         )
-        openai_model = OpenAIResponsesModel("gpt-5")
-
-        # agent = Agent(ollama_model, output_type=CityLocation)
-        agent = Agent(openai_model, output_type=ParsedResume)
-        return agent
+        return Agent(ollama_model, output_type=ParsedResume)
 
     def parse_date(self, value: Optional[str]) -> Optional[date]:
         """

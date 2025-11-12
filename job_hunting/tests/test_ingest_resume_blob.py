@@ -11,6 +11,21 @@ class TestIngestResumeBlob(unittest.TestCase):
     def setUp(self):
         self.test_markdown = "# Test Resume\n\nThis is test markdown content."
         self.test_html = "<h1>Test Resume</h1><p>This is test HTML content.</p>"
+        # Inject a stub Agent to avoid external API calls during tests
+        class _StubResult:
+            def __init__(self, output=None):
+                self.output = output
+            def usage(self):
+                return {}
+        self.stub_agent = MagicMock()
+        self.stub_agent.run_sync.return_value = _StubResult(output=MagicMock())
+        self._get_agent_patcher = patch('job_hunting.lib.services.ingest_resume.IngestResume.get_agent', return_value=self.stub_agent)
+        self._get_agent_patcher.start()
+
+    def tearDown(self):
+        # Stop get_agent stub patcher if started
+        if hasattr(self, "_get_agent_patcher"):
+            self._get_agent_patcher.stop()
 
     @patch('job_hunting.lib.services.ingest_resume.DocxParser')
     def test_extract_text_from_blob_success(self, mock_docx_parser_class):
