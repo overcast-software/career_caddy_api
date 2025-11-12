@@ -7,96 +7,111 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Environment flags and safety
-SECRET_KEY = os.environ.get('SECRET_KEY', 'your_generated_secret_key')
-DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+SECRET_KEY = os.environ.get("SECRET_KEY", "your_generated_secret_key")
+DEBUG = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
 TESTING = any(arg in ("test", "pytest") for arg in sys.argv)
 
 # Security check for production
-if not DEBUG and (not SECRET_KEY or SECRET_KEY == 'your_generated_secret_key'):
+if not DEBUG and (not SECRET_KEY or SECRET_KEY == "your_generated_secret_key"):
     raise ImproperlyConfigured(
         "SECRET_KEY must be set to a secure value in production. "
         "Set the SECRET_KEY environment variable."
     )
 
 # Parse ALLOWED_HOSTS from environment (comma-separated)
-ALLOWED_HOSTS_ENV = os.environ.get('ALLOWED_HOSTS', '')
+ALLOWED_HOSTS_ENV = os.environ.get("ALLOWED_HOSTS", "")
 if ALLOWED_HOSTS_ENV:
-    ALLOWED_HOSTS = [host.strip() for host in ALLOWED_HOSTS_ENV.split(',') if host.strip()]
+    ALLOWED_HOSTS = [
+        host.strip() for host in ALLOWED_HOSTS_ENV.split(",") if host.strip()
+    ]
 else:
     # Development default
-    ALLOWED_HOSTS = ['localhost', '127.0.0.1'] if DEBUG else []
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1"] if DEBUG else []
 
 # Ensure test-friendly hosts when testing
 if TESTING:
-    test_hosts = ['testserver', 'localhost', '127.0.0.1']
+    test_hosts = ["testserver", "localhost", "127.0.0.1"]
     for host in test_hosts:
         if host not in ALLOWED_HOSTS:
             ALLOWED_HOSTS.append(host)
 
 # CSRF trusted origins
-CSRF_TRUSTED_ORIGINS_ENV = os.environ.get('CSRF_TRUSTED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS_ENV = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
 if CSRF_TRUSTED_ORIGINS_ENV:
-    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in CSRF_TRUSTED_ORIGINS_ENV.split(',') if origin.strip()]
+    CSRF_TRUSTED_ORIGINS = [
+        origin.strip()
+        for origin in CSRF_TRUSTED_ORIGINS_ENV.split(",")
+        if origin.strip()
+    ]
 else:
     CSRF_TRUSTED_ORIGINS = []
+
+# Add frontend origins to CSRF trusted origins for cookie-based auth
+if DEBUG or not CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.extend([
+        "http://localhost:3000",
+        "http://localhost:4200", 
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:4200",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ])
 
 USE_TZ = True
 
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'rest_framework',
-    'rest_framework.authtoken',
-    'corsheaders',
-    'job_hunting.apps.JobHuntingConfig',
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "rest_framework",
+    "rest_framework.authtoken",
+    "corsheaders",
+    "job_hunting.apps.JobHuntingConfig",
 ]
 
-ROOT_URLCONF = 'job_hunting.urls'
+ROOT_URLCONF = "job_hunting.urls"
 
 # Database configuration with dj-database-url
 import dj_database_url
 
-DATABASE_URL = os.environ.get('DATABASE_URL')
+DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
-    DATABASES = {
-        'default': dj_database_url.parse(DATABASE_URL)
-    }
+    DATABASES = {"default": dj_database_url.parse(DATABASE_URL)}
 else:
     # Fallback to SQLite for development/testing
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': os.path.join(BASE_DIR, 'job_data.db'),
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.path.join(BASE_DIR, "job_data.db"),
         }
     }
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.debug',
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
@@ -104,97 +119,134 @@ TEMPLATES = [
 
 # DRF Configuration with security hardening
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.TokenAuthentication',
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
     ],
-    'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.IsAuthenticated',
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
     ],
-    'DEFAULT_RENDERER_CLASSES': [
-        'rest_framework.renderers.JSONRenderer',
-        'job_hunting.api.renderers.VndApiJSONRenderer',
-    ] + (['rest_framework.renderers.BrowsableAPIRenderer'] if DEBUG else []),
-    'DEFAULT_PARSER_CLASSES': [
-        'rest_framework.parsers.JSONParser',
-        'job_hunting.api.parsers.VndApiJSONParser',
-        'rest_framework.parsers.FormParser',
-        'rest_framework.parsers.MultiPartParser',
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+        "job_hunting.api.renderers.VndApiJSONRenderer",
+    ]
+    + (["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []),
+    "DEFAULT_PARSER_CLASSES": [
+        "rest_framework.parsers.JSONParser",
+        "job_hunting.api.parsers.VndApiJSONParser",
+        "rest_framework.parsers.FormParser",
+        "rest_framework.parsers.MultiPartParser",
     ],
-    'DEFAULT_THROTTLE_CLASSES': [
-        'rest_framework.throttling.AnonRateThrottle',
-        'rest_framework.throttling.UserRateThrottle'
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
     ],
-    'DEFAULT_THROTTLE_RATES': {
-        'anon': os.environ.get('DRF_ANON_THROTTLE_RATE', '100/day'),
-        'user': os.environ.get('DRF_USER_THROTTLE_RATE', '1000/day'),
-    }
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": os.environ.get("DRF_ANON_THROTTLE_RATE", "100/day"),
+        "user": os.environ.get("DRF_USER_THROTTLE_RATE", "1000/day"),
+    },
 }
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/3.2/howto/static-files/
 
-STATIC_URL = '/static/'
+STATIC_URL = "/static/"
 
 STATICFILES_DIRS = [
     os.path.join(BASE_DIR, "static"),
 ]
 
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
 # WhiteNoise configuration
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = False
 
-cors_allowed_origins_env = os.environ.get('CORS_ALLOWED_ORIGINS', '')
-cors_allowed_origin_env = os.environ.get('CORS_ALLOWED_ORIGIN', '')
+cors_allowed_origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+cors_allowed_origin_env = os.environ.get("CORS_ALLOWED_ORIGIN", "")
 origins_list = []
 if cors_allowed_origins_env:
-    origins_list += [origin.strip() for origin in cors_allowed_origins_env.split(',') if origin.strip()]
+    origins_list += [
+        origin.strip()
+        for origin in cors_allowed_origins_env.split(",")
+        if origin.strip()
+    ]
 if cors_allowed_origin_env:
     # Accept comma-separated even if the var name is singular
-    origins_list += [origin.strip() for origin in cors_allowed_origin_env.split(',') if origin.strip()]
+    origins_list += [
+        origin.strip()
+        for origin in cors_allowed_origin_env.split(",")
+        if origin.strip()
+    ]
 CORS_ALLOWED_ORIGINS = origins_list
 
-# Add localhost origins for development
-if DEBUG:
-    CORS_ALLOWED_ORIGINS.extend([
-        'http://localhost:4200',
-        'http://127.0.0.1:4200',
-    ])
+# Add localhost origins for development - always include when running locally
+dev_origins = [
+    "http://localhost:3000",
+    "http://localhost:4200",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:4200",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:5173",  # Vite default
+    "http://127.0.0.1:5173",
+]
+
+# Include dev origins if DEBUG is true OR if no explicit origins are configured
+if DEBUG or not origins_list:
+    CORS_ALLOWED_ORIGINS.extend(dev_origins)
 
 # De-duplicate any origins added above
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys(CORS_ALLOWED_ORIGINS))
 
+# Log CORS origins for debugging
+if DEBUG:
+    print(f"CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
+
 # Optional: allow matching origins by regex (comma-separated)
-CORS_ALLOWED_ORIGIN_REGEXES_ENV = os.environ.get('CORS_ALLOWED_ORIGIN_REGEXES', '')
+CORS_ALLOWED_ORIGIN_REGEXES_ENV = os.environ.get("CORS_ALLOWED_ORIGIN_REGEXES", "")
 if CORS_ALLOWED_ORIGIN_REGEXES_ENV:
-    CORS_ALLOWED_ORIGIN_REGEXES = [rgx.strip() for rgx in CORS_ALLOWED_ORIGIN_REGEXES_ENV.split(',') if rgx.strip()]
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        rgx.strip() for rgx in CORS_ALLOWED_ORIGIN_REGEXES_ENV.split(",") if rgx.strip()
+    ]
 else:
     CORS_ALLOWED_ORIGIN_REGEXES = []
 
 # Whether to allow credentials (cookies/Authorization with CORS)
-CORS_ALLOW_CREDENTIALS = os.environ.get('CORS_ALLOW_CREDENTIALS', 'False') == 'True'
+CORS_ALLOW_CREDENTIALS = os.environ.get("CORS_ALLOW_CREDENTIALS", "True").lower() in ("true", "1", "yes")
 
-CORS_ALLOW_HEADERS = list(default_headers) + ["x-user-id"]
-CORS_ALLOW_METHODS = list(default_methods)
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-user-id",
+    "authorization",
+    "content-type",
+    "accept",
+    "origin",
+    "x-requested-with",
+    "x-openai-api-key",  # For API key header
+]
+CORS_ALLOW_METHODS = list(default_methods) + [
+    "OPTIONS",  # Ensure OPTIONS is explicitly allowed
+]
+
+# Ensure preflight requests are handled properly
+CORS_PREFLIGHT_MAX_AGE = 86400  # 24 hours
 
 # Security headers (production only)
 if not DEBUG and not TESTING:
     SECURE_SSL_REDIRECT = True
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SESSION_COOKIE_SAMESITE = 'Lax'
-    CSRF_COOKIE_SAMESITE = 'Lax'
+    SESSION_COOKIE_SAMESITE = "Lax"
+    CSRF_COOKIE_SAMESITE = "Lax"
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
-    X_FRAME_OPTIONS = 'DENY'
+    X_FRAME_OPTIONS = "DENY"
     SECURE_CONTENT_TYPE_NOSNIFF = True
-    REFERRER_POLICY = 'same-origin'
+    REFERRER_POLICY = "same-origin"
 else:
     SECURE_SSL_REDIRECT = False
     if TESTING:
@@ -203,48 +255,55 @@ else:
 
 # SimpleJWT Configuration
 from datetime import timedelta
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.environ.get('JWT_ACCESS_TOKEN_LIFETIME_MINUTES', '15'))),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.environ.get('JWT_REFRESH_TOKEN_LIFETIME_DAYS', '7'))),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        minutes=int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "15"))
+    ),
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        days=int(os.environ.get("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "7"))
+    ),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 # Feature flags
-ALLOW_BOOTSTRAP_SUPERUSER = os.environ.get('ALLOW_BOOTSTRAP_SUPERUSER', 'False') == 'True'
-BOOTSTRAP_TOKEN = os.environ.get('BOOTSTRAP_TOKEN', '')
-SCRAPING_ENABLED = os.environ.get('SCRAPING_ENABLED', 'False') == 'True'
+ALLOW_BOOTSTRAP_SUPERUSER = (
+    os.environ.get("ALLOW_BOOTSTRAP_SUPERUSER", "False") == "True"
+)
+BOOTSTRAP_TOKEN = os.environ.get("BOOTSTRAP_TOKEN", "")
+SCRAPING_ENABLED = os.environ.get("SCRAPING_ENABLED", "False") == "True"
 
 # Logging configuration
 LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
         },
     },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
         },
     },
-    'root': {
-        'handlers': ['console'],
-        'level': 'WARNING',
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
     },
-    'loggers': {
-        'django': {
-            'handlers': ['console'],
-            'level': 'INFO',
-            'propagate': False,
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
         },
-        'django.server': {
-            'handlers': ['console'],
-            'level': 'INFO',
-            'propagate': False,
+        "django.server": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
         },
     },
 }

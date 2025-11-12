@@ -1,8 +1,9 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from typing import Optional
 from pydantic import Field
 from pydantic_ai import Agent
+from enum import Enum
 
 import re
 import os
@@ -33,6 +34,14 @@ from job_hunting.lib.models.company import Company
 from job_hunting.lib.models.description import Description
 
 
+class SkillTag(Enum):
+    FRAMEWORK = "Framework"
+    DATABASE = "Database"
+    TOOL_PLATFORM = "Tool/Platform"
+    SECURITY = "Security"
+    LANGUAGE = "Language"
+
+
 class CompanyOut(BaseModel):
     name: str
     display_name: Optional[str] = None
@@ -40,7 +49,43 @@ class CompanyOut(BaseModel):
 
 class SkillOut(BaseModel):
     text: str
-    tag: Optional[str] = None
+    tag: Optional[SkillTag]
+
+    @field_validator("tag", mode="before")
+    @classmethod
+    def normalize_tag(cls, value):
+        if value is None:
+            return None
+
+        s = str(value).strip().lower()
+
+        # Map variants to canonical enum values
+        if s in {"framework", "frameworks"}:
+            return SkillTag.FRAMEWORK
+        elif s in {"database", "databases"}:
+            return SkillTag.DATABASE
+        elif s in {
+            "tool/platform",
+            "tool platform",
+            "tools/platforms",
+            "tools",
+            "platform",
+            "platforms",
+        }:
+            return SkillTag.TOOL_PLATFORM
+        elif s in {"security"}:
+            return SkillTag.SECURITY
+        elif s in {"language", "languages"}:
+            return SkillTag.LANGUAGE
+        else:
+            # Try to match enum values directly
+            for tag in SkillTag:
+                if s == tag.value.lower():
+                    return tag
+
+            raise ValueError(
+                f"Invalid skill tag: {value}. Must be one of: {[tag.value for tag in SkillTag]}"
+            )
 
 
 class ExperienceOut(BaseModel):
@@ -87,6 +132,10 @@ class ParsedResume(BaseModel):
     education: list[EducationOut] = Field(default_factory=list)
     projects: list[ProjectOut] = Field(default_factory=list)
     certifications: list[CertificationsOut] = Field(default_factory=list)
+    name: str
+    phone: Optional[str]
+    email: Optional[str]
+    title: str
 
 
 class IngestResume:
@@ -100,6 +149,7 @@ class IngestResume:
         self.user = user
         self.resume = resume  # what is this?
         self.agent = agent or self.get_agent()
+        self.db_resume = None
 
     def extract_text_from_docx(self, source):
         """
@@ -170,11 +220,14 @@ class IngestResume:
                     pass  # Best effort cleanup
 
     def process(self):
-        breakpoint()
         resume_md = self.extract_text_from_docx(self.resume)
         result = self.agent.run_sync(resume_md)
         parsed_resume = result.output
 
+        resume = Resume(name=parsed_resume.name, title=parsed_resume.title)
+        self.db_resume = resume
+        self.db_resume.user = self.user
+        self.db_resume.save()
         # Create and save models
         print("Creating summary...")
         if parsed_resume.summary:
@@ -188,7 +241,7 @@ class IngestResume:
                 summary.save()
                 # Create join record linking resume and summary and mark as active
                 rs = ResumeSummaries(
-                    resume_id=self.resume.id, summary_id=summary.id, active=True
+                    resume_id=self.db_resume.id, summary_id=summary.id, active=True
                 )
                 rs.save()
                 # Ensure only one active summary per resume
@@ -212,17 +265,12 @@ class IngestResume:
                     company_display = getattr(comp, "display_name", None)
 
             # Ensure a Company record exists (Company.name is non-nullable).
-            try:
-                company, _ = Company.first_or_create(
-                    name=company_name or "", defaults={"display_name": company_display}
-                )
-            except Exception:
-                company, _ = Company(
-                    name=company_name or "", display_name=company_display
-                )
-                company.save()
+            company, _ = Company.first_or_create(
+                name=company_name, defaults={"display_name": company_display}
+            )
 
-            experience = Experience(
+            print(f"company: {company.name}")
+            experience, _ = Experience.first_or_create(
                 title=exp_data.title,
                 company_id=company.id if company else None,
                 start_date=self.parse_date(exp_data.start_date),
@@ -231,24 +279,24 @@ class IngestResume:
             )
 
             # Ensure company_id is set (experience.company_id is non-nullable in the model)
-            if experience.company_id is None:
-                placeholder = Company.first_or_create(
-                    name="", defaults={"display_name": None}
-                )
-                experience.company_id = placeholder.id
-
+            experience.company = company
+            experience.resume = self.db_resume
+            print("*" * 88)
+            ResumeExperience.first_or_create(
+                resume_id=self.db_resume.id, experience_id=experience.id
+            )
+            print("*" * 88)
             experience.save()
 
             # Create experience descriptions
             for bullet in exp_data.bullets:
-                desc = Description(content=bullet)
-                desc.save()
+                print(bullet)
+                desc, _ = Description.first_or_create(content=bullet)
                 # Link description to experience
                 # This assumes ExperienceDescription is the linking table
-                exp_desc = ExperienceDescription(
+                ExperienceDescription.first_or_create(
                     experience_id=experience.id, description_id=desc.id
                 )
-                exp_desc.save()
 
         print("Creating education...")
         for edu_data in parsed_resume.education:
@@ -259,6 +307,7 @@ class IngestResume:
                 issue_date=self.parse_date(edu_data.issue_date),
             )
             education.save()
+            ResumeEducation.first_or_create(resume=self.db_resume, education=education)
 
         print("Creating projects...")
         for proj_data in parsed_resume.projects:
@@ -276,10 +325,9 @@ class IngestResume:
                 desc.save()
                 # Link description to project
                 # This assumes ProjectDescription is the linking table
-                project_desc = ProjectDescription(
+                ProjectDescription.first_or_create(
                     project_id=project.id, description_id=desc.id
                 )
-                project_desc.save()
 
         print("Creating certifications...")
         for cert_data in parsed_resume.certifications:
@@ -290,12 +338,25 @@ class IngestResume:
                 content=cert_data.content,
             )
             certification.save()
+            ResumeCertification.first_or_create(
+                certification=certification, resume=self.db_resume
+            )
 
         print("Creating skills...")
-        for skill in parsed_resume.skills:
-            skill = Skill(text=skill.text, tag=skill.tag)
-            skill.save()
-            ResumeSkill.first_or_create(resume=self.resume, skill=skill)
+        for skill_out in parsed_resume.skills:
+            skill_model, _ = Skill.first_or_create(
+                text=skill_out.text,
+                defaults={
+                    "skill_type": (skill_out.tag.value if skill_out.tag else None)
+                },
+            )
+            try:
+                ResumeSkill.first_or_create(
+                    resume_id=self.db_resume.id, skill_id=skill_model.id
+                )
+            except Exception as e:
+                print(e)
+                breakpoint()
 
         print("Resume data saved successfully!")
         print(result.usage())
@@ -312,7 +373,7 @@ class IngestResume:
         agent = Agent(openai_model, output_type=ParsedResume)
         return agent
 
-    def parse_date(value: Optional[str]) -> Optional[date]:
+    def parse_date(self, value: Optional[str]) -> Optional[date]:
         """
         Parse date strings like 'YYYY', 'YYYY-MM', 'YYYY-MM-DD'.
         Treat 'present', 'now', 'current' as None (open-ended).

@@ -14,16 +14,12 @@ class DocxParser:
         )
 
     def to_markdown(self):
-        markdown_content = f"""
-        # Header Information
-
-        - **Name:** {self.name}
-        - **Title:** {self.title}
-        - **Phone:** {self.phone}
-        - **Email:** {self.email}
-
-        ---
-        """
+        header_text = []
+        for section in self.document.sections:
+            header = section.header
+            for paragraph in header.paragraphs:
+                header_text.append(paragraph.text)
+        markdown_content = "\n".join(header_text)
         # Extract and process each section
         current_section = None
         section_content = []
@@ -78,6 +74,30 @@ class DocxParser:
         print(markdown_content)
         return markdown_content
 
+    def _extract_header(self):
+        import re
+
+        if getattr(self, "_header_extracted", False):
+            return
+        for para in self.document.paragraphs:
+            text = (para.text or "").strip()
+            if not text:
+                continue
+
+            m = re.match(r"(?i)name\s*[:\-]?\s*(.*)$", text)
+            if m:
+                self.name = m.group(1).strip() or None
+            m = re.match(r"(?i)title\s*[:\-]?\s*(.*)$", text)
+            if m:
+                self.title = m.group(1).strip() or None
+            m = re.match(r"(?i)phone\s*[:\-]?\s*(.*)$", text)
+            if m:
+                self.phone = m.group(1).strip() or None
+            m = re.match(r"(?i)email\s*[:\-]?\s*(.*)$", text)
+            if m:
+                self.email = m.group(1).strip() or None
+        self._header_extracted = True
+
     def to_html(self):
         import mammoth  # type: ignore
 
@@ -116,4 +136,5 @@ class DocxParser:
         return False
 
     def is_header(self, paragraph):
+        # Header in this instance is the heading of an experience
         return not self.is_bullet_paragraph(paragraph)

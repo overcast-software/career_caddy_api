@@ -783,36 +783,9 @@ class DjangoUserViewSet(viewsets.ViewSet):
         permission_classes=[AllowAny],
     )
     def bootstrap_superuser(self, request):
-        from django.conf import settings
 
-        # Check if bootstrap is enabled
-        if not getattr(settings, "ALLOW_BOOTSTRAP_SUPERUSER", False):
-            return Response({"errors": [{"detail": "Bootstrap disabled"}]}, status=403)
-
-        # Verify bootstrap token
-        bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
-
-        # Read token from JSON body or query params (header not supported)
-        data = request.data if isinstance(request.data, dict) else {}
-        attrs = {}
-        if isinstance(data.get("data"), dict):
-            attrs = data["data"].get("attributes") or {}
-        else:
-            attrs = data or {}
-        provided_token = (
-            attrs.get("bootstrap_token")
-            or attrs.get("bootstrapToken")
-            or attrs.get("BOOTSTRAP_TOKEN")
-            or request.query_params.get("bootstrap_token", "")
-        )
-
-        if not bootstrap_token or provided_token != bootstrap_token:
-            return Response(
-                {"errors": [{"detail": "Invalid bootstrap token"}]}, status=403
-            )
-
-        User = get_user_model()
         # Only allow when no users exist
+        User = get_user_model()
         if User.objects.count() > 0:
             return Response({"errors": [{"detail": "bootstrap closed"}]}, status=403)
 
@@ -2368,7 +2341,8 @@ class ResumeViewSet(BaseSAViewSet):
             )
 
             # Process the resume
-            resume = ingest_service.process()
+            ingest_service.process()
+            resume = ingest_service.db_resume
 
             # Guard against None resume from failed ingestion
             if resume is None:

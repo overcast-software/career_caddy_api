@@ -75,6 +75,22 @@ CORS_ALLOWED_ORIGINS = list(set(
     ["https://careercaddy.online"]
 ))
 
+# Add development origins for CORS
+if os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes"):
+    CORS_ALLOWED_ORIGINS.extend([
+        "http://localhost:3000",
+        "http://localhost:4200",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:4200",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5173",  # Vite default
+        "http://127.0.0.1:5173",
+    ])
+
+# De-duplicate CORS origins
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys(CORS_ALLOWED_ORIGINS))
+
 CSRF_TRUSTED_ORIGINS = list(set(
     (globals().get("CSRF_TRUSTED_ORIGINS") or []) +
     [o for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if o] +
