@@ -149,6 +149,30 @@ class IngestResume:
         self.agent = agent
         self.db_resume = None
 
+    def _resolve_user_id(self, user) -> Optional[int]:
+        """
+        Extract a user id from either a Django user or an SA user.
+        
+        Args:
+            user: User object (Django or SQLAlchemy)
+            
+        Returns:
+            int: User ID if available, None otherwise
+        """
+        if user is None:
+            return None
+            
+        # Try to get id or pk attribute
+        user_id = getattr(user, "id", None) or getattr(user, "pk", None)
+        
+        if user_id is not None:
+            try:
+                return int(user_id)
+            except (ValueError, TypeError):
+                pass
+                
+        return None
+
     def extract_text_from_docx(self, source):
         """
         Extract text from a docx file.
@@ -226,7 +250,12 @@ class IngestResume:
 
         resume = Resume(name=parsed_resume.name, title=parsed_resume.title)
         self.db_resume = resume
-        self.db_resume.user = self.user
+        
+        # Set user_id instead of user relationship to avoid cross-ORM issues
+        user_id = self._resolve_user_id(self.user)
+        if user_id is not None:
+            self.db_resume.user_id = user_id
+            
         self.db_resume.save()
         # Create and save models
         print("Creating summary...")
