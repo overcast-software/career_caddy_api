@@ -206,7 +206,7 @@ class TestIngestEndpointBlob(APITestCase):
         self.assertIn("included", response.data)
         self.assertEqual(response.data["included"], included_stub)
         mock_build_included.assert_called_once()
-
+        
         # Verify include_rels was truthy
         include_rels = mock_build_included.call_args[0][2]
         self.assertTrue(include_rels)
