@@ -10,12 +10,13 @@ class Education(BaseModel):
     degree = Column(String, nullable=True)
     issue_date = Column(Date, nullable=True)
     institution = Column(String, nullable=False)
-    major = Column(String, nullable=False)
-    minor = Column(String, nullable=False)
+    major = Column(String, nullable=True)
+    minor = Column(String, nullable=True)
     resumes = relationship(
         "Resume",
         secondary="resume_education",
         back_populates="educations",
+        overlaps="education,resume",
     )
 
     def to_export_dict(self) -> dict:
@@ -25,8 +26,8 @@ class Education(BaseModel):
         edu_dict["degree"] = getattr(self, "degree", "") or ""
         edu_dict["major"] = getattr(self, "major", "") or ""
         edu_dict["minor"] = getattr(self, "minor", "") or ""
-        
+
         issue_date = getattr(self, "issue_date", None)
         edu_dict["issue_date"] = str(issue_date) if issue_date else None
-        
+
         return edu_dict

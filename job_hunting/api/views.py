@@ -9,7 +9,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.parsers import JSONParser
+from rest_framework.parsers import JSONParser, MultiPartParser
 from .parsers import VndApiJSONParser
 from job_hunting.lib.scoring.job_scorer import JobScorer
 from job_hunting.lib.ai_client import get_client, set_api_key
@@ -18,6 +18,7 @@ from job_hunting.lib.services.cover_letter_service import CoverLetterService
 from job_hunting.lib.services.generic_service import GenericService
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.resume_export_service import ResumeExportService
+from job_hunting.lib.services.ingest_resume import IngestResume
 
 from job_hunting.lib.models import (
     Resume,
@@ -155,7 +156,7 @@ def healthcheck(request):
 
 class BaseSAViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
-    parser_classes = [VndApiJSONParser, JSONParser]
+    parser_classes = [MultiPartParser, VndApiJSONParser, JSONParser]
     model = None
     serializer_class = None
 
@@ -782,36 +783,9 @@ class DjangoUserViewSet(viewsets.ViewSet):
         permission_classes=[AllowAny],
     )
     def bootstrap_superuser(self, request):
-        from django.conf import settings
 
-        # Check if bootstrap is enabled
-        if not getattr(settings, "ALLOW_BOOTSTRAP_SUPERUSER", False):
-            return Response({"errors": [{"detail": "Bootstrap disabled"}]}, status=403)
-
-        # Verify bootstrap token
-        bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
-
-        # Read token from JSON body or query params (header not supported)
-        data = request.data if isinstance(request.data, dict) else {}
-        attrs = {}
-        if isinstance(data.get("data"), dict):
-            attrs = data["data"].get("attributes") or {}
-        else:
-            attrs = data or {}
-        provided_token = (
-            attrs.get("bootstrap_token")
-            or attrs.get("bootstrapToken")
-            or attrs.get("BOOTSTRAP_TOKEN")
-            or request.query_params.get("bootstrap_token", "")
-        )
-
-        if not bootstrap_token or provided_token != bootstrap_token:
-            return Response(
-                {"errors": [{"detail": "Invalid bootstrap token"}]}, status=403
-            )
-
-        User = get_user_model()
         # Only allow when no users exist
+        User = get_user_model()
         if User.objects.count() > 0:
             return Response({"errors": [{"detail": "bootstrap closed"}]}, status=403)
 
@@ -2322,6 +2296,80 @@ class ResumeViewSet(BaseSAViewSet):
             )
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
+
+    @action(detail=False, methods=["post"], url_path="ingest")
+    def ingest(self, request):
+        """
+        Ingest a resume from an uploaded docx file and create a new resume.
+
+        Expects a multipart/form-data request with a 'file' field containing the docx.
+        """
+        # Check if file was uploaded
+        if "file" not in request.FILES:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": "No file uploaded. Expected 'file' field with docx content."
+                        }
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        uploaded_file = request.FILES["file"]
+
+        # Validate file type
+        if not uploaded_file.name.lower().endswith(".docx"):
+            return Response(
+                {"errors": [{"detail": "Only .docx files are supported"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            # Read file content as blob
+            file_blob = uploaded_file.read()
+
+            # Create a new resume for the authenticated user
+            # resume = Resume(user_id=request.user.id, file_path=uploaded_file.name)
+
+            # Create IngestResume service with the blob
+            ingest_service = IngestResume(
+                user=request.user,
+                resume=file_blob,  # Pass blob instead of path
+                agent=None,  # Will use default agent
+            )
+
+            # Process the resume
+            result = ingest_service.process()
+            resume = result or ingest_service.db_resume
+
+            # Guard against None resume from failed ingestion
+            if resume is None:
+                return Response(
+                    {"errors": [{"detail": "Ingest failed: no resume created"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Return the created resume with all relationships
+            ser = self.get_serializer()
+            payload = {"data": ser.to_resource(resume)}
+
+            # Include all relationships by default for ingest response
+            ser_rels = list(getattr(ser, "relationships", {}).keys())
+            include_rels = self._parse_include(request) or ser_rels
+            if include_rels:
+                payload["included"] = self._build_included(
+                    [resume], include_rels, request
+                )
+
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            return Response(
+                {"errors": [{"detail": f"Failed to process resume: {str(e)}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
 
 class ScoreViewSet(BaseSAViewSet):

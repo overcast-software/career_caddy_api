@@ -288,7 +288,7 @@ class DjangoUserSerializer:
 class ResumeSerializer(BaseSASerializer):
     type = "resume"
     model = Resume
-    attributes = ["file_path", "title", "name", "notes"]
+    attributes = ["file_path", "title", "name", "notes", "user_id"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -779,7 +779,7 @@ class DescriptionSerializer(BaseSASerializer):
 class SkillSerializer(BaseSASerializer):
     type = "skill"
     model = Skill
-    attributes = ["text"]
+    attributes = ["text", "skill_type"]
     relationships = {
         "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
     }

@@ -6,8 +6,12 @@ from .base import BaseModel
 class ResumeCertification(BaseModel):
     __tablename__ = "resume_certification"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    resume_id = Column(Integer, ForeignKey("resume.id", ondelete="CASCADE"), nullable=False)
-    certification_id = Column(Integer, ForeignKey("certification.id", ondelete="CASCADE"), nullable=False)
+    resume_id = Column(
+        Integer, ForeignKey("resume.id", ondelete="CASCADE"), nullable=False
+    )
+    certification_id = Column(
+        Integer, ForeignKey("certification.id", ondelete="CASCADE"), nullable=False
+    )
 
     issuer = Column(String, nullable=True)
     title = Column(String, nullable=True)
@@ -15,5 +19,5 @@ class ResumeCertification(BaseModel):
     content = Column(Text, nullable=True)
 
     # Relationships (view-only to avoid conflicting with the many-to-many)
-    resume = relationship("Resume", foreign_keys=[resume_id], viewonly=True)
-    certification = relationship("Certification", foreign_keys=[certification_id], viewonly=True)
+    resume = relationship("Resume", foreign_keys=[resume_id], overlaps="certifications")
+    certification = relationship("Certification", foreign_keys=[certification_id], overlaps="certifications")

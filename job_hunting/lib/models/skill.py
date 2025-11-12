@@ -1,12 +1,14 @@
-from sqlalchemy import Column, Integer, Text
+from sqlalchemy import Column, Integer, Text, String
 from sqlalchemy.orm import relationship
 from .base import BaseModel
+
 
 class Skill(BaseModel):
     __tablename__ = "skill"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     text = Column(Text, nullable=False)
+    skill_type = Column(String, nullable=True)
 
     resumes = relationship(
         "Resume",

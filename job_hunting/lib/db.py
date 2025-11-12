@@ -65,15 +65,11 @@ def init_sqlalchemy():
                 {
                     "pool_size": 10,
                     "max_overflow": 20,
-                    "pool_timeout": 60,
+                    "pool_timeout": 10,
                 }
             )
 
         _engine = create_engine(db_url, connect_args=connect_args, **engine_kwargs)
-
-        # Schema creation is now handled separately via ensure_sqlalchemy_schema()
-        # to prevent race conditions during app startup
-
         _session = scoped_session(
             sessionmaker(bind=_engine, autoflush=False, autocommit=False)
         )
@@ -112,7 +108,7 @@ def _register_test_cleanup(db_path):
 def ensure_sqlalchemy_schema(with_advisory_lock=True):
     """Create SQLAlchemy tables with optional advisory lock for PostgreSQL."""
     # Ensure engine and session are initialized
-    # init_sqlalchemy()
+    init_sqlalchemy()
 
     if _engine is None:
         logger.error("SQLAlchemy engine not initialized")
