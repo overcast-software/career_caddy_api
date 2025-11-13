@@ -1,5 +1,8 @@
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm.exc import NoResultFound
+import logging
+
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -11,10 +14,26 @@ class BaseModel(Base):
     @classmethod
     def set_session(cls, session):
         cls._session = session
+        try:
+            bind = getattr(session, "bind", None)
+            if bind is not None:
+                engine = bind
+                dialect = getattr(engine, "dialect", None)
+                url = getattr(engine, "url", None)
+                logger.info(
+                    f"BaseModel session set. Engine dialect={getattr(dialect, 'name', '?')}, url={str(url) if url else 'n/a'}"
+                )
+            else:
+                logger.info("BaseModel session set (no bind detected on session).")
+        except Exception as e:
+            logger.debug(f"BaseModel.set_session: unable to introspect engine: {e}")
 
     @classmethod
     def get_session(cls):
         if cls._session is None:
+            logger.error(
+                "BaseModel.get_session called before set_session. Ensure init_sqlalchemy() has been executed."
+            )
             raise RuntimeError(
                 "From models/base.py. Session has not been set. Call set_session() first."
             )
@@ -24,18 +43,22 @@ class BaseModel(Base):
     def clear_session(cls):
         """Clear the session to prevent identity map collisions."""
         if cls._session is not None:
+            logger.debug("Clearing SQLAlchemy session: starting rollback/expunge/close")
             try:
                 cls._session.rollback()
-            except Exception:
-                pass
+                logger.debug("Session rollback completed")
+            except Exception as e:
+                logger.debug(f"Session rollback failed or not needed: {e}")
             try:
                 cls._session.expunge_all()
-            except Exception:
-                pass
+                logger.debug("Session expunge_all completed")
+            except Exception as e:
+                logger.debug(f"Session expunge_all failed: {e}")
             try:
                 cls._session.close()
-            except Exception:
-                pass
+                logger.debug("Session close completed")
+            except Exception as e:
+                logger.debug(f"Session close failed: {e}")
 
     @classmethod
     def find_by(cls, session=None, **kwargs):
@@ -109,6 +132,23 @@ class BaseModel(Base):
         if session is None:
             session = cls.get_session()
         return session.query(cls).count()
+
+    @classmethod
+    def declared_tables(cls):
+        """List declared SQLAlchemy table names from metadata."""
+        try:
+            return sorted(t.name for t in cls.metadata.sorted_tables)
+        except Exception:
+            return []
+
+    @classmethod
+    def log_metadata(cls):
+        """Log metadata summary for debugging."""
+        try:
+            tables = cls.declared_tables()
+            logger.info(f"Declared SQLAlchemy tables ({len(tables)}): {tables}")
+        except Exception as e:
+            logger.warning(f"Failed to summarize metadata: {e}")
 
     def save(self):
         """Save the current instance to the database."""
