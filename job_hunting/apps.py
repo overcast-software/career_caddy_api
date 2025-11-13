@@ -22,12 +22,6 @@ class JobHuntingConfig(AppConfig):
     def import_models(self):
         # Import default models and also our extra profile_models module
         super().import_models()
-        try:
-            from importlib import import_module
-
-            import_module(f"{self.name}.profile_models")
-        except Exception as e:
-            logger.warning(f"Failed to import Profile model module: {e}")
 
     def ready(self):
         from .lib.db import init_sqlalchemy

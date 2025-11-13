@@ -44,12 +44,6 @@ def _build_db_url():
 
 def init_sqlalchemy():
     global _engine, _session
-    print("*" * 88)
-    print(_engine)
-    print("*" * 88)
-    print("*" * 88)
-    print(_session)
-    print("*" * 88)
     if _engine is not None and _session is not None:
         return
 
@@ -167,9 +161,10 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
                 logger.info("Acquired PostgreSQL advisory lock for schema creation")
 
                 # Create tables with checkfirst=True
-                BaseModel.metadata.create_all(
-                    bind=conn, tables=tables_to_create, checkfirst=True
-                )
+                # BaseModel.metadata.create_all(
+                #     bind=conn, tables=tables_to_create, checkfirst=True
+                # )
+                BaseModel.metadata.create_all(bind=conn)
                 logger.info("SQLAlchemy schema creation completed")
 
             finally:
