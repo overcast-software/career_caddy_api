@@ -2675,7 +2675,9 @@ class ScrapeViewSet(BaseSAViewSet):
             )
 
         browser_manager = BrowserManager()
-        asyncio.run(browser_manager.start_browser(False))
+        headless = getattr(settings, "SCRAPER_HEADLESS", True)
+        nav_timeout = int(getattr(settings, "SCRAPER_NAV_TIMEOUT_MS", 30000))
+        asyncio.run(browser_manager.start_browser(headless, navigation_timeout=nav_timeout))
         service = GenericService(
             url=url, browser=browser_manager, ai_client=client, creds={}
         )

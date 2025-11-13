@@ -25,7 +25,7 @@ class GenericScraper:
             )
 
         # convert that shit to markdown
-        markdown_text = md(html_content)
+        markdown_text = md(html_content or "")
         scrape.job_content = markdown_text
         scrape.save()
         yield scrape

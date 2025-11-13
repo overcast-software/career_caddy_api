@@ -29,7 +29,7 @@ class BrowserManager:
         if self.playwright:
             await self.playwright.stop()
 
-    async def get_page_content(self, url, timeout=3000) -> str:
+    async def get_page_content(self, url, timeout=30000) -> str:
         try:
             await self.page.goto(url, wait_until="networkidle", timeout=timeout)
         except TimeoutError:
