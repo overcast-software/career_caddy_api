@@ -44,6 +44,12 @@ def _build_db_url():
 
 def init_sqlalchemy():
     global _engine, _session
+    print("*" * 88)
+    print(_engine)
+    print("*" * 88)
+    print("*" * 88)
+    print(_session)
+    print("*" * 88)
     if _engine is not None and _session is not None:
         return
 
@@ -155,7 +161,9 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         with _engine.connect() as conn:
             try:
                 # Acquire advisory lock
-                result = conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": SCHEMA_LOCK_KEY})
+                result = conn.execute(
+                    text("SELECT pg_advisory_lock(:k)"), {"k": SCHEMA_LOCK_KEY}
+                )
                 logger.info("Acquired PostgreSQL advisory lock for schema creation")
 
                 # Create tables with checkfirst=True
@@ -166,7 +174,9 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
 
             finally:
                 # Release advisory lock
-                conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": SCHEMA_LOCK_KEY})
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": SCHEMA_LOCK_KEY}
+                )
                 logger.info("Released PostgreSQL advisory lock")
     else:
         # For non-PostgreSQL or when lock is disabled
