@@ -1,5 +1,4 @@
-version: '3.8'
-
+---
 services:
   db:
     image: postgres:15
@@ -10,8 +9,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
-      - "${TAILSCALE_IP}:5432:5432"
+      - "127.0.0.1:5433:5432"
+      - "${TAILSCALE_IP}:5433:5432"
 
 
 
@@ -25,7 +24,7 @@ services:
     environment:
       DEBUG: 'False'
       SECRET_KEY: ${SECRET_KEY:-change-in-production}
-      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5432/${DB_NAME:-job_hunting}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5433/${DB_NAME:-job_hunting}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-api.careercaddy.online,careercaddy.online,www.careercaddy.online,localhost,127.0.0.1}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://careercaddy.online,https://www.careercaddy.online}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
