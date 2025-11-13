@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 import atexit
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session
 from job_hunting.lib.models.base import BaseModel
 
@@ -114,6 +114,31 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         logger.error("SQLAlchemy engine not initialized")
         return
 
+    # Ensure all SQLAlchemy model modules are imported so their tables are registered
+    try:
+        from job_hunting.lib.models import (
+            certification,
+            cover_letter,
+            description,
+            education,
+            experience,
+            experience_description,
+            profile,
+            project_description,
+            resume,
+            resume_certification,
+            resume_education,
+            resume_experience,
+            resume_skill,
+            resume_summary,
+            scrape,
+            skill,
+            summary,
+            user,
+        )  # noqa: F401
+    except Exception as e:
+        logger.warning(f"Failed to import one or more SQLAlchemy model modules: {e}")
+
     tables_to_create = [
         t for t in BaseModel.metadata.sorted_tables if t.name != "auth_user"
     ]
@@ -130,7 +155,7 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         with _engine.connect() as conn:
             try:
                 # Acquire advisory lock
-                result = conn.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,))
+                result = conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": SCHEMA_LOCK_KEY})
                 logger.info("Acquired PostgreSQL advisory lock for schema creation")
 
                 # Create tables with checkfirst=True
@@ -141,7 +166,7 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
 
             finally:
                 # Release advisory lock
-                conn.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK_KEY,))
+                conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": SCHEMA_LOCK_KEY})
                 logger.info("Released PostgreSQL advisory lock")
     else:
         # For non-PostgreSQL or when lock is disabled
