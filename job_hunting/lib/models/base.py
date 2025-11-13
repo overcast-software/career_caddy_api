@@ -59,6 +59,28 @@ class BaseModel(Base):
                 logger.debug("Session close completed")
             except Exception as e:
                 logger.debug(f"Session close failed: {e}")
+            try:
+                if hasattr(cls._session, 'remove'):
+                    cls._session.remove()
+                    logger.debug("Scoped session removed")
+            except Exception as e:
+                logger.debug(f"Scoped session remove failed: {e}")
+
+    @classmethod
+    def cleanup_session_on_exception(cls):
+        """Rollback and remove session after an exception to prevent 'transaction aborted' errors."""
+        if cls._session is not None:
+            try:
+                cls._session.rollback()
+                logger.debug("Session rolled back after exception")
+            except Exception as e:
+                logger.debug(f"Session rollback after exception failed: {e}")
+            try:
+                if hasattr(cls._session, 'remove'):
+                    cls._session.remove()
+                    logger.debug("Scoped session removed after exception")
+            except Exception as e:
+                logger.debug(f"Session remove after exception failed: {e}")
 
     @classmethod
     def find_by(cls, session=None, **kwargs):

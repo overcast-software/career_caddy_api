@@ -41,6 +41,7 @@ from job_hunting.lib.models import (
     Skill,
     ResumeSkill,
 )
+from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     DjangoUserSerializer,
     ResumeSerializer,
@@ -159,6 +160,23 @@ class BaseSAViewSet(viewsets.ViewSet):
     parser_classes = [MultiPartParser, VndApiJSONParser, JSONParser]
     model = None
     serializer_class = None
+
+    def dispatch(self, request, *args, **kwargs):
+        """Override dispatch to ensure proper SQLAlchemy session cleanup."""
+        try:
+            return super().dispatch(request, *args, **kwargs)
+        except Exception:
+            BaseModel.cleanup_session_on_exception()
+            raise
+        finally:
+            # Best-effort cleanup even if middleware is disabled in tests
+            BaseModel.clear_session()
+            try:
+                sess = getattr(self.model, "get_session", lambda: None)()
+                if hasattr(sess, "remove"):
+                    sess.remove()
+            except Exception:
+                pass
 
     def get_session(self):
         return self.model.get_session()

@@ -32,6 +32,7 @@ except Exception:
         "django.contrib.auth.middleware.AuthenticationMiddleware",
         "django.contrib.messages.middleware.MessageMiddleware",
         "django.middleware.clickjacking.XFrameOptionsMiddleware",
+        "job_hunting.middleware.sqlalchemy_session.SQLAlchemySessionMiddleware",
     ]
 
     ROOT_URLCONF = "job_hunting.urls"
