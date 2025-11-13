@@ -14,6 +14,28 @@ jobs:
     name: Lint, security audit, and tests
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: job_hunting_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d job_hunting_ci"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      DEBUG: 'False'
+      SECRET_KEY: test-secret-key
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/job_hunting_ci
+      TEST_DB_NAME: job_hunting_ci
+      SA_SCHEMA_ON_POST_MIGRATE: 'True'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,10 +70,16 @@ jobs:
         run: safety check -r requirements.txt || true
         continue-on-error: true
 
+      - name: Wait for Postgres
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          for i in {1..30}; do
+            pg_isready -h localhost -p 5432 -U postgres -d job_hunting_ci && break
+            echo "Postgres not ready yet..."
+            sleep 2
+          done
+
       - name: Run tests
-        env:
-          DEBUG: 'False'
-          SECRET_KEY: test-secret-key
         run: |
           python manage.py migrate --noinput
           python manage.py test -v 2

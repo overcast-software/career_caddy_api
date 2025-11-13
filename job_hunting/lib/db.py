@@ -1,7 +1,7 @@
 import os
 import sys
 import logging
-import atexit
+import importlib
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session
 from job_hunting.lib.models.base import BaseModel
@@ -12,34 +12,22 @@ _engine = None
 _session = None
 
 
-def _is_management_command():
-    cmds = {"migrate", "makemigrations", "collectstatic"}
-    return any(arg in sys.argv for arg in cmds)
-
-
 def _build_db_url():
-    """Build database URL from environment variables or fallback to SQLite."""
-    # Check if we're in test mode
-    if os.environ.get("TESTING"):
-        # Use test database path
-        test_db_path = os.environ.get("TEST_DB_PATH", "/tmp/job_hunting_test.db")
-        _register_test_cleanup(test_db_path)
-        return f"sqlite:///{test_db_path}"
-
-    # Check for SQLAlchemy-specific URL first
-    sqlalchemy_url = os.environ.get("SQLALCHEMY_DATABASE_URL")
-    if sqlalchemy_url:
-        return sqlalchemy_url
-
+    """Build database URL from environment variables."""
     # Check for Django DATABASE_URL
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         return database_url
 
-    # Fallback to SQLite for development/testing
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    db_path = os.path.join(project_root, "job_data.db")
-    return f"sqlite:///{db_path}"
+    # Default to localhost Postgres in development
+    if os.environ.get("DEBUG", "False") == "True":
+        return "postgresql://postgres:postgres@localhost:5432/job_hunting"
+    
+    # In production, DATABASE_URL must be set
+    raise RuntimeError(
+        "DATABASE_URL environment variable must be set in production. "
+        "Example: postgresql://user:password@host:port/database"
+    )
 
 
 def init_sqlalchemy():
@@ -49,31 +37,28 @@ def init_sqlalchemy():
 
     try:
         db_url = _build_db_url()
-        is_sqlite = db_url.startswith("sqlite:")
+        
+        # Log the resolved database URL (sanitized)
+        from sqlalchemy.engine.url import make_url
+        parsed_url = make_url(db_url)
+        sanitized_url = str(parsed_url).replace(parsed_url.password or "", "***") if parsed_url.password else str(parsed_url)
+        logger.info(f"Initializing SQLAlchemy with URL: {sanitized_url}")
 
-        # Configure connection arguments
-        connect_args = {}
+        # Configure engine with standard pool settings
         engine_kwargs = {
             "pool_pre_ping": True,
+            "pool_size": 10,
+            "max_overflow": 20,
+            "pool_timeout": 10,
         }
 
-        if is_sqlite:
-            connect_args = {"check_same_thread": False}
-        else:
-            # Only set pool settings for non-SQLite engines
-            engine_kwargs.update(
-                {
-                    "pool_size": 10,
-                    "max_overflow": 20,
-                    "pool_timeout": 10,
-                }
-            )
-
-        _engine = create_engine(db_url, connect_args=connect_args, **engine_kwargs)
+        _engine = create_engine(db_url, **engine_kwargs)
         _session = scoped_session(
             sessionmaker(bind=_engine, autoflush=False, autocommit=False)
         )
         BaseModel.set_session(_session)
+        
+        logger.info(f"SQLAlchemy engine dialect: {_engine.dialect.name}")
 
     except Exception as e:
         error_msg = f"Failed to initialize SQLAlchemy: {e}"
@@ -86,24 +71,6 @@ def init_sqlalchemy():
             return
 
 
-def _cleanup_test_db(db_path):
-    """Remove test database file if it exists and is in /tmp."""
-    try:
-        if (
-            os.path.exists(db_path)
-            and db_path.startswith("/tmp/")
-            and os.environ.get("TESTING")
-        ):
-            os.remove(db_path)
-            logger.info(f"Cleaned up test database: {db_path}")
-    except Exception as e:
-        logger.warning(f"Failed to cleanup test database {db_path}: {e}")
-
-
-def _register_test_cleanup(db_path):
-    """Register cleanup function for test database."""
-    atexit.register(_cleanup_test_db, db_path)
-
 
 def ensure_sqlalchemy_schema(with_advisory_lock=True):
     """Create SQLAlchemy tables with optional advisory lock for PostgreSQL."""
@@ -114,30 +81,29 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         logger.error("SQLAlchemy engine not initialized")
         return
 
-    # Ensure all SQLAlchemy model modules are imported so their tables are registered
-    try:
-        from job_hunting.lib.models import (
-            certification,
-            cover_letter,
-            description,
-            education,
-            experience,
-            experience_description,
-            profile,
-            project_description,
-            resume,
-            resume_certification,
-            resume_education,
-            resume_experience,
-            resume_skill,
-            resume_summary,
-            scrape,
-            skill,
-            summary,
-            user,
-        )  # noqa: F401
-    except Exception as e:
-        logger.warning(f"Failed to import one or more SQLAlchemy model modules: {e}")
+    # Import SQLAlchemy model modules individually to be resilient to failures
+    model_modules = [
+        "certification", "cover_letter", "description", "education", "experience",
+        "experience_description", "profile", "project_description", "resume",
+        "resume_certification", "resume_education", "resume_experience", 
+        "resume_skill", "resume_summary", "scrape", "skill", "summary", "user",
+        "company", "job_post", "application", "score", "project"
+    ]
+    
+    successful_imports = []
+    failed_imports = []
+    
+    for module_name in model_modules:
+        try:
+            importlib.import_module(f"job_hunting.lib.models.{module_name}")
+            successful_imports.append(module_name)
+        except Exception as e:
+            failed_imports.append(f"{module_name}: {e}")
+            logger.warning(f"Failed to import model module {module_name}: {e}")
+    
+    logger.info(f"Successfully imported {len(successful_imports)} model modules: {successful_imports}")
+    if failed_imports:
+        logger.warning(f"Failed to import {len(failed_imports)} model modules: {failed_imports}")
 
     tables_to_create = [
         t for t in BaseModel.metadata.sorted_tables if t.name != "auth_user"
@@ -146,6 +112,8 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
     if not tables_to_create:
         logger.info("No SQLAlchemy tables to create")
         return
+
+    logger.info(f"Tables to create: {[t.name for t in tables_to_create]}")
 
     # Use advisory lock for PostgreSQL to prevent concurrent schema creation
     if with_advisory_lock and _engine.dialect.name == "postgresql":
@@ -160,11 +128,10 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
                 )
                 logger.info("Acquired PostgreSQL advisory lock for schema creation")
 
-                # Create tables with checkfirst=True
-                # BaseModel.metadata.create_all(
-                #     bind=conn, tables=tables_to_create, checkfirst=True
-                # )
-                BaseModel.metadata.create_all(bind=conn)
+                # Create only intended tables with checkfirst=True
+                BaseModel.metadata.create_all(
+                    bind=conn, tables=tables_to_create, checkfirst=True
+                )
                 logger.info("SQLAlchemy schema creation completed")
 
             finally:
@@ -175,5 +142,5 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
                 logger.info("Released PostgreSQL advisory lock")
     else:
         # For non-PostgreSQL or when lock is disabled
-        BaseModel.metadata.create_all(bind=_engine, checkfirst=True)
-        logger.info("SQLAlchemy schema creation completed (no lock)")
+        BaseModel.metadata.create_all(bind=_engine, tables=tables_to_create, checkfirst=True)
+        logger.info("SQLAlchemy schema creation completed")

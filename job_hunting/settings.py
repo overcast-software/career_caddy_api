@@ -93,13 +93,15 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
     DATABASES = {"default": dj_database_url.parse(DATABASE_URL)}
 else:
-    # Fallback to SQLite for development/testing
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": os.path.join(BASE_DIR, "job_data.db"),
-        }
-    }
+    # Default to localhost Postgres in development
+    if DEBUG:
+        DATABASES = {"default": dj_database_url.parse("postgresql://postgres:postgres@localhost:5432/job_hunting")}
+    else:
+        # In production, DATABASE_URL must be set
+        raise ImproperlyConfigured(
+            "DATABASE_URL environment variable must be set in production. "
+            "Example: postgresql://user:password@host:port/database"
+        )
 
 TEMPLATES = [
     {
@@ -204,6 +206,10 @@ CORS_ALLOWED_ORIGINS = list(dict.fromkeys(CORS_ALLOWED_ORIGINS))
 # Log CORS origins for debugging
 if DEBUG:
     print(f"CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
+
+# Test database configuration
+if TESTING and os.environ.get("TEST_DB_NAME"):
+    DATABASES["default"]["TEST"] = {"NAME": os.environ["TEST_DB_NAME"]}
 
 # Optional: allow matching origins by regex (comma-separated)
 CORS_ALLOWED_ORIGIN_REGEXES_ENV = os.environ.get("CORS_ALLOWED_ORIGIN_REGEXES", "")
