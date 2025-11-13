@@ -39,10 +39,10 @@ class JobHuntingConfig(AppConfig):
             init_sqlalchemy()
 
             # Wrap Base.metadata methods to clear session before schema changes
-            from .lib.models.base import BaseModel, Base
+            from .lib.models.base import BaseModel
 
-            # orig_drop = Base.metadata.drop_all
-            orig_create = Base.metadata.create_all
+            orig_drop = BaseModel.metadata.drop_all
+            orig_create = BaseModel.metadata.create_all
 
             def drop_all_reset(*a, **k):
                 try:
@@ -59,8 +59,8 @@ class JobHuntingConfig(AppConfig):
                 return orig_create(*a, **k)
 
             # Base.metadata.drop_all = drop_all_reset
-            # Base.metadata.create_all = create_all_reset
-
+            # BaseModel.metadata.create_all = create_all_reset
+            BaseModel.metadata.create_all
         except Exception as e:
             if strict_init:
                 # Fail fast in production
