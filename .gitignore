@@ -54,3 +54,6 @@ staticfiles/
 
 # Aider
 .aider*
+
+docker-compose.yml
+.ok
