@@ -27,18 +27,18 @@ class Skill(BaseModel):
         """Return the skill text and type for export as a dictionary."""
         text = getattr(self, "text", None)
         skill_type = getattr(self, "skill_type", None)
-
+        
         # Handle text - return empty string if missing
         if text:
             text_value = str(text)
         else:
             fallback = str(self) if str(self) and str(self) != "None" else ""
             text_value = fallback
-
+        
         # Handle skill_type - return None if missing or empty
         if skill_type and str(skill_type).strip():
             type_value = str(skill_type)
         else:
             type_value = None
-
+            
         return {"text": text_value, "skill_type": type_value}

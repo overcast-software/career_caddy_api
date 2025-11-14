@@ -347,7 +347,7 @@ class BaseSAViewSet(viewsets.ViewSet):
             ]:
                 if key in data:
                     attrs[key] = data[key]
-
+        
         attrs = self.pre_save_payload(request, attrs, creating=True)
         obj = self.model(**attrs)
         session = self.get_session()
@@ -2516,11 +2516,11 @@ class JobPostViewSet(BaseSAViewSet):
         # Remove any client-supplied ownership fields so they can't be spoofed
         attrs.pop("created_by", None)
         attrs.pop("created_by_id", None)  # defensive
-
+        
         # If creating, set created_by to the authenticated user
         if creating:
             attrs["created_by"] = request.user.id
-
+        
         return attrs
 
     @action(detail=True, methods=["get"])
