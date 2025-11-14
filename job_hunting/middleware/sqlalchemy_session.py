@@ -7,11 +7,11 @@ logger = logging.getLogger(__name__)
 class SQLAlchemySessionMiddleware:
     """
     Middleware to ensure proper SQLAlchemy session lifecycle management.
-
+    
     - On exceptions: rollback and remove the scoped session
     - On request completion: clear and remove the session
     """
-
+    
     def __init__(self, get_response):
         self.get_response = get_response
 

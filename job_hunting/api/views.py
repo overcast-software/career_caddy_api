@@ -184,6 +184,10 @@ class BaseSAViewSet(viewsets.ViewSet):
     def get_serializer(self):
         return self.serializer_class()
 
+    def pre_save_payload(self, request, attrs: dict, creating: bool) -> dict:
+        """Hook for subclasses to adjust/force attributes before persistence."""
+        return attrs
+
     def _parse_include(self, request):
         raw = []
         inc = request.query_params.get("include")
@@ -321,11 +325,11 @@ class BaseSAViewSet(viewsets.ViewSet):
     def create(self, request):
         # Handle both JSON:API and plain JSON payloads
         data = request.data if isinstance(request.data, dict) else {}
+        ser = self.get_serializer()
 
         # Check if this is JSON:API format (has "data" wrapper)
         if "data" in data:
             # Use JSON:API parser
-            ser = self.get_serializer()
             try:
                 attrs = ser.parse_payload(request.data)
             except ValueError as e:
@@ -343,6 +347,8 @@ class BaseSAViewSet(viewsets.ViewSet):
             ]:
                 if key in data:
                     attrs[key] = data[key]
+        
+        attrs = self.pre_save_payload(request, attrs, creating=True)
         obj = self.model(**attrs)
         session = self.get_session()
         session.add(obj)
@@ -364,6 +370,7 @@ class BaseSAViewSet(viewsets.ViewSet):
             attrs = ser.parse_payload(request.data)
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
+        attrs = self.pre_save_payload(request, attrs, creating=False)
         for k, v in attrs.items():
             setattr(obj, k, v)
         session = self.get_session()
@@ -2352,9 +2359,12 @@ class ResumeViewSet(BaseSAViewSet):
             # resume = Resume(user_id=request.user.id, file_path=uploaded_file.name)
 
             # Create IngestResume service with the blob
+            resume_name = uploaded_file.name
+            # TODO would love to provide the name.
             ingest_service = IngestResume(
                 user=request.user,
                 resume=file_blob,  # Pass blob instead of path
+                resume_name=resume_name,
                 agent=None,  # Will use default agent
             )
 
@@ -2501,6 +2511,17 @@ class ScoreViewSet(BaseSAViewSet):
 class JobPostViewSet(BaseSAViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
+
+    def pre_save_payload(self, request, attrs, creating):
+        # Remove any client-supplied ownership fields so they can't be spoofed
+        attrs.pop("created_by", None)
+        attrs.pop("created_by_id", None)  # defensive
+        
+        # If creating, set created_by to the authenticated user
+        if creating:
+            attrs["created_by"] = request.user.id
+        
+        return attrs
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
@@ -2677,7 +2698,9 @@ class ScrapeViewSet(BaseSAViewSet):
         browser_manager = BrowserManager()
         headless = getattr(settings, "SCRAPER_HEADLESS", True)
         nav_timeout = int(getattr(settings, "SCRAPER_NAV_TIMEOUT_MS", 30000))
-        asyncio.run(browser_manager.start_browser(headless, navigation_timeout=nav_timeout))
+        asyncio.run(
+            browser_manager.start_browser(headless, navigation_timeout=nav_timeout)
+        )
         service = GenericService(
             url=url, browser=browser_manager, ai_client=client, creds={}
         )

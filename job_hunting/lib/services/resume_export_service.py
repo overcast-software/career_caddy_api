@@ -20,7 +20,25 @@ class ResumeExportService:
                 self.default_template_path = "templates/resume_export.docx"
 
     def build_context(self, resume: Resume) -> dict:
-        return resume.to_export_context()
+        context = resume.to_export_context()
+
+        # Post-process skills to group by skill_type
+        skills = context["skills"]
+        skills_by_type = {}
+
+        for skill in skills:
+            text = skill["text"]
+            skill_type = skill["skill_type"]
+            key = skill_type if skill_type and skill_type.strip() else "uncategorized"
+
+            # Add to grouped dictionary
+            if key not in skills_by_type:
+                skills_by_type[key] = []
+            skills_by_type[key].append(text)
+
+        context["skills"] = skills_by_type
+
+        return context
 
     def render_docx(self, resume: Resume, template_path: Optional[str] = None) -> bytes:
         try:
@@ -33,10 +51,21 @@ class ResumeExportService:
         if not path:
             raise ValueError("No template path provided")
 
+        key_mapping = {
+            "Language": "language_skills",
+            "Framework": "framework_skills",
+            "Database": "database_skills",
+            "Tool/Platform": "tool_skills",
+            "Security": "security_skills",
+        }
         # Load template and render
         template = DocxTemplate(path)
         context = self.build_context(resume)
-
+        context["skills"] = {
+            key_mapping.get(k): ", ".join(v) for k, v in context["skills"].items()
+        }
+        for new_key, skills in context["skills"].items():
+            context[new_key] = skills
         try:
             template.render(context)
         except Exception as e:

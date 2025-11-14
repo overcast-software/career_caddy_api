@@ -27,6 +27,7 @@ from job_hunting.lib.models.resume_skill import ResumeSkill
 from job_hunting.lib.models.summary import Summary
 from job_hunting.lib.models.resume_summary import ResumeSummaries
 from job_hunting.lib.models.skill import Skill
+from job_hunting.lib.models.profile import Profile
 from job_hunting.lib.models.company import Company
 from job_hunting.lib.models.description import Description
 
@@ -88,6 +89,7 @@ class SkillOut(BaseModel):
 class ExperienceOut(BaseModel):
     title: Optional[str] = None
     company: CompanyOut
+    summary: Optional[str]
     start_date: Optional[str] = None  # Expect "YYYY-MM" or "YYYY" or "present"
     end_date: Optional[str] = None  # Same
     location: Optional[str] = None
@@ -136,11 +138,12 @@ class ParsedResume(BaseModel):
 
 
 class IngestResume:
-    def __init__(self, user=None, resume=None, agent=None):
+    def __init__(self, user=None, resume=None, resume_name=None, agent=None):
         """
         Keyword Arguments:
         user   -- (default None) the user who is submitting the resume
         resume -- (default None) the resume they are submitting docx???
+        resume_name -- (default None) the way to name the resume to reference within app
         agent  -- (default None) optional agent to pass in
         """
         self.user = user
@@ -152,25 +155,25 @@ class IngestResume:
     def _resolve_user_id(self, user) -> Optional[int]:
         """
         Extract a user id from either a Django user or an SA user.
-        
+
         Args:
             user: User object (Django or SQLAlchemy)
-            
+
         Returns:
             int: User ID if available, None otherwise
         """
         if user is None:
             return None
-            
+
         # Try to get id or pk attribute
         user_id = getattr(user, "id", None) or getattr(user, "pk", None)
-        
+
         if user_id is not None:
             try:
                 return int(user_id)
             except (ValueError, TypeError):
                 pass
-                
+
         return None
 
     def extract_text_from_docx(self, source):
@@ -248,14 +251,19 @@ class IngestResume:
         result = self.agent.run_sync(resume_md)
         parsed_resume = result.output
 
-        resume = Resume(name=parsed_resume.name, title=parsed_resume.title)
+        resume = Resume(name=self.resume_name, title=parsed_resume.title)
         self.db_resume = resume
-        
+
+        if self.user.profile is None:
+            profile = Profile(email=parsed_resume.email, phone=parsed_resume.phone)
+            self.user.profile = profile
+            self.user.save()
+
         # Set user_id instead of user relationship to avoid cross-ORM issues
         user_id = self._resolve_user_id(self.user)
         if user_id is not None:
             self.db_resume.user_id = user_id
-            
+
         self.db_resume.save()
         # Create and save models
         print("Creating summary...")
@@ -390,7 +398,7 @@ class IngestResume:
         print("Resume data saved successfully!")
         print(result.usage())
         # > RunUsage(input_tokens=57, output_tokens=8, requests=1)
-        
+
         return self.db_resume
 
     def get_agent(self):
