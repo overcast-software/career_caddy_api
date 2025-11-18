@@ -68,8 +68,18 @@ def _pluralize_type(t: str) -> str:
     return t + "s"
 
 
+# Route prefix mapping for special cases
+ROUTE_PREFIX_BY_TYPE = {
+    "application": "job-applications",
+    "job-application": "job-applications", 
+    "job-applications": "job-applications"
+}
+
+
 def _resource_base_path(t: str) -> str:
     # Assumes your API is mounted at /api/v1/
+    if t in ROUTE_PREFIX_BY_TYPE:
+        return f"/api/v1/{ROUTE_PREFIX_BY_TYPE[t]}"
     return f"/api/v1/{_pluralize_type(t)}"
 
 
@@ -107,23 +117,35 @@ class BaseSASerializer:
                 target = getattr(obj, rel_attr, None)
                 if uselist:
                     data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
+                    # Map relationship name to URL segment for special cases
+                    rel_segment = "job-applications" if rel_name == "applications" else rel_name
                     rel_out[rel_name] = {
                         "data": data,
                         "links": {
                             "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
-                            "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
+                            "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
                         },
                     }
                 else:
-                    data = {"type": rel_type, "id": str(target.id)} if target else None
+                    # Determine target_id with FK fallback
+                    target_id = None
+                    if target is not None and getattr(target, "id", None) is not None:
+                        target_id = target.id
+                    else:
+                        # FK fallback: check if we have a foreign key field for this relationship
+                        fk_field = self.relationship_fks.get(rel_name)
+                        if fk_field:
+                            fk_value = getattr(obj, fk_field, None)
+                            if fk_value is not None:
+                                target_id = fk_value
+                    
+                    data = {"type": rel_type, "id": str(target_id)} if target_id is not None else None
                     links = {
                         "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                     }
-                    # For to-one, safely include a related link to the related resource if present
-                    if target is not None and getattr(target, "id", None) is not None:
-                        links["related"] = (
-                            f"{_resource_base_path(rel_type)}/{target.id}"
-                        )
+                    # Include related link if we have a target_id (even when target is None)
+                    if target_id is not None:
+                        links["related"] = f"{_resource_base_path(rel_type)}/{target_id}"
                     rel_out[rel_name] = {"data": data, "links": links}
             res["relationships"] = rel_out
         return res
@@ -220,7 +242,7 @@ class DjangoUserSerializer:
             "applications": {
                 "links": {
                     "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/applications",
-                    "related": f"{_resource_base_path(self.type)}/{obj.id}/applications",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/job-applications",
                 },
             },
             "summaries": {
@@ -255,7 +277,7 @@ class DjangoUserSerializer:
             return "cover-letter", items
         elif rel_name == "applications":
             items = session.query(Application).filter_by(user_id=obj.id).all()
-            return "application", items
+            return "job-application", items
         elif rel_name == "summaries":
             items = session.query(Summary).filter_by(user_id=obj.id).all()
             return "summary", items
@@ -299,7 +321,7 @@ class ResumeSerializer(BaseSASerializer):
         },
         "applications": {
             "attr": "applications",
-            "type": "application",
+            "type": "job-application",
             "uselist": True,
         },
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
@@ -407,7 +429,7 @@ class JobPostSerializer(BaseSASerializer):
         },
         "applications": {
             "attr": "applications",
-            "type": "application",
+            "type": "job-application",
             "uselist": True,
         },
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
@@ -474,7 +496,7 @@ class CoverLetterSerializer(BaseSASerializer):
         "user": {"attr": "user", "type": "user", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
-        "application": {"attr": "application", "type": "application", "uselist": False},
+        "application": {"attr": "application", "type": "job-application", "uselist": False},
     }
     relationship_fks = {
         "user": "user_id",
@@ -507,7 +529,7 @@ class CoverLetterSerializer(BaseSASerializer):
 
 
 class ApplicationSerializer(BaseSASerializer):
-    type = "application"
+    type = "job-application"
     model = Application
     attributes = ["applied_at", "status", "tracking_url", "notes"]
     relationships = {
@@ -532,6 +554,9 @@ class ApplicationSerializer(BaseSASerializer):
         "cover_letter": "cover_letter_id",
         "cover-letters": "cover_letter_id",
     }
+
+    def accepted_types(self):
+        return {"application", "applications", "job-application", "job-applications"}
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
@@ -814,6 +839,8 @@ TYPE_TO_SERIALIZER = {
     "company": CompanySerializer,
     "cover-letter": CoverLetterSerializer,
     "application": ApplicationSerializer,
+    "job-application": ApplicationSerializer,
+    "job-applications": ApplicationSerializer,
     "summary": SummarySerializer,
     "experience": ExperienceSerializer,
     "education": EducationSerializer,
