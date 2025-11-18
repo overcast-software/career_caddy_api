@@ -3,6 +3,7 @@ import os
 # Module-level cache
 _API_KEY = None
 _CLIENT = None
+_TIMEOUT = None
 
 
 def _normalize_key(key):
@@ -28,12 +29,26 @@ def get_api_key(required=False):
     return _API_KEY
 
 
+def _read_timeout_env():
+    """Read OpenAI HTTP timeout (in seconds) from environment without caching."""
+    val = os.environ.get("OPENAI_TIMEOUT_SECONDS") or os.environ.get("OPENAI_TIMEOUT_SECS") or os.environ.get("OPENAI_HTTP_TIMEOUT")
+    try:
+        t = float(val) if val is not None else 900.0
+    except Exception:
+        t = 900.0
+    if t and t > 0:
+        return t
+    return 900.0
+
+
 def get_client(required=False):
     """Get a cached OpenAI client, creating one if needed."""
-    global _CLIENT, _API_KEY
+    global _CLIENT, _API_KEY, _TIMEOUT
 
-    # If we have a cached client and key, return it
-    if _CLIENT is not None and _API_KEY is not None:
+    current_timeout = _read_timeout_env()
+
+    # If we have a cached client and key and timeout hasn't changed, return it
+    if _CLIENT is not None and _API_KEY is not None and _TIMEOUT == current_timeout:
         return _CLIENT
 
     # Try to get/refresh the API key
@@ -51,15 +66,16 @@ def get_client(required=False):
             "OpenAI package is required but not installed. Install with: pip install openai"
         )
 
-    # Create and cache the client
+    # Create and cache the client with configured timeout
     _API_KEY = current_key
-    _CLIENT = OpenAI(api_key=_API_KEY)
+    _TIMEOUT = current_timeout
+    _CLIENT = OpenAI(api_key=_API_KEY, timeout=_TIMEOUT)
     return _CLIENT
 
 
 def set_api_key(key):
     """Set the API key and rebuild the cached client."""
-    global _API_KEY, _CLIENT
+    global _API_KEY, _CLIENT, _TIMEOUT
 
     normalized_key = _normalize_key(key)
     if normalized_key is None:
@@ -77,11 +93,15 @@ def set_api_key(key):
             "OpenAI package is required but not installed. Install with: pip install openai"
         )
 
-    # Rebuild and cache the client
-    _CLIENT = OpenAI(api_key=_API_KEY)
+    # Rebuild and cache the client with configured timeout
+    current_timeout = _read_timeout_env()
+    _TIMEOUT = current_timeout
+    _CLIENT = OpenAI(api_key=_API_KEY, timeout=_TIMEOUT)
 
 
 # Initialize the API key from environment on module load (but don't create client)
 _API_KEY = _normalize_key(os.environ.get("OPENAI_API_KEY")) or _normalize_key(
     os.environ.get("OPENAI_API_KEY")
 )
+# Initialize timeout from environment (seconds)
+_TIMEOUT = (_read_timeout_env())

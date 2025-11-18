@@ -1,6 +1,7 @@
 import asyncio
 import re
 import dateparser
+import os
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -161,6 +162,19 @@ class BaseSAViewSet(viewsets.ViewSet):
     model = None
     serializer_class = None
 
+    def get_throttles(self):
+        # Disable DRF throttling in development-like environments
+        try:
+            debug = bool(getattr(settings, "DEBUG", False))
+        except Exception:
+            debug = False
+        env_val = os.environ.get("ENV", "").lower()
+        disable_flag = str(os.environ.get("DISABLE_THROTTLE", "")).strip().lower() in ("1", "true", "yes")
+        settings_disable = bool(getattr(settings, "DISABLE_THROTTLE", False))
+        if debug or env_val in ("dev", "development", "local") or disable_flag or settings_disable:
+            return []
+        return super().get_throttles()
+
     def dispatch(self, request, *args, **kwargs):
         """Override dispatch to ensure proper SQLAlchemy session cleanup."""
         try:
@@ -216,9 +230,9 @@ class BaseSAViewSet(viewsets.ViewSet):
         included = []
         seen = set()  # (type, id)
         primary_ser = primary_serializer or self.get_serializer()
-        rel_keys = set(getattr(primary_ser, "relationships", {}).keys())
 
-        def _normalize_rel(name: str) -> str:
+        def _normalize_rel(name: str, serializer) -> str:
+            rel_keys = set(getattr(serializer, "relationships", {}).keys())
             if name in rel_keys:
                 return name
             # Try simple plural forms
@@ -232,19 +246,46 @@ class BaseSAViewSet(viewsets.ViewSet):
                 return f"{name[:-1]}ies"
             return name
 
-        for obj in objs:
-            for rel in include_rels:
-                rel = _normalize_rel(rel)
-                rel_type, targets = primary_ser.get_related(obj, rel)
+        def _include_recursive(objects, path_segments, current_serializer, parent_type=None, parent_id=None, parent_rel=None):
+            if not path_segments or not objects:
+                return
+            
+            segment = path_segments[0]
+            remaining_segments = path_segments[1:]
+            
+            for obj in objects:
+                normalized_rel = _normalize_rel(segment, current_serializer)
+                rel_type, targets = current_serializer.get_related(obj, normalized_rel)
                 if not rel_type:
                     continue
+                    
+                # FK fallback for to-one relationships when targets is empty
+                cfg = getattr(current_serializer, "relationships", {}).get(normalized_rel)
+                if not targets and cfg and not cfg.get("uselist", True):
+                    fk_field = getattr(current_serializer, "relationship_fks", {}).get(normalized_rel)
+                    if fk_field:
+                        rel_id = getattr(obj, fk_field, None)
+                        if rel_id is not None:
+                            ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                            if ser_cls:
+                                rel_ser = ser_cls()
+                                model_cls = rel_ser.model
+                                try:
+                                    fetched = model_cls.get(int(rel_id))
+                                    if fetched:
+                                        targets = [fetched]
+                                except (TypeError, ValueError, AttributeError):
+                                    pass
+                
                 ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
                 if not ser_cls:
                     continue
+                    
                 rel_ser = ser_cls()
                 # Provide parent context so serializers can customize included resources
                 if hasattr(rel_ser, "set_parent_context"):
-                    rel_ser.set_parent_context(primary_ser.type, obj.id, rel)
+                    rel_ser.set_parent_context(current_serializer.type, obj.id, normalized_rel)
+                
                 for t in targets:
                     key = (rel_type, str(t.id))
                     if key in seen:
@@ -263,27 +304,23 @@ class BaseSAViewSet(viewsets.ViewSet):
                     seen.add(key)
                     included.append(rel_ser.to_resource(t))
 
-                    # Auto-include children of experience (descriptions and company)
-                    if rel_type == "experience":
+                    # If there are more segments, recurse
+                    if remaining_segments:
+                        _include_recursive([t], remaining_segments, rel_ser)
+                    
+                    # Auto-include children of experience (descriptions and company) when path ends at experience
+                    if rel_type == "experience" and not remaining_segments:
                         exp_child_ser = ExperienceSerializer()
                         if hasattr(exp_child_ser, "set_parent_context"):
                             exp_child_ser.set_parent_context("experience", t.id, None)
                         for child_rel in ("descriptions", "company"):
-                            c_type, c_targets = exp_child_ser.get_related(t, child_rel)
-                            if not c_type:
-                                continue
-                            c_ser_cls = TYPE_TO_SERIALIZER.get(c_type)
-                            if not c_ser_cls:
-                                continue
-                            c_ser = c_ser_cls()
-                            if hasattr(c_ser, "set_parent_context"):
-                                c_ser.set_parent_context("experience", t.id, child_rel)
-                            for c in c_targets:
-                                c_key = (c_type, str(c.id))
-                                if c_key in seen:
-                                    continue
-                                seen.add(c_key)
-                                included.append(c_ser.to_resource(c))
+                            _include_recursive([t], [child_rel], exp_child_ser)
+
+        # Process each include path
+        for include_path in include_rels:
+            path_segments = include_path.split(".")
+            _include_recursive(objs, path_segments, primary_ser)
+            
         return included
 
     def paginate(self, items):
@@ -554,6 +591,19 @@ class DjangoUserViewSet(viewsets.ViewSet):
         if self.action in ["create", "bootstrap_superuser"]:
             return [AllowAny()]
         return super().get_permissions()
+
+    def get_throttles(self):
+        # Disable DRF throttling in development-like environments
+        try:
+            debug = bool(getattr(settings, "DEBUG", False))
+        except Exception:
+            debug = False
+        env_val = os.environ.get("ENV", "").lower()
+        disable_flag = str(os.environ.get("DISABLE_THROTTLE", "")).strip().lower() in ("1", "true", "yes")
+        settings_disable = bool(getattr(settings, "DISABLE_THROTTLE", False))
+        if debug or env_val in ("dev", "development", "local") or disable_flag or settings_disable:
+            return []
+        return super().get_throttles()
 
     def get_serializer(self):
         return DjangoUserSerializer()
@@ -900,7 +950,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
         User = get_user_model()
         try:
@@ -1923,7 +1973,7 @@ class ResumeViewSet(BaseSAViewSet):
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
@@ -2559,7 +2609,7 @@ class JobPostViewSet(BaseSAViewSet):
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
-    @action(detail=True, methods=["get"])
+    @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
@@ -2783,7 +2833,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         payload = {"data": data}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels)
+            payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
@@ -3587,3 +3637,6 @@ class DescriptionViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         data = [ExperienceSerializer().to_resource(e) for e in (obj.experiences or [])]
         return Response({"data": data})
+# Note: Ingest flow timeouts can be configured via:
+# - GUNICORN_TIMEOUT (seconds) for request handling in gunicorn
+# - OPENAI_TIMEOUT_SECONDS for OpenAI client HTTP requests
