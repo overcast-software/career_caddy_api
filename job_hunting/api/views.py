@@ -24,8 +24,8 @@ from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.lib.models import (
     Resume,
     Score,
-    JobPost,
     Scrape,
+    JobPost,
     Company,
     CoverLetter,
     Application,
@@ -169,9 +169,18 @@ class BaseSAViewSet(viewsets.ViewSet):
         except Exception:
             debug = False
         env_val = os.environ.get("ENV", "").lower()
-        disable_flag = str(os.environ.get("DISABLE_THROTTLE", "")).strip().lower() in ("1", "true", "yes")
+        disable_flag = str(os.environ.get("DISABLE_THROTTLE", "")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         settings_disable = bool(getattr(settings, "DISABLE_THROTTLE", False))
-        if debug or env_val in ("dev", "development", "local") or disable_flag or settings_disable:
+        if (
+            debug
+            or env_val in ("dev", "development", "local")
+            or disable_flag
+            or settings_disable
+        ):
             return []
         return super().get_throttles()
 
@@ -246,23 +255,34 @@ class BaseSAViewSet(viewsets.ViewSet):
                 return f"{name[:-1]}ies"
             return name
 
-        def _include_recursive(objects, path_segments, current_serializer, parent_type=None, parent_id=None, parent_rel=None):
+        def _include_recursive(
+            objects,
+            path_segments,
+            current_serializer,
+            parent_type=None,
+            parent_id=None,
+            parent_rel=None,
+        ):
             if not path_segments or not objects:
                 return
-            
+
             segment = path_segments[0]
             remaining_segments = path_segments[1:]
-            
+
             for obj in objects:
                 normalized_rel = _normalize_rel(segment, current_serializer)
                 rel_type, targets = current_serializer.get_related(obj, normalized_rel)
                 if not rel_type:
                     continue
-                    
+
                 # FK fallback for to-one relationships when targets is empty
-                cfg = getattr(current_serializer, "relationships", {}).get(normalized_rel)
+                cfg = getattr(current_serializer, "relationships", {}).get(
+                    normalized_rel
+                )
                 if not targets and cfg and not cfg.get("uselist", True):
-                    fk_field = getattr(current_serializer, "relationship_fks", {}).get(normalized_rel)
+                    fk_field = getattr(current_serializer, "relationship_fks", {}).get(
+                        normalized_rel
+                    )
                     if fk_field:
                         rel_id = getattr(obj, fk_field, None)
                         if rel_id is not None:
@@ -276,16 +296,18 @@ class BaseSAViewSet(viewsets.ViewSet):
                                         targets = [fetched]
                                 except (TypeError, ValueError, AttributeError):
                                     pass
-                
+
                 ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
                 if not ser_cls:
                     continue
-                    
+
                 rel_ser = ser_cls()
                 # Provide parent context so serializers can customize included resources
                 if hasattr(rel_ser, "set_parent_context"):
-                    rel_ser.set_parent_context(current_serializer.type, obj.id, normalized_rel)
-                
+                    rel_ser.set_parent_context(
+                        current_serializer.type, obj.id, normalized_rel
+                    )
+
                 for t in targets:
                     key = (rel_type, str(t.id))
                     if key in seen:
@@ -307,7 +329,7 @@ class BaseSAViewSet(viewsets.ViewSet):
                     # If there are more segments, recurse
                     if remaining_segments:
                         _include_recursive([t], remaining_segments, rel_ser)
-                    
+
                     # Auto-include children of experience (descriptions and company) when path ends at experience
                     if rel_type == "experience" and not remaining_segments:
                         exp_child_ser = ExperienceSerializer()
@@ -320,7 +342,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         for include_path in include_rels:
             path_segments = include_path.split(".")
             _include_recursive(objs, path_segments, primary_ser)
-            
+
         return included
 
     def paginate(self, items):
@@ -384,7 +406,7 @@ class BaseSAViewSet(viewsets.ViewSet):
             ]:
                 if key in data:
                     attrs[key] = data[key]
-        
+
         attrs = self.pre_save_payload(request, attrs, creating=True)
         obj = self.model(**attrs)
         session = self.get_session()
@@ -599,9 +621,18 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except Exception:
             debug = False
         env_val = os.environ.get("ENV", "").lower()
-        disable_flag = str(os.environ.get("DISABLE_THROTTLE", "")).strip().lower() in ("1", "true", "yes")
+        disable_flag = str(os.environ.get("DISABLE_THROTTLE", "")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         settings_disable = bool(getattr(settings, "DISABLE_THROTTLE", False))
-        if debug or env_val in ("dev", "development", "local") or disable_flag or settings_disable:
+        if (
+            debug
+            or env_val in ("dev", "development", "local")
+            or disable_flag
+            or settings_disable
+        ):
             return []
         return super().get_throttles()
 
@@ -775,17 +806,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         if phone_present:
             from job_hunting.lib.models import Profile
 
-            session = Profile.get_session()
-            prof = session.query(Profile).filter_by(user_id=user.id).first()
-            if not prof:
-                prof = Profile(
-                    user_id=user.id,
-                    phone=(phone_val[:50] or None) if phone_val else None,
-                )
-            else:
-                prof.phone = (phone_val[:50] or None) if phone_val else None
-            session.add(prof)
-            session.commit()
+            Profile.first_or_create(user_id=user.id, phone=phone_val)
 
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 

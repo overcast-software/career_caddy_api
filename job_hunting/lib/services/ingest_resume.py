@@ -146,9 +146,10 @@ class IngestResume:
         resume_name -- (default None) the way to name the resume to reference within app
         agent  -- (default None) optional agent to pass in
         """
+
         self.user = user
         self.resume = resume  # what is this?
-        self.resume_name
+        self.resume_name = resume_name
         # Defer agent creation until process() to avoid requiring external API keys during tests
         self.agent = agent
         self.db_resume = None
