@@ -148,6 +148,7 @@ class IngestResume:
         """
         self.user = user
         self.resume = resume  # what is this?
+        self.resume_name
         # Defer agent creation until process() to avoid requiring external API keys during tests
         self.agent = agent
         self.db_resume = None
