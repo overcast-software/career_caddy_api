@@ -2587,11 +2587,11 @@ class JobPostViewSet(BaseSAViewSet):
         # Remove any client-supplied ownership fields so they can't be spoofed
         attrs.pop("created_by", None)
         attrs.pop("created_by_id", None)  # defensive
-        
+
         # If creating, set created_by to the authenticated user
         if creating:
             attrs["created_by"] = request.user.id
-        
+
         return attrs
 
     @action(detail=True, methods=["get"])
@@ -3658,6 +3658,8 @@ class DescriptionViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         data = [ExperienceSerializer().to_resource(e) for e in (obj.experiences or [])]
         return Response({"data": data})
+
+
 # Note: Ingest flow timeouts can be configured via:
 # - GUNICORN_TIMEOUT (seconds) for request handling in gunicorn
 # - OPENAI_TIMEOUT_SECONDS for OpenAI client HTTP requests

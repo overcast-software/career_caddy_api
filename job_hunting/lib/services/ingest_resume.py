@@ -11,6 +11,7 @@ import tempfile
 from job_hunting.lib.parsers.docx_parser import DocxParser
 from datetime import date
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.models.openai import OpenAIResponsesModel
 from job_hunting.lib.models.experience import Experience
@@ -248,18 +249,21 @@ class IngestResume:
 
     def process(self):
         resume_md = self.extract_text_from_docx(self.resume)
+        result = None
         if self.agent is None:
             self.agent = self.get_agent()
-        result = self.agent.run_sync(resume_md)
+        try:
+            result = self.agent.run_sync(resume_md)
+        except Exception as e:
+            print(e)
         parsed_resume = result.output
 
         resume = Resume(name=self.resume_name, title=parsed_resume.title)
         self.db_resume = resume
 
-        if self.user.profile is None:
-            profile = Profile(email=parsed_resume.email, phone=parsed_resume.phone)
-            self.user.profile = profile
-            self.user.save()
+        Profile.first_or_create(
+            email=parsed_resume.email, phone=parsed_resume.phone, user=self.user
+        )
 
         # Set user_id instead of user relationship to avoid cross-ORM issues
         user_id = self._resolve_user_id(self.user)
@@ -407,7 +411,7 @@ class IngestResume:
         # Prefer OpenAI if OPENAI_API_KEY is set; otherwise fall back to local Ollama.
         try:
             if os.getenv("OPENAI_API_KEY"):
-                openai_model = OpenAIResponsesModel("gpt-5")
+                openai_model = OpenAIResponsesModel("gpt-5", ModelSettings(timeout=300))
                 return Agent(openai_model, output_type=ParsedResume)
         except Exception:
             # Fall back to Ollama if OpenAI model initialization fails for any reason
