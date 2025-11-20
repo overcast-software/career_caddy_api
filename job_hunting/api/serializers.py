@@ -13,15 +13,21 @@ from job_hunting.lib.models import (
     Education,
     Experience,
     ExperienceDescription,
+    JobApplicationStatus,
     JobPost,
+    Answer,
+    Question,
     Resume,
     ResumeSkill,
     ResumeSummaries,
     Score,
     Scrape,
     Skill,
+    Status,
     Summary,
 )
+
+
 
 
 def _to_primitive(val):
@@ -394,6 +400,31 @@ class ScoreSerializer(BaseSASerializer):
                     "related": f"{_resource_base_path('user')}/{obj.user_id}",
                 },
             }
+
+        # Expose statuses merged with join attributes (created_at, note)
+        try:
+            statuses_out = []
+            for jas in list(getattr(obj, "application_statuses", []) or []):
+                st = getattr(jas, "status", None)
+                item = {
+                    "created_at": _to_primitive(getattr(jas, "created_at", None)),
+                    "note": getattr(jas, "note", None),
+                }
+                if st is not None:
+                    item.update(
+                        {
+                            "id": getattr(st, "id", None),
+                            "status": getattr(st, "status", None),
+                            "status_type": getattr(st, "status_type", None),
+                        }
+                    )
+                statuses_out.append(item)
+            if statuses_out:
+                res.setdefault("attributes", {})["statuses"] = statuses_out
+        except Exception:
+            # Non-fatal; omit statuses on error
+            pass
+
         return res
 
     def get_related(self, obj, rel_name):
@@ -541,6 +572,7 @@ class ApplicationSerializer(BaseSASerializer):
             "type": "cover-letter",
             "uselist": False,
         },
+        "questions": {"attr": "questions", "type": "question", "uselist": True},
     }
     relationship_fks = {
         "user": "user_id",
@@ -830,6 +862,106 @@ class SkillSerializer(BaseSASerializer):
         return res
 
 
+class StatusSerializer(BaseSASerializer):
+    type = "status"
+    model = Status
+    attributes = ["status", "status_type"]
+
+
+class JobApplicationStatusSerializer(BaseSASerializer):
+    type = "job-application-status"
+    model = JobApplicationStatus
+    attributes = ["created_at", "note"]
+    relationships = {
+        "application": {"attr": "application", "type": "job-application", "uselist": False},
+        "status": {"attr": "status", "type": "status", "uselist": False},
+    }
+    relationship_fks = {
+        "application": "application_id",
+        "status": "status_id",
+    }
+
+
+class AnswerSerializer(BaseSASerializer):
+    type = "answer"
+    model = Answer
+    attributes = ["content", "created_at"]
+    relationships = {
+        "question": {"attr": "question", "type": "question", "uselist": False},
+    }
+    relationship_fks = {"question": "question_id"}
+
+
+class QuestionSerializer(BaseSASerializer):
+    type = "question"
+    model = Question
+    attributes = ["question", "created_at"]
+    relationships = {
+        "application": {"attr": "application", "type": "job-application", "uselist": False},
+        "company": {"attr": "company", "type": "company", "uselist": False},
+        "user": {"attr": "user", "type": "user", "uselist": False},
+        "answers": {"attr": "answers", "type": "answer", "uselist": True},
+    }
+    relationship_fks = {
+        "application": "application_id",
+        "company": "company_id",
+        "user": "created_by_id",
+    }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+
+        # Backward-compatible: expose latest answer content as an attribute
+        try:
+            latest_content = None
+            answers = list(getattr(obj, "answers", []) or [])
+            if answers:
+                try:
+                    latest = max(
+                        answers,
+                        key=lambda a: (
+                            getattr(a, "created_at", None) or datetime.min,
+                            getattr(a, "id", 0) or 0,
+                        ),
+                    )
+                except Exception:
+                    latest = answers[-1]
+                latest_content = getattr(latest, "content", None)
+
+            # Fallback to legacy column if present and no child answers yet
+            if not latest_content:
+                legacy = getattr(obj, "answer", None)
+                if legacy:
+                    latest_content = legacy
+
+            if latest_content is not None:
+                res.setdefault("attributes", {})["answer"] = latest_content
+        except Exception:
+            # Non-fatal; omit 'answer' on error
+            pass
+
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, "created_by_id") and obj.created_by_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.created_by_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.created_by_id}",
+                },
+            }
+        return res
+
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, "created_by_id") and obj.created_by_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.created_by_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
+
+
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
     "resume": ResumeSerializer,
@@ -847,4 +979,8 @@ TYPE_TO_SERIALIZER = {
     "certification": CertificationSerializer,
     "description": DescriptionSerializer,
     "skill": SkillSerializer,
+    "status": StatusSerializer,
+    "job-application-status": JobApplicationStatusSerializer,
+    "question": QuestionSerializer,
+    "answer": AnswerSerializer,
 }

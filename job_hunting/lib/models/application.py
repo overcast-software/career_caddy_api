@@ -27,3 +27,14 @@ class Application(BaseModel):
     job_post = relationship("JobPost", back_populates="applications")
     resume = relationship("Resume", back_populates="applications")
     cover_letter = relationship("CoverLetter", back_populates="application")
+    application_statuses = relationship(
+        "JobApplicationStatus",
+        back_populates="application",
+        cascade="all, delete-orphan",
+        order_by="JobApplicationStatus.created_at",
+    )
+    questions = relationship(
+        "Question",
+        back_populates="application",
+        cascade="all, delete-orphan",
+    )

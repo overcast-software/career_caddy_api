@@ -41,6 +41,10 @@ from job_hunting.lib.models import (
     ResumeExperience,
     Skill,
     ResumeSkill,
+    Status,
+    JobApplicationStatus,
+    Question,
+    Answer,
 )
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
@@ -58,8 +62,13 @@ from .serializers import (
     CertificationSerializer,
     DescriptionSerializer,
     SkillSerializer,
+    StatusSerializer,
+    JobApplicationStatusSerializer,
+    QuestionSerializer,
+    AnswerSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
+    _resource_base_path,
 )
 
 
@@ -233,6 +242,40 @@ class BaseSAViewSet(viewsets.ViewSet):
                 out.append(p)
         return out
 
+    def _normalize_rel_for_serializer(self, name: str, serializer) -> str:
+        rel_keys = set(getattr(serializer, "relationships", {}).keys())
+        
+        # Build candidate names in order of preference
+        candidates = []
+        
+        # Base forms with hyphen/underscore variants
+        base_forms = [
+            name,
+            name.replace("-", "_"),
+            name.replace("_", "-")
+        ]
+        
+        for base in base_forms:
+            candidates.append(base)
+            
+            # Plural/singular variants for each base form
+            if base.endswith("ies"):
+                candidates.append(base[:-3] + "y")
+            elif base.endswith("y") and not base.endswith(("ay", "ey", "iy", "oy", "uy")):
+                candidates.append(base[:-1] + "ies")
+            
+            if base.endswith("s") and len(base) > 1:
+                candidates.append(base[:-1])
+            elif not base.endswith("s"):
+                candidates.append(base + "s")
+        
+        # Return first candidate that exists in rel_keys
+        for candidate in candidates:
+            if candidate in rel_keys:
+                return candidate
+        
+        return name
+
     def _build_included(
         self, objs, include_rels, request=None, primary_serializer=None
     ):
@@ -240,20 +283,6 @@ class BaseSAViewSet(viewsets.ViewSet):
         seen = set()  # (type, id)
         primary_ser = primary_serializer or self.get_serializer()
 
-        def _normalize_rel(name: str, serializer) -> str:
-            rel_keys = set(getattr(serializer, "relationships", {}).keys())
-            if name in rel_keys:
-                return name
-            # Try simple plural forms
-            if not name.endswith("s") and f"{name}s" in rel_keys:
-                return f"{name}s"
-            if (
-                name.endswith("y")
-                and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
-                and f"{name[:-1]}ies" in rel_keys
-            ):
-                return f"{name[:-1]}ies"
-            return name
 
         def _include_recursive(
             objects,
@@ -270,15 +299,21 @@ class BaseSAViewSet(viewsets.ViewSet):
             remaining_segments = path_segments[1:]
 
             for obj in objects:
-                normalized_rel = _normalize_rel(segment, current_serializer)
-                rel_type, targets = current_serializer.get_related(obj, normalized_rel)
-                if not rel_type:
-                    continue
-
-                # FK fallback for to-one relationships when targets is empty
+                normalized_rel = self._normalize_rel_for_serializer(segment, current_serializer)
+                
+                # Get relationship config first
                 cfg = getattr(current_serializer, "relationships", {}).get(
                     normalized_rel
                 )
+                
+                rel_type, targets = current_serializer.get_related(obj, normalized_rel)
+                effective_type = rel_type or (cfg and cfg.get("type"))
+                
+                # Only continue if we have no effective type and no config
+                if not effective_type and not cfg:
+                    continue
+
+                # FK fallback for to-one relationships when targets is empty
                 if not targets and cfg and not cfg.get("uselist", True):
                     fk_field = getattr(current_serializer, "relationship_fks", {}).get(
                         normalized_rel
@@ -286,7 +321,8 @@ class BaseSAViewSet(viewsets.ViewSet):
                     if fk_field:
                         rel_id = getattr(obj, fk_field, None)
                         if rel_id is not None:
-                            ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                            effective_type = effective_type or cfg.get("type")
+                            ser_cls = TYPE_TO_SERIALIZER.get(effective_type)
                             if ser_cls:
                                 rel_ser = ser_cls()
                                 model_cls = rel_ser.model
@@ -297,7 +333,14 @@ class BaseSAViewSet(viewsets.ViewSet):
                                 except (TypeError, ValueError, AttributeError):
                                     pass
 
-                ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+                # Recompute effective_type if still None and cfg exists
+                effective_type = effective_type or (cfg and cfg.get("type"))
+                
+                # Only proceed if we have an effective type and targets
+                if not effective_type or not targets:
+                    continue
+
+                ser_cls = TYPE_TO_SERIALIZER.get(effective_type)
                 if not ser_cls:
                     continue
 
@@ -309,13 +352,13 @@ class BaseSAViewSet(viewsets.ViewSet):
                     )
 
                 for t in targets:
-                    key = (rel_type, str(t.id))
+                    key = (effective_type, str(t.id))
                     if key in seen:
                         continue
 
                     # Filter cover-letter resources to only include those owned by authenticated user
                     if (
-                        rel_type == "cover-letter"
+                        effective_type == "cover-letter"
                         and request
                         and hasattr(request, "user")
                         and request.user.is_authenticated
@@ -331,7 +374,7 @@ class BaseSAViewSet(viewsets.ViewSet):
                         _include_recursive([t], remaining_segments, rel_ser)
 
                     # Auto-include children of experience (descriptions and company) when path ends at experience
-                    if rel_type == "experience" and not remaining_segments:
+                    if effective_type == "experience" and not remaining_segments:
                         exp_child_ser = ExperienceSerializer()
                         if hasattr(exp_child_ser, "set_parent_context"):
                             exp_child_ser.set_parent_context("experience", t.id, None)
@@ -454,8 +497,12 @@ class BaseSAViewSet(viewsets.ViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
+        
+        # Normalize the relationship name
+        normalized_rel = self._normalize_rel_for_serializer(rel, ser)
+        
         cfg = (
-            ser.relationships.get(rel)
+            ser.relationships.get(normalized_rel)
             if ser and hasattr(ser, "relationships")
             else None
         )
@@ -463,14 +510,38 @@ class BaseSAViewSet(viewsets.ViewSet):
             return Response(
                 {"errors": [{"detail": "Relationship not found"}]}, status=404
             )
+        
         rel_type = cfg["type"]
         uselist = cfg.get("uselist", True)
         target = getattr(obj, cfg["attr"], None)
+        
         if uselist:
             data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
+            links = {
+                "self": f"{_resource_base_path(ser.type)}/{obj.id}/relationships/{rel}",
+            }
         else:
-            data = {"type": rel_type, "id": str(target.id)} if target else None
-        return Response({"data": data})
+            # Try to get target_id from object or FK fallback
+            target_id = None
+            if target is not None and getattr(target, "id", None) is not None:
+                target_id = target.id
+            else:
+                # FK fallback: check if we have a foreign key field for this relationship
+                fk_field = getattr(ser, "relationship_fks", {}).get(normalized_rel)
+                if fk_field:
+                    fk_value = getattr(obj, fk_field, None)
+                    if fk_value is not None:
+                        target_id = fk_value
+            
+            data = {"type": rel_type, "id": str(target_id)} if target_id is not None else None
+            links = {
+                "self": f"{_resource_base_path(ser.type)}/{obj.id}/relationships/{rel}",
+            }
+            # Include related link if we have a target_id
+            if target_id is not None:
+                links["related"] = f"{_resource_base_path(rel_type)}/{target_id}"
+        
+        return Response({"data": data, "links": links})
 
 
 class SummaryViewSet(BaseSAViewSet):
@@ -697,7 +768,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         payload = {"data": data}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included(users, include_rels, request)
+            payload["included"] = self._build_included(users, include_rels)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
@@ -715,7 +786,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         payload = {"data": ser.to_resource(user)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([user], include_rels, request)
+            payload["included"] = self._build_included([user], include_rels)
         return Response(payload)
 
     @action(
@@ -1009,7 +1080,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         payload = {"data": ser.to_resource(user)}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([user], include_rels, request)
+            payload["included"] = self._build_included([user], include_rels)
         return Response(payload)
 
 
@@ -2115,46 +2186,9 @@ class ResumeViewSet(BaseSAViewSet):
         # Build included only when ?include=... is provided
         include_rels = self._parse_include(request)
 
-        included = []
-        if include_rels:
-            seen = set()
-            rel_keys = set(getattr(ser, "relationships", {}).keys())
-
-            def _normalize_rel(name: str) -> str:
-                if name in rel_keys:
-                    return name
-                if not name.endswith("s") and f"{name}s" in rel_keys:
-                    return f"{name}s"
-                if (
-                    name.endswith("y")
-                    and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
-                    and f"{name[:-1]}ies" in rel_keys
-                ):
-                    return f"{name[:-1]}ies"
-                return name
-
-            for sm in items:
-                for rel in include_rels:
-                    rel = _normalize_rel(rel)
-                    rel_type, targets = ser.get_related(sm, rel)
-                    if not rel_type:
-                        continue
-                    ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
-                    if not ser_cls:
-                        continue
-                    rel_ser = ser_cls()
-                    if hasattr(rel_ser, "set_parent_context"):
-                        rel_ser.set_parent_context(ser.type, sm.id, rel)
-                    for t in targets:
-                        key = (rel_type, str(t.id))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        included.append(rel_ser.to_resource(t))
-
         payload = {"data": data}
-        if included:
-            payload["included"] = included
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
         return Response(payload)
 
     @action(detail=True, methods=["get"], url_path=r"summaries/(?P<summary_id>\d+)")
@@ -2181,10 +2215,17 @@ class ResumeViewSet(BaseSAViewSet):
         ser = SummarySerializer()
         if hasattr(ser, "set_parent_context"):
             ser.set_parent_context("resume", resume.id, "summaries")
-        payload = {"data": ser.to_resource(summary)}
+
+        # Primary data
+        items = [summary]
+        data = ser.to_resource(summary)
+
+        # Build included only when ?include=... is provided, using Summary serializer
         include_rels = self._parse_include(request)
+
+        payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included([summary], include_rels, request)
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -2200,46 +2241,9 @@ class ResumeViewSet(BaseSAViewSet):
         # Build included only when ?include=... is provided
         include_rels = self._parse_include(request)
 
-        included = []
-        if include_rels:
-            seen = set()
-            rel_keys = set(getattr(ser, "relationships", {}).keys())
-
-            def _normalize_rel(name: str) -> str:
-                if name in rel_keys:
-                    return name
-                if not name.endswith("s") and f"{name}s" in rel_keys:
-                    return f"{name}s"
-                if (
-                    name.endswith("y")
-                    and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
-                    and f"{name[:-1]}ies" in rel_keys
-                ):
-                    return f"{name[:-1]}ies"
-                return name
-
-            for exp in items:
-                for rel in include_rels:
-                    rel = _normalize_rel(rel)
-                    rel_type, targets = ser.get_related(exp, rel)
-                    if not rel_type:
-                        continue
-                    ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
-                    if not ser_cls:
-                        continue
-                    rel_ser = ser_cls()
-                    if hasattr(rel_ser, "set_parent_context"):
-                        rel_ser.set_parent_context(ser.type, exp.id, rel)
-                    for t in targets:
-                        key = (rel_type, str(t.id))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        included.append(rel_ser.to_resource(t))
-
         payload = {"data": data}
-        if included:
-            payload["included"] = included
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -2265,46 +2269,9 @@ class ResumeViewSet(BaseSAViewSet):
         # Build included only when ?include=... is provided
         include_rels = self._parse_include(request)
 
-        included = []
-        if include_rels:
-            seen = set()
-            rel_keys = set(getattr(ser, "relationships", {}).keys())
-
-            def _normalize_rel(name: str) -> str:
-                if name in rel_keys:
-                    return name
-                if not name.endswith("s") and f"{name}s" in rel_keys:
-                    return f"{name}s"
-                if (
-                    name.endswith("y")
-                    and not name.endswith(("ay", "ey", "iy", "oy", "uy"))
-                    and f"{name[:-1]}ies" in rel_keys
-                ):
-                    return f"{name[:-1]}ies"
-                return name
-
-            for skill in items:
-                for rel in include_rels:
-                    rel = _normalize_rel(rel)
-                    rel_type, targets = ser.get_related(skill, rel)
-                    if not rel_type:
-                        continue
-                    ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
-                    if not ser_cls:
-                        continue
-                    rel_ser = ser_cls()
-                    if hasattr(rel_ser, "set_parent_context"):
-                        rel_ser.set_parent_context(ser.type, skill.id, rel)
-                    for t in targets:
-                        key = (rel_type, str(t.id))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        included.append(rel_ser.to_resource(t))
-
         payload = {"data": data}
-        if included:
-            payload["included"] = included
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
         return Response(payload)
 
     @action(detail=True, methods=["get"], url_path="export")
@@ -2767,7 +2734,8 @@ class ScrapeViewSet(BaseSAViewSet):
             )
 
         browser_manager = BrowserManager()
-        headless = getattr(settings, "SCRAPER_HEADLESS", True)
+        headless = getattr(settings, "SCRAPER_HEADLESS", False)
+        print(f"headless = {headless}")
         nav_timeout = int(getattr(settings, "SCRAPER_NAV_TIMEOUT_MS", 30000))
         asyncio.run(
             browser_manager.start_browser(headless, navigation_timeout=nav_timeout)
@@ -3142,6 +3110,157 @@ class CoverLetterViewSet(BaseSAViewSet):
 class ApplicationViewSet(BaseSAViewSet):
     model = Application
     serializer_class = ApplicationSerializer
+
+    @action(detail=True, methods=["get"], url_path="application-statuses")
+    def application_statuses(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = JobApplicationStatusSerializer()
+        items = list(obj.application_statuses or [])
+        data = [ser.to_resource(i) for i in items]
+        
+        # Build included only when ?include=... is provided
+        include_rels = self._parse_include(request)
+        
+        payload = {"data": data}
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+        return Response(payload)
+
+    @action(detail=True, methods=["get"])
+    def questions(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = QuestionSerializer()
+        items = list(obj.questions or [])
+        data = [ser.to_resource(i) for i in items]
+        
+        # Build included only when ?include=... is provided
+        include_rels = self._parse_include(request)
+        
+        payload = {"data": data}
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+        return Response(payload)
+
+
+class StatusViewSet(BaseSAViewSet):
+    model = Status
+    serializer_class = StatusSerializer
+
+
+class JobApplicationStatusViewSet(BaseSAViewSet):
+    model = JobApplicationStatus
+    serializer_class = JobApplicationStatusSerializer
+
+
+class QuestionViewSet(BaseSAViewSet):
+    model = Question
+    serializer_class = QuestionSerializer
+
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        attrs = self.pre_save_payload(request, attrs, creating=True)
+        obj = self.model(**attrs)
+        session = self.get_session()
+        session.add(obj)
+        session.commit()
+
+        # Back-compat write path: accept attributes.answer and create a child Answer
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs_node = node.get("attributes") or {}
+        ans_val = attrs_node.get("answer")
+        if isinstance(ans_val, str):
+            ans_str = ans_val.strip()
+        else:
+            ans_str = None
+        if ans_str:
+            # Create child answer and mirror to legacy column if present
+            try:
+                session.add(Answer(question_id=obj.id, content=ans_str))
+                if hasattr(obj, "answer"):
+                    obj.answer = ans_str
+                    session.add(obj)
+                session.commit()
+            except Exception:
+                # Best-effort; do not fail question creation due to child failure
+                session.rollback()
+
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    def _upsert(self, request, pk, partial=False):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        attrs = self.pre_save_payload(request, attrs, creating=False)
+        for k, v in attrs.items():
+            setattr(obj, k, v)
+        session = self.get_session()
+        session.add(obj)
+        session.commit()
+
+        # Back-compat write path on update: append a new child Answer if provided
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs_node = node.get("attributes") or {}
+        ans_val = attrs_node.get("answer")
+        if isinstance(ans_val, str):
+            ans_str = ans_val.strip()
+        else:
+            ans_str = None
+        if ans_str:
+            try:
+                session.add(Answer(question_id=obj.id, content=ans_str))
+                if hasattr(obj, "answer"):
+                    obj.answer = ans_str
+                    session.add(obj)
+                session.commit()
+            except Exception:
+                session.rollback()
+
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    @action(detail=True, methods=["get"])
+    def answers(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        ser = AnswerSerializer()
+        items = list(getattr(obj, "answers", []) or [])
+        data = [ser.to_resource(i) for i in items]
+
+        include_rels = self._parse_include(request)
+        payload = {"data": data}
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+        return Response(payload)
+
+
+class AnswerViewSet(BaseSAViewSet):
+    model = Answer
+    serializer_class = AnswerSerializer
 
 
 class ExperienceViewSet(BaseSAViewSet):

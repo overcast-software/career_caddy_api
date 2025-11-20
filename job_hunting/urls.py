@@ -36,6 +36,10 @@ from job_hunting.api.views import (
     EducationViewSet,
     CertificationViewSet,
     DescriptionViewSet,
+    StatusViewSet,
+    JobApplicationStatusViewSet,
+    QuestionViewSet,
+    AnswerViewSet,
     healthcheck,
     profile,
 )
@@ -54,6 +58,10 @@ router.register(r"experiences", ExperienceViewSet, basename="experiences")
 router.register(r"educations", EducationViewSet, basename="educations")
 router.register(r"certifications", CertificationViewSet, basename="certifications")
 router.register(r"descriptions", DescriptionViewSet, basename="descriptions")
+router.register(r"statuses", StatusViewSet, basename="statuses")
+router.register(r"job-application-statuses", JobApplicationStatusViewSet, basename="job-application-statuses")
+router.register(r"questions", QuestionViewSet, basename="questions")
+router.register(r"answers", AnswerViewSet, basename="answers")
 
 urlpatterns = [
     path("admin/", admin.site.urls),
