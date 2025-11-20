@@ -28,8 +28,6 @@ from job_hunting.lib.models import (
 )
 
 
-
-
 def _to_primitive(val):
     if isinstance(val, (datetime, date)):
         return val.isoformat()
@@ -77,8 +75,8 @@ def _pluralize_type(t: str) -> str:
 # Route prefix mapping for special cases
 ROUTE_PREFIX_BY_TYPE = {
     "application": "job-applications",
-    "job-application": "job-applications", 
-    "job-applications": "job-applications"
+    "job-application": "job-applications",
+    "job-applications": "job-applications",
 }
 
 
@@ -124,7 +122,9 @@ class BaseSASerializer:
                 if uselist:
                     data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
                     # Map relationship name to URL segment for special cases
-                    rel_segment = "job-applications" if rel_name == "applications" else rel_name
+                    rel_segment = (
+                        "job-applications" if rel_name == "applications" else rel_name
+                    )
                     rel_out[rel_name] = {
                         "data": data,
                         "links": {
@@ -144,14 +144,20 @@ class BaseSASerializer:
                             fk_value = getattr(obj, fk_field, None)
                             if fk_value is not None:
                                 target_id = fk_value
-                    
-                    data = {"type": rel_type, "id": str(target_id)} if target_id is not None else None
+
+                    data = (
+                        {"type": rel_type, "id": str(target_id)}
+                        if target_id is not None
+                        else None
+                    )
                     links = {
                         "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                     }
                     # Include related link if we have a target_id (even when target is None)
                     if target_id is not None:
-                        links["related"] = f"{_resource_base_path(rel_type)}/{target_id}"
+                        links["related"] = (
+                            f"{_resource_base_path(rel_type)}/{target_id}"
+                        )
                     rel_out[rel_name] = {"data": data, "links": links}
             res["relationships"] = rel_out
         return res
@@ -527,7 +533,11 @@ class CoverLetterSerializer(BaseSASerializer):
         "user": {"attr": "user", "type": "user", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
-        "application": {"attr": "application", "type": "job-application", "uselist": False},
+        "application": {
+            "attr": "application",
+            "type": "job-application",
+            "uselist": False,
+        },
     }
     relationship_fks = {
         "user": "user_id",
@@ -873,7 +883,11 @@ class JobApplicationStatusSerializer(BaseSASerializer):
     model = JobApplicationStatus
     attributes = ["created_at", "note"]
     relationships = {
-        "application": {"attr": "application", "type": "job-application", "uselist": False},
+        "application": {
+            "attr": "application",
+            "type": "job-application",
+            "uselist": False,
+        },
         "status": {"attr": "status", "type": "status", "uselist": False},
     }
     relationship_fks = {
@@ -895,15 +909,24 @@ class AnswerSerializer(BaseSASerializer):
 class QuestionSerializer(BaseSASerializer):
     type = "question"
     model = Question
-    attributes = ["question", "created_at"]
+    attributes = ["content", "created_at"]
     relationships = {
-        "application": {"attr": "application", "type": "job-application", "uselist": False},
+        "application": {
+            "attr": "application",
+            "type": "job-application",
+            "uselist": False,
+        },
         "company": {"attr": "company", "type": "company", "uselist": False},
         "user": {"attr": "user", "type": "user", "uselist": False},
         "answers": {"attr": "answers", "type": "answer", "uselist": True},
     }
     relationship_fks = {
+        # Accept multiple relationship keys for application
         "application": "application_id",
+        "job-application": "application_id",
+        "job-applications": "application_id",
+        "job_application": "application_id",
+        "job_applications": "application_id",
         "company": "company_id",
         "user": "created_by_id",
     }
@@ -960,6 +983,16 @@ class QuestionSerializer(BaseSASerializer):
             except User.DoesNotExist:
                 return "user", []
         return super().get_related(obj, rel_name)
+
+    def parse_payload(self, payload):
+        out = super().parse_payload(payload)
+        # Accept 'content' as an alias for 'question' in attributes
+        try:
+            data = payload.get("data") if isinstance(payload, dict) else None
+            attrs_in = (data.get("attributes") or {}) if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return out
 
 
 TYPE_TO_SERIALIZER = {

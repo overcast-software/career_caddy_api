@@ -451,6 +451,10 @@ class BaseSAViewSet(viewsets.ViewSet):
                     attrs[key] = data[key]
 
         attrs = self.pre_save_payload(request, attrs, creating=True)
+        # Force creator to the authenticated user; ignore any client-supplied user
+        attrs.pop("created_by_id", None)
+        if getattr(request, "user", None) and getattr(request.user, "is_authenticated", False):
+            attrs["created_by_id"] = request.user.id
         obj = self.model(**attrs)
         session = self.get_session()
         session.add(obj)
@@ -473,6 +477,8 @@ class BaseSAViewSet(viewsets.ViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
         attrs = self.pre_save_payload(request, attrs, creating=False)
+        # Do not allow changing ownership
+        attrs.pop("created_by_id", None)
         for k, v in attrs.items():
             setattr(obj, k, v)
         session = self.get_session()
@@ -3159,6 +3165,31 @@ class JobApplicationStatusViewSet(BaseSAViewSet):
 class QuestionViewSet(BaseSAViewSet):
     model = Question
     serializer_class = QuestionSerializer
+
+    def list(self, request):
+        session = self.get_session()
+        items = session.query(self.model).all()
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        # Default to include the related company for questions if not specified
+        include_rels = self._parse_include(request) or ["company"]
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        # Default to include the related company for questions if not specified
+        include_rels = self._parse_include(request) or ["company"]
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
 
     def create(self, request):
         ser = self.get_serializer()
