@@ -12,3 +12,4 @@ class Company(BaseModel):
     # Relationships
     job_posts = relationship("JobPost", back_populates="company")
     scrapes = relationship("Scrape", back_populates="company")
+    applications = relationship("Application", back_populates="company")

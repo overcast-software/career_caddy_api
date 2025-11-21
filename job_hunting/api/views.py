@@ -244,36 +244,48 @@ class BaseSAViewSet(viewsets.ViewSet):
 
     def _normalize_rel_for_serializer(self, name: str, serializer) -> str:
         rel_keys = set(getattr(serializer, "relationships", {}).keys())
-        
+
         # Build candidate names in order of preference
         candidates = []
-        
+
         # Base forms with hyphen/underscore variants
-        base_forms = [
-            name,
-            name.replace("-", "_"),
-            name.replace("_", "-")
-        ]
-        
+        base_forms = [name, name.replace("-", "_"), name.replace("_", "-")]
+
         for base in base_forms:
             candidates.append(base)
-            
+
             # Plural/singular variants for each base form
             if base.endswith("ies"):
                 candidates.append(base[:-3] + "y")
-            elif base.endswith("y") and not base.endswith(("ay", "ey", "iy", "oy", "uy")):
+            elif base.endswith("y") and not base.endswith(
+                ("ay", "ey", "iy", "oy", "uy")
+            ):
                 candidates.append(base[:-1] + "ies")
-            
+
             if base.endswith("s") and len(base) > 1:
                 candidates.append(base[:-1])
             elif not base.endswith("s"):
                 candidates.append(base + "s")
+
+        # Special mappings for common relationship names
+        special_mappings = {
+            "job-post": "job-post",
+            "job_post": "job-post", 
+            "jobPost": "job-post",
+            "job-posts": "job-post",
+            "jobPosts": "job-post",
+        }
         
+        if name in special_mappings:
+            mapped = special_mappings[name]
+            if mapped in rel_keys:
+                candidates.insert(0, mapped)
+
         # Return first candidate that exists in rel_keys
         for candidate in candidates:
             if candidate in rel_keys:
                 return candidate
-        
+
         return name
 
     def _build_included(
@@ -282,7 +294,6 @@ class BaseSAViewSet(viewsets.ViewSet):
         included = []
         seen = set()  # (type, id)
         primary_ser = primary_serializer or self.get_serializer()
-
 
         def _include_recursive(
             objects,
@@ -299,16 +310,18 @@ class BaseSAViewSet(viewsets.ViewSet):
             remaining_segments = path_segments[1:]
 
             for obj in objects:
-                normalized_rel = self._normalize_rel_for_serializer(segment, current_serializer)
-                
+                normalized_rel = self._normalize_rel_for_serializer(
+                    segment, current_serializer
+                )
+
                 # Get relationship config first
                 cfg = getattr(current_serializer, "relationships", {}).get(
                     normalized_rel
                 )
-                
+
                 rel_type, targets = current_serializer.get_related(obj, normalized_rel)
                 effective_type = rel_type or (cfg and cfg.get("type"))
-                
+
                 # Only continue if we have no effective type and no config
                 if not effective_type and not cfg:
                     continue
@@ -335,7 +348,7 @@ class BaseSAViewSet(viewsets.ViewSet):
 
                 # Recompute effective_type if still None and cfg exists
                 effective_type = effective_type or (cfg and cfg.get("type"))
-                
+
                 # Only proceed if we have an effective type and targets
                 if not effective_type or not targets:
                     continue
@@ -453,8 +466,10 @@ class BaseSAViewSet(viewsets.ViewSet):
         attrs = self.pre_save_payload(request, attrs, creating=True)
         # Force creator to the authenticated user; ignore any client-supplied user
         attrs.pop("created_by_id", None)
-        if getattr(request, "user", None) and getattr(request.user, "is_authenticated", False):
-            attrs["created_by_id"] = request.user.id
+        if getattr(request, "user", None) and getattr(
+            request.user, "is_authenticated", False
+        ):
+            attrs["user_id"] = request.user.id
         obj = self.model(**attrs)
         session = self.get_session()
         session.add(obj)
@@ -503,10 +518,10 @@ class BaseSAViewSet(viewsets.ViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
-        
+
         # Normalize the relationship name
         normalized_rel = self._normalize_rel_for_serializer(rel, ser)
-        
+
         cfg = (
             ser.relationships.get(normalized_rel)
             if ser and hasattr(ser, "relationships")
@@ -516,11 +531,11 @@ class BaseSAViewSet(viewsets.ViewSet):
             return Response(
                 {"errors": [{"detail": "Relationship not found"}]}, status=404
             )
-        
+
         rel_type = cfg["type"]
         uselist = cfg.get("uselist", True)
         target = getattr(obj, cfg["attr"], None)
-        
+
         if uselist:
             data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
             links = {
@@ -538,15 +553,19 @@ class BaseSAViewSet(viewsets.ViewSet):
                     fk_value = getattr(obj, fk_field, None)
                     if fk_value is not None:
                         target_id = fk_value
-            
-            data = {"type": rel_type, "id": str(target_id)} if target_id is not None else None
+
+            data = (
+                {"type": rel_type, "id": str(target_id)}
+                if target_id is not None
+                else None
+            )
             links = {
                 "self": f"{_resource_base_path(ser.type)}/{obj.id}/relationships/{rel}",
             }
             # Include related link if we have a target_id
             if target_id is not None:
                 links["related"] = f"{_resource_base_path(rel_type)}/{target_id}"
-        
+
         return Response({"data": data, "links": links})
 
 
@@ -2194,7 +2213,9 @@ class ResumeViewSet(BaseSAViewSet):
 
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
     @action(detail=True, methods=["get"], url_path=r"summaries/(?P<summary_id>\d+)")
@@ -2231,7 +2252,9 @@ class ResumeViewSet(BaseSAViewSet):
 
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -2249,7 +2272,9 @@ class ResumeViewSet(BaseSAViewSet):
 
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -2277,7 +2302,9 @@ class ResumeViewSet(BaseSAViewSet):
 
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
     @action(detail=True, methods=["get"], url_path="export")
@@ -3125,13 +3152,15 @@ class ApplicationViewSet(BaseSAViewSet):
         ser = JobApplicationStatusSerializer()
         items = list(obj.application_statuses or [])
         data = [ser.to_resource(i) for i in items]
-        
+
         # Build included only when ?include=... is provided
         include_rels = self._parse_include(request)
-        
+
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
     @action(detail=True, methods=["get"])
@@ -3142,13 +3171,15 @@ class ApplicationViewSet(BaseSAViewSet):
         ser = QuestionSerializer()
         items = list(obj.questions or [])
         data = [ser.to_resource(i) for i in items]
-        
+
         # Build included only when ?include=... is provided
         include_rels = self._parse_include(request)
-        
+
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
 
@@ -3285,7 +3316,9 @@ class QuestionViewSet(BaseSAViewSet):
         include_rels = self._parse_include(request)
         payload = {"data": data}
         if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+            payload["included"] = self._build_included(
+                items, include_rels, request, primary_serializer=ser
+            )
         return Response(payload)
 
 

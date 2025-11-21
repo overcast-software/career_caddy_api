@@ -77,6 +77,7 @@ ROUTE_PREFIX_BY_TYPE = {
     "application": "job-applications",
     "job-application": "job-applications",
     "job-applications": "job-applications",
+    "company": "companies",
 }
 
 
@@ -377,6 +378,15 @@ class ResumeSerializer(BaseSASerializer):
                 return "user", [user]
             except User.DoesNotExist:
                 return "user", []
+        elif rel_name == "company":
+            # Try direct company relationship first
+            if hasattr(obj, "company") and obj.company:
+                return "company", [obj.company]
+            # Fallback to job_post.company
+            elif hasattr(obj, "job_post") and obj.job_post and hasattr(obj.job_post, "company") and obj.job_post.company:
+                return "company", [obj.job_post.company]
+            else:
+                return "company", []
         return super().get_related(obj, rel_name)
 
 
@@ -556,6 +566,31 @@ class CoverLetterSerializer(BaseSASerializer):
                     "related": f"{_resource_base_path('user')}/{obj.user_id}",
                 },
             }
+        
+        # Add company relationship via job_post fallback
+        company_id = None
+        if hasattr(obj, "company_id") and obj.company_id:
+            company_id = obj.company_id
+        elif hasattr(obj, "job_post") and obj.job_post and hasattr(obj.job_post, "company_id") and obj.job_post.company_id:
+            company_id = obj.job_post.company_id
+        
+        if company_id:
+            res.setdefault("relationships", {})["company"] = {
+                "data": {"type": "company", "id": str(company_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/company",
+                    "related": f"{_resource_base_path('company')}/{company_id}",
+                },
+            }
+        else:
+            # Include null relationship for consistency
+            res.setdefault("relationships", {})["company"] = {
+                "data": None,
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/company",
+                },
+            }
+        
         return res
 
     def get_related(self, obj, rel_name):
@@ -582,6 +617,7 @@ class ApplicationSerializer(BaseSASerializer):
             "type": "cover-letter",
             "uselist": False,
         },
+        "company": {"attr": "company", "type": "company", "uselist": False},
         "questions": {"attr": "questions", "type": "question", "uselist": True},
     }
     relationship_fks = {
@@ -889,6 +925,7 @@ class JobApplicationStatusSerializer(BaseSASerializer):
             "uselist": False,
         },
         "status": {"attr": "status", "type": "status", "uselist": False},
+        "company": {"attr": "name", "type": "company", "userlist": False},
     }
     relationship_fks = {
         "application": "application_id",
