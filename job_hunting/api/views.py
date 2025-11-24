@@ -171,6 +171,37 @@ class BaseSAViewSet(viewsets.ViewSet):
     model = None
     serializer_class = None
 
+    def get_permissions(self):
+        # Always allow OPTIONS for CORS preflight and API metadata
+        if getattr(self.request, "method", "").upper() == "OPTIONS":
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def options(self, request, *args, **kwargs):
+        # Explicitly handle CORS preflight to avoid auth and ensure proper headers
+        allow_methods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        origin = request.META.get("HTTP_ORIGIN")
+        requested_headers = request.META.get("HTTP_ACCESS_CONTROL_REQUEST_HEADERS")
+
+        resp = Response(status=200)
+        resp["Allow"] = allow_methods
+        resp["Access-Control-Allow-Methods"] = allow_methods
+        if origin:
+            resp["Access-Control-Allow-Origin"] = origin
+            resp["Vary"] = "Origin"
+            # If frontend sends credentials (cookies/Authorization), allow them
+            resp["Access-Control-Allow-Credentials"] = "true"
+        else:
+            resp["Access-Control-Allow-Origin"] = "*"
+
+        if requested_headers:
+            resp["Access-Control-Allow-Headers"] = requested_headers
+        else:
+            resp["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+
+        resp["Access-Control-Max-Age"] = "600"
+        return resp
+
     def get_throttles(self):
         # Disable DRF throttling in development-like environments
         try:
@@ -464,12 +495,29 @@ class BaseSAViewSet(viewsets.ViewSet):
                     attrs[key] = data[key]
 
         attrs = self.pre_save_payload(request, attrs, creating=True)
-        # Force creator to the authenticated user; ignore any client-supplied user
-        attrs.pop("created_by_id", None)
+
+        # Prevent spoofing of ownership fields
+        for forbidden in ("user_id", "created_by_id"):
+            if forbidden in attrs:
+                attrs.pop(forbidden, None)
+
+        # Conditionally set an owner field only if the model supports it
         if getattr(request, "user", None) and getattr(
             request.user, "is_authenticated", False
         ):
-            attrs["user_id"] = request.user.id
+            ser_obj = self.get_serializer()
+            rel_fks = getattr(ser_obj, "relationship_fks", {}) if ser_obj else {}
+            possible_owner_fields = []
+            # Prefer explicit mapping of 'user' in serializer if present
+            if "user" in rel_fks:
+                possible_owner_fields.append(rel_fks["user"])
+            # Common fallback field names
+            possible_owner_fields.extend(["user_id", "created_by_id"])
+            for field in possible_owner_fields:
+                if hasattr(self.model, field) and field not in attrs:
+                    attrs[field] = request.user.id
+                    break
+
         obj = self.model(**attrs)
         session = self.get_session()
         session.add(obj)
@@ -709,6 +757,30 @@ class DjangoUserViewSet(viewsets.ViewSet):
         if self.action in ["create", "bootstrap_superuser"]:
             return [AllowAny()]
         return super().get_permissions()
+
+    def options(self, request, *args, **kwargs):
+        # Explicitly handle CORS preflight to avoid auth and ensure proper headers
+        allow_methods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        origin = request.META.get("HTTP_ORIGIN")
+        requested_headers = request.META.get("HTTP_ACCESS_CONTROL_REQUEST_HEADERS")
+
+        resp = Response(status=200)
+        resp["Allow"] = allow_methods
+        resp["Access-Control-Allow-Methods"] = allow_methods
+        if origin:
+            resp["Access-Control-Allow-Origin"] = origin
+            resp["Vary"] = "Origin"
+            resp["Access-Control-Allow-Credentials"] = "true"
+        else:
+            resp["Access-Control-Allow-Origin"] = "*"
+
+        if requested_headers:
+            resp["Access-Control-Allow-Headers"] = requested_headers
+        else:
+            resp["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+
+        resp["Access-Control-Max-Age"] = "600"
+        return resp
 
     def get_throttles(self):
         # Disable DRF throttling in development-like environments
