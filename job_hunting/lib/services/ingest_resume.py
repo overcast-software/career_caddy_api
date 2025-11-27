@@ -256,14 +256,12 @@ class IngestResume:
             result = self.agent.run_sync(resume_md)
         except Exception as e:
             print(e)
-        parsed_resume = result.output
 
+        parsed_resume = result.output
         resume = Resume(name=self.resume_name, title=parsed_resume.title)
         self.db_resume = resume
 
-        Profile.first_or_create(
-            email=parsed_resume.email, phone=parsed_resume.phone, user=self.user
-        )
+        Profile.first_or_create(phone=parsed_resume.phone, user_id=self.user.id)
 
         # Set user_id instead of user relationship to avoid cross-ORM issues
         user_id = self._resolve_user_id(self.user)
@@ -409,9 +407,13 @@ class IngestResume:
 
     def get_agent(self):
         # Prefer OpenAI if OPENAI_API_KEY is set; otherwise fall back to local Ollama.
+        if self.agent:
+            return self.agent
         try:
             if os.getenv("OPENAI_API_KEY"):
-                openai_model = OpenAIResponsesModel("gpt-5", ModelSettings(timeout=300))
+                openai_model = OpenAIResponsesModel(
+                    "gpt-5"
+                )  # , ModelSettings(timeout=300))
                 return Agent(openai_model, output_type=ParsedResume)
         except Exception:
             # Fall back to Ollama if OpenAI model initialization fails for any reason

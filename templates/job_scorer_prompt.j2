@@ -1,12 +1,16 @@
-Given the following job description and resume, evaluate the match between the two and provide a match score between 0 and 100, where 100 indicates a perfect match.
+You are an expert technical recruiter. Given the following job description and resume, evaluate the match and respond ONLY with a single JSON object with these keys:
+- score: integer between 1 and 100 inclusive
+- explanation: a concise one-paragraph explanation
+
+Do not include any additional text, markdown, or code fences.
+
+{
+  "score": 85,
+  "explanation": "Explain briefly why the resume matches the job."
+}
 
 Job Description:
 {{job_description}}
 
 Resume:
 {{resume}}
-
-Please provide the match score and a brief explanation of the score in the following format:
-
-Score: {{score}}
-Evaluation: {{evaluation}}

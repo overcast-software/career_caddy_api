@@ -2,6 +2,8 @@ import asyncio
 import re
 import dateparser
 import os
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.ollama import OllamaProvider
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -301,12 +303,12 @@ class BaseSAViewSet(viewsets.ViewSet):
         # Special mappings for common relationship names
         special_mappings = {
             "job-post": "job-post",
-            "job_post": "job-post", 
+            "job_post": "job-post",
             "jobPost": "job-post",
             "job-posts": "job-post",
             "jobPosts": "job-post",
         }
-        
+
         if name in special_mappings:
             mapped = special_mappings[name]
             if mapped in rel_keys:
@@ -2501,6 +2503,10 @@ class ResumeViewSet(BaseSAViewSet):
             # Create a new resume for the authenticated user
             # resume = Resume(user_id=request.user.id, file_path=uploaded_file.name)
 
+            ollama_model = OpenAIChatModel(
+                model_name="qwen3-coder",
+                provider=OllamaProvider(base_url="http://localhost:11434/v1"),
+            )
             # Create IngestResume service with the blob
             resume_name = uploaded_file.name
             # TODO would love to provide the name.
@@ -2509,6 +2515,7 @@ class ResumeViewSet(BaseSAViewSet):
                 resume=file_blob,  # Pass blob instead of path
                 resume_name=resume_name,
                 agent=None,  # Will use default agent
+                # agent=ollama_model,  # Will use default agent
             )
 
             # Process the resume
@@ -2634,21 +2641,31 @@ class ScoreViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _parse_eval(self, e):
+        # Expect a structured result from JobScorer: dict or JSON string
+        data = None
         if isinstance(e, dict):
-            s = e.get("score")
-            expl = e.get("explanation") or e.get("evaluation")
-            if isinstance(expl, dict):
-                expl = expl.get("text") or str(expl)
-            if s is not None and expl:
-                return int(s), str(expl)
-        text = str(e)
-        m_score = re.search(r"(?i)\**score\**\s*[:\-]\s*(\d{1,3})", text)
-        m_expl = re.search(
-            r"(?i)\**(explanation|evaluation)\**\s*[:\-]\s*(.+)", text, re.DOTALL
+            data = e
+        else:
+            try:
+                import json as _json
+
+                data = _json.loads(str(e))
+            except Exception:
+                return None, str(e)
+
+        s = data.get("score")
+        explanation = (
+            data.get("explanation") or data.get("evaluation") or data.get("explination")
         )
-        s_val = int(m_score.group(1)) if m_score else None
-        expl = m_expl.group(2).strip() if m_expl else text
-        return s_val, expl
+        try:
+            s_int = int(s) if s is not None else None
+        except (TypeError, ValueError):
+            s_int = None
+
+        if s_int is None or not (1 <= s_int <= 100):
+            return None, str(explanation or "").strip() or str(e)
+
+        return s_int, str(explanation or "").strip()
 
 
 class JobPostViewSet(BaseSAViewSet):
@@ -3038,6 +3055,31 @@ class CoverLetterViewSet(BaseSAViewSet):
         job_post_id = attrs.get("job_post_id") or _rel_id(
             "job-post", "job_post", "jobPost", "job-posts", "jobPosts"
         )
+        # Additional fallbacks: accept convenience keys at attributes/top-level
+        if job_post_id is None:
+            job_post_id = (
+                attrs_node.get("job_post_id")
+                or attrs_node.get("jobPostId")
+                or attrs_node.get("job-post-id")
+                or node.get("job_post_id")
+                or node.get("jobPostId")
+                or node.get("job-post-id")
+                or data.get("job_post_id")
+                or data.get("jobPostId")
+                or data.get("job-post-id")
+            )
+        if resume_id is None:
+            resume_id = (
+                attrs_node.get("resume_id")
+                or attrs_node.get("resumeId")
+                or attrs_node.get("resume-id")
+                or node.get("resume_id")
+                or node.get("resumeId")
+                or node.get("resume-id")
+                or data.get("resume_id")
+                or data.get("resumeId")
+                or data.get("resume-id")
+            )
 
         try:
             resume_id = int(resume_id) if resume_id is not None else None
@@ -3048,28 +3090,27 @@ class CoverLetterViewSet(BaseSAViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if resume_id is None or job_post_id is None:
+        if job_post_id is None:
             return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": "Missing required relationships: resume and job-post"
-                        }
-                    ]
-                },
+                {"errors": [{"detail": "Missing required relationship: job-post"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        resume = Resume.get(resume_id)
+        resume = Resume.get(resume_id) if resume_id is not None else None
         job_post = JobPost.get(job_post_id)
-        if not resume or not job_post:
+        if not job_post:
             return Response(
-                {"errors": [{"detail": "Invalid resume or job-post ID"}]},
+                {"errors": [{"detail": "Invalid job-post ID"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if resume_id is not None and not resume:
+            return Response(
+                {"errors": [{"detail": "Invalid resume ID"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Validate that the referenced resume belongs to the authenticated user
-        if resume.user_id != request.user.id:
+        if resume and resume.user_id != request.user.id:
             return Response(
                 {
                     "errors": [
@@ -3090,11 +3131,24 @@ class CoverLetterViewSet(BaseSAViewSet):
             cover_letter = CoverLetter(
                 content=content,
                 user_id=user_id,
-                resume_id=resume.id,
+                resume_id=(resume.id if resume else None),
                 job_post_id=job_post.id,
             )
             cover_letter.save()
         else:
+            # Require a resume when generating content automatically
+            if resume is None:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": "Provide 'relationships.resume' when generating content without providing attributes.content"
+                            }
+                        ]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             client = get_client(required=False)
             if client is None:
                 return Response(
