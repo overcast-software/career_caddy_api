@@ -9,8 +9,13 @@ Do not include any additional text, markdown, or code fences.
   "explanation": "Explain briefly why the resume matches the job."
 }
 
+
 Job Description:
 {{job_description}}
 
 Resume:
 {{resume}}
+
+Return only a compact JSON object with the exact keys "score" (integer 0-100) and "evaluation" (string). Do not include markdown code fences or any other text.
+
+Example format: {"score": 85, "evaluation": "Strong match with relevant experience"}
