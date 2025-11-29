@@ -2658,11 +2658,16 @@ class ScoreViewSet(BaseSAViewSet):
             job_post_id=job_post_id, resume_id=resume_id, user_id=user_id
         )
 
-        evaluation = myJobScorer.score_job_match(jp.description, resume_markdown)
-        score_value, explanation = self._parse_eval(evaluation)
-        myScore.explanation = explanation
-        myScore.score = score_value
-        myScore.save()
+        try:
+            result = myJobScorer.score_job_match(jp.description, resume_markdown)
+            myScore.score = result.score
+            myScore.explanation = result.evaluation
+            myScore.save()
+        except ValueError as e:
+            return Response(
+                {"errors": [{"detail": f"Unable to score: {str(e)}"}]},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(myScore)}
