@@ -1,5 +1,4 @@
 import asyncio
-import re
 import dateparser
 import os
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -22,6 +21,7 @@ from job_hunting.lib.services.generic_service import GenericService
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.resume_export_service import ResumeExportService
 from job_hunting.lib.services.ingest_resume import IngestResume
+from job_hunting.lib.services.answer_service import AnswerService
 
 from job_hunting.lib.models import (
     Resume,
@@ -2509,7 +2509,6 @@ class ResumeViewSet(BaseSAViewSet):
             )
             # Create IngestResume service with the blob
             resume_name = uploaded_file.name
-            # TODO would love to provide the name.
             ingest_service = IngestResume(
                 user=request.user,
                 resume=file_blob,  # Pass blob instead of path
@@ -2528,6 +2527,30 @@ class ResumeViewSet(BaseSAViewSet):
                     {"errors": [{"detail": "Ingest failed: no resume created"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+
+            # Set resume title from filename if not already set
+            if hasattr(resume, 'title') and not getattr(resume, 'title', None):
+                # Derive name from uploaded filename
+                base_name = uploaded_file.name
+                if base_name.lower().endswith('.docx'):
+                    base_name = base_name[:-5]  # Remove .docx extension
+                derived_name = base_name.strip()[:100]  # Trim to reasonable length
+                if derived_name:
+                    resume.title = derived_name
+                    session = self.get_session()
+                    session.add(resume)
+                    session.commit()
+            elif hasattr(resume, 'name') and not getattr(resume, 'name', None):
+                # Fallback to 'name' field if 'title' doesn't exist
+                base_name = uploaded_file.name
+                if base_name.lower().endswith('.docx'):
+                    base_name = base_name[:-5]  # Remove .docx extension
+                derived_name = base_name.strip()[:100]  # Trim to reasonable length
+                if derived_name:
+                    resume.name = derived_name
+                    session = self.get_session()
+                    session.add(resume)
+                    session.commit()
 
             # Return the created resume with all relationships
             ser = self.get_serializer()
@@ -2682,6 +2705,31 @@ class JobPostViewSet(BaseSAViewSet):
             attrs["created_by"] = request.user.id
 
         return attrs
+
+    def list(self, request):
+        session = self.get_session()
+        items = session.query(self.model).all()
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        # Default to include applications if none specified
+        include_rels = self._parse_include(request) or ["applications"]
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        # Default to include applications if none specified
+        include_rels = self._parse_include(request) or ["applications"]
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
@@ -3352,6 +3400,7 @@ class QuestionViewSet(BaseSAViewSet):
         ser = self.get_serializer()
         try:
             attrs = ser.parse_payload(request.data)
+            attrs["created_by_id"] = request.user.id
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
@@ -3451,6 +3500,157 @@ class QuestionViewSet(BaseSAViewSet):
 class AnswerViewSet(BaseSAViewSet):
     model = Answer
     serializer_class = AnswerSerializer
+
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs_node = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
+
+        def _first_id(n):
+            if isinstance(n, dict):
+                d = n.get("data", n)
+                if isinstance(d, dict) and "id" in d:
+                    return d.get("id")
+            return None
+
+        # Resolve question_id from attrs, relationships, or convenience keys
+        qid = attrs.get("question_id")
+        if qid is None:
+            qid = _first_id(
+                relationships.get("question") or relationships.get("questions")
+            )
+        if qid is None:
+            qid = (
+                attrs_node.get("question_id")
+                or attrs_node.get("questionId")
+                or attrs_node.get("question-id")
+                or node.get("question_id")
+                or node.get("questionId")
+                or node.get("question-id")
+                or data.get("question_id")
+                or data.get("questionId")
+                or data.get("question-id")
+            )
+        try:
+            qid = int(qid) if qid is not None else None
+        except (TypeError, ValueError):
+            return Response({"errors": [{"detail": "Invalid question ID"}]}, status=400)
+
+        question = Question.get(qid) if qid is not None else None
+        if question is None:
+            return Response(
+                {"errors": [{"detail": "Missing or invalid question relationship"}]},
+                status=400,
+            )
+
+        # Determine content and ai_assist flag
+        content = attrs.get("content")
+        if isinstance(content, str):
+            content = content.strip()
+
+        ai_flag_raw = (
+            attrs_node.get("ai_assist")
+            or node.get("ai_assist")
+            or data.get("ai_assist")
+            or attrs.get("ai_assist")
+        )
+
+        def _to_bool(v):
+            if isinstance(v, bool):
+                return v
+            if v is None:
+                return False
+            s = str(v).strip().lower()
+            return s in ("1", "true", "yes", "y", "on")
+
+        ai_assist = _to_bool(ai_flag_raw)
+
+        generated_obj = None
+        if not content and ai_assist:
+            client = get_client(required=False)
+            if client is None:
+                return Response(
+                    {
+                        "errors": [
+                            {"detail": "AI client not configured. Set OPENAI_API_KEY."}
+                        ]
+                    },
+                    status=503,
+                )
+            try:
+                svc = AnswerService(client)
+                if hasattr(svc, "generate_answer"):
+                    # Try to call with save=True if supported
+                    try:
+                        result = svc.generate_answer(question=question, save=True)
+                    except TypeError:
+                        result = svc.generate_answer(question=question)
+                elif hasattr(svc, "answer_question"):
+                    result = svc.answer_question(question)
+                else:
+                    result = svc(question)
+
+                # Handle different return types from the service
+                if isinstance(result, Answer):
+                    generated_obj = result
+                elif isinstance(result, dict) and "content" in result:
+                    content = str(result["content"] or "").strip()
+                elif isinstance(result, str):
+                    content = result.strip()
+                else:
+                    content = ""
+
+            except Exception as e:
+                return Response(
+                    {"errors": [{"detail": f"AI assist failed: {str(e)}"}]},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+        session = self.get_session()
+
+        if generated_obj:
+            # Use the generated Answer object
+            obj = generated_obj
+            # Ensure question_id is set
+            if not getattr(obj, "question_id", None):
+                obj.question_id = question.id
+            # If not yet persisted, add to session and commit
+            if not getattr(obj, "id", None):
+                session.add(obj)
+                session.commit()
+        else:
+            # Create new Answer with provided or generated content
+            if not content:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": "content is required when ai_assist is not true or generation failed"
+                            }
+                        ]
+                    },
+                    status=400,
+                )
+
+            attrs["question_id"] = question.id
+            attrs["content"] = content
+
+            obj = self.model(**attrs)
+            session.add(obj)
+            session.commit()
+
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class ExperienceViewSet(BaseSAViewSet):
