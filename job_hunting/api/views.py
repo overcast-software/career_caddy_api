@@ -276,7 +276,8 @@ class BaseSAViewSet(viewsets.ViewSet):
         return out
 
     def _normalize_rel_for_serializer(self, name: str, serializer) -> str:
-        rel_keys = set(getattr(serializer, "relationships", {}).keys())
+        rels = getattr(serializer, "relationships", {}) or {}
+        rel_keys = set(rels.keys())
 
         # Build candidate names in order of preference
         candidates = []
@@ -318,6 +319,24 @@ class BaseSAViewSet(viewsets.ViewSet):
         for candidate in candidates:
             if candidate in rel_keys:
                 return candidate
+
+        # Fallback: if include segment looks like a type (e.g., 'job-application'),
+        # map it to the first relationship whose configured type matches.
+        for rel_key, cfg in rels.items():
+            rel_type = (cfg or {}).get("type")
+            if not rel_type:
+                continue
+            # Check exact and simple variants against the relationship type
+            type_variants = {
+                rel_type,
+                rel_type.replace("-", "_"),
+                rel_type.replace("_", "-"),
+                (rel_type + "s"),
+                (rel_type.replace("-", "_") + "s"),
+                (rel_type.replace("_", "-") + "s"),
+            }
+            if name in type_variants or any(c in type_variants for c in candidates):
+                return rel_key
 
         return name
 
@@ -497,29 +516,18 @@ class BaseSAViewSet(viewsets.ViewSet):
                     attrs[key] = data[key]
 
         attrs = self.pre_save_payload(request, attrs, creating=True)
-
-        # Prevent spoofing of ownership fields
-        for forbidden in ("user_id", "created_by_id"):
-            if forbidden in attrs:
-                attrs.pop(forbidden, None)
-
-        # Conditionally set an owner field only if the model supports it
-        if getattr(request, "user", None) and getattr(
-            request.user, "is_authenticated", False
-        ):
-            ser_obj = self.get_serializer()
-            rel_fks = getattr(ser_obj, "relationship_fks", {}) if ser_obj else {}
-            possible_owner_fields = []
-            # Prefer explicit mapping of 'user' in serializer if present
-            if "user" in rel_fks:
-                possible_owner_fields.append(rel_fks["user"])
-            # Common fallback field names
-            possible_owner_fields.extend(["user_id", "created_by_id"])
-            for field in possible_owner_fields:
-                if hasattr(self.model, field) and field not in attrs:
-                    attrs[field] = request.user.id
-                    break
-
+        # Respect model schema: only set created_by_id if the model supports it
+        if hasattr(self.model, "created_by_id"):
+            # Ignore any client-supplied created_by_id; set from authenticated user if available
+            attrs.pop("created_by_id", None)
+            if getattr(request, "user", None) and getattr(
+                request.user, "is_authenticated", False
+            ):
+                attrs["created_by_id"] = request.user.id
+        else:
+            # Ensure unsupported ownership fields are not passed to the model
+            attrs.pop("created_by_id", None)
+            attrs.pop("created_by", None)
         obj = self.model(**attrs)
         session = self.get_session()
         session.add(obj)
@@ -2529,10 +2537,10 @@ class ResumeViewSet(BaseSAViewSet):
                 )
 
             # Set resume title from filename if not already set
-            if hasattr(resume, 'title') and not getattr(resume, 'title', None):
+            if hasattr(resume, "title") and not getattr(resume, "title", None):
                 # Derive name from uploaded filename
                 base_name = uploaded_file.name
-                if base_name.lower().endswith('.docx'):
+                if base_name.lower().endswith(".docx"):
                     base_name = base_name[:-5]  # Remove .docx extension
                 derived_name = base_name.strip()[:100]  # Trim to reasonable length
                 if derived_name:
@@ -2540,10 +2548,10 @@ class ResumeViewSet(BaseSAViewSet):
                     session = self.get_session()
                     session.add(resume)
                     session.commit()
-            elif hasattr(resume, 'name') and not getattr(resume, 'name', None):
+            elif hasattr(resume, "name") and not getattr(resume, "name", None):
                 # Fallback to 'name' field if 'title' doesn't exist
                 base_name = uploaded_file.name
-                if base_name.lower().endswith('.docx'):
+                if base_name.lower().endswith(".docx"):
                     base_name = base_name[:-5]  # Remove .docx extension
                 derived_name = base_name.strip()[:100]  # Trim to reasonable length
                 if derived_name:
@@ -2888,7 +2896,7 @@ class ScrapeViewSet(BaseSAViewSet):
             url = (data["data"].get("attributes") or {}).get("url")
 
         # Lazy import to avoid hard dependency at module import time
-        from job_hunting.lib.browser_manager import BrowserManager
+        from job_hunting.lib.remote_playwright_client import RpcPlaywrightClient
 
         # Lazy import to avoid heavy deps at module import time
 
@@ -2903,25 +2911,19 @@ class ScrapeViewSet(BaseSAViewSet):
                 status=503,
             )
 
-        browser_manager = BrowserManager()
-        headless = getattr(settings, "SCRAPER_HEADLESS", False)
-        print(f"headless = {headless}")
         nav_timeout = int(getattr(settings, "SCRAPER_NAV_TIMEOUT_MS", 30000))
-        asyncio.run(
-            browser_manager.start_browser(headless, navigation_timeout=nav_timeout)
-        )
+        rpc_client = RpcPlaywrightClient(timeout=(nav_timeout / 1000.0))
         service = GenericService(
-            url=url, browser=browser_manager, ai_client=client, creds={}
+            url=url, ai_client=client, rpc_client=rpc_client, creds={}
         )
+
         try:
             try:
                 scrape = asyncio.run(service.process())
-                asyncio.run(browser_manager.close_browser())
             except RuntimeError:
                 # If an event loop is already running (e.g., under ASGI), use it
                 loop = asyncio.get_event_loop()
                 scrape = loop.run_until_complete(service.process())
-                loop.run_until_complete(browser_manager.close_browser())
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to process URL: {e}"}]},

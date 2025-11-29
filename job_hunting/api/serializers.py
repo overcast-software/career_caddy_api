@@ -532,6 +532,7 @@ class CompanySerializer(BaseSASerializer):
     relationships = {
         "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
         "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
+        "applications": {"attr": "applications", "type": "job-application", "uselist": True},
     }
 
 
@@ -612,6 +613,7 @@ class ApplicationSerializer(BaseSASerializer):
         "user": {"attr": "user", "type": "user", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
+        "company": {"attr": "company", "type": "company", "uselist": False},
         "cover-letter": {
             "attr": "cover_letter",
             "type": "cover-letter",
@@ -628,6 +630,8 @@ class ApplicationSerializer(BaseSASerializer):
         "job-posts": "job_post_id",
         "resume": "resume_id",
         "resumes": "resume_id",
+        "company": "company_id",
+        "companies": "company_id",
         "cover-letter": "cover_letter_id",
         "cover_letter": "cover_letter_id",
         "cover-letters": "cover_letter_id",
