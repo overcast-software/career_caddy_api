@@ -2,6 +2,7 @@ from job_hunting.lib.models import Scrape, JobPost, Company
 import sys
 import json
 from jinja2 import Environment, FileSystemLoader
+from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
 class GenericParser:
@@ -45,6 +46,15 @@ class GenericParser:
         # Load and render the template
         template = self.env.get_template("job_parser_prompt.j2")
         prompt = template.render(html_content=scrape.html)
+
+        write_prompt_to_file(
+            prompt,
+            kind="job_parser",
+            identifiers={
+                "scrape_id": scrape.id,
+                "job_post_id": getattr(scrape, "job_post_id", None),
+            },
+        )
 
         messages = [
             {

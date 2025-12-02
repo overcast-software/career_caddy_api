@@ -6,6 +6,7 @@ from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIChatModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.providers.ollama import OllamaProvider
 from .schemas import JobMatchRequest, JobMatchResponse
+from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
 class JobScorer:
@@ -51,6 +52,12 @@ class JobScorer:
         template = self.env.get_template("job_scorer_prompt.j2")
         prompt = template.render(
             job_description=request.job_description, resume=request.resume
+        )
+
+        write_prompt_to_file(
+            prompt,
+            kind="job_scorer",
+            identifiers={},
         )
 
         if self.agent is None:

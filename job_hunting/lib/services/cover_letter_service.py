@@ -1,6 +1,7 @@
 from jinja2 import Environment, FileSystemLoader
 from job_hunting.lib.models.cover_letter import CoverLetter
 from job_hunting.lib.services.db_export_service import DbExportService
+from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
 class CoverLetterService:
@@ -19,6 +20,16 @@ class CoverLetterService:
             company_name=getattr(self.job_post.company, "name", ""),
             job_description=self.job_post.description,
             resume=resume_markdown,
+        )
+
+        write_prompt_to_file(
+            prompt,
+            kind="cover_letter",
+            identifiers={
+                "job_post_id": self.job_post.id,
+                "resume_id": self.resume.id,
+                "user_id": self.resume.user.id,
+            },
         )
 
         completion = self.ai_client.chat.completions.create(

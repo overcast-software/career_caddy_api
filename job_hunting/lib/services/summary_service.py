@@ -20,6 +20,17 @@ class SummaryService:
         prompt = template.render(
             job_description=self.job.description, resume=resume_markdown
         )
+
+        write_prompt_to_file(
+            prompt,
+            kind="summary",
+            identifiers={
+                "job_post_id": self.job.id,
+                "resume_id": self.resume.id,
+                "user_id": self.resume.user_id,
+            },
+        )
+
         response = self.ai_client.chat.completions.create(
             model="gpt-5",
             messages=[
