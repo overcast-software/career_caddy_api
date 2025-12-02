@@ -1,6 +1,7 @@
 from job_hunting.lib.models import JobPost, Resume, Summary
 from jinja2 import Environment, FileSystemLoader
 from .db_export_service import DbExportService
+from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
 class SummaryService:
@@ -20,7 +21,7 @@ class SummaryService:
         prompt = template.render(
             job_description=self.job.description, resume=resume_markdown
         )
-
+        
         write_prompt_to_file(
             prompt,
             kind="summary",
@@ -30,7 +31,7 @@ class SummaryService:
                 "user_id": self.resume.user_id,
             },
         )
-
+        
         response = self.ai_client.chat.completions.create(
             model="gpt-5",
             messages=[
