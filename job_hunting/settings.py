@@ -264,13 +264,14 @@ from datetime import timedelta
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(
-        minutes=int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "15"))
+        minutes=int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60"))
     ),
     "REFRESH_TOKEN_LIFETIME": timedelta(
-        days=int(os.environ.get("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "7"))
+        days=int(os.environ.get("JWT_REFRESH_TOKEN_LIFETIME_DAYS", "30"))
     ),
     "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
+    "BLACKLIST_AFTER_ROTATION": False,
+    "LEEWAY": int(os.environ.get("JWT_LEEWAY_SECONDS", "60")),
 }
 
 # Feature flags
