@@ -3363,6 +3363,89 @@ class ApplicationViewSet(BaseSAViewSet):
             )
         return Response(payload)
 
+    @action(detail=True, methods=["get", "post"])
+    def statuses(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        if request.method.lower() == "get":
+            ser = JobApplicationStatusSerializer()
+            items = list(obj.application_statuses or [])
+            data = [ser.to_resource(i) for i in items]
+
+            # Build included only when ?include=... is provided
+            include_rels = self._parse_include(request)
+
+            payload = {"data": data}
+            if include_rels:
+                payload["included"] = self._build_included(
+                    items, include_rels, request, primary_serializer=ser
+                )
+            return Response(payload)
+
+        # POST - create new status update
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
+
+        # Resolve status - either by relationship or by string
+        status_obj = None
+        status_rel = relationships.get("status") or {}
+        if isinstance(status_rel, dict):
+            status_data = status_rel.get("data")
+            if isinstance(status_data, dict):
+                status_id = status_data.get("id")
+                if status_id is not None:
+                    try:
+                        status_obj = Status.get(int(status_id))
+                    except (TypeError, ValueError):
+                        pass
+                    if not status_obj:
+                        return Response(
+                            {"errors": [{"detail": "Invalid status ID"}]},
+                            status=400,
+                        )
+
+        # Fallback to creating status from string
+        if not status_obj:
+            status_str = attrs.get("status")
+            if not status_str:
+                return Response(
+                    {"errors": [{"detail": "Missing status - provide either relationships.status or attributes.status"}]},
+                    status=400,
+                )
+            
+            status_type = attrs.get("status_type", "")
+            status_obj, _ = Status.first_or_create(
+                status=str(status_str).strip().lower(),
+                defaults={"status_type": status_type}
+            )
+
+        # Create JobApplicationStatus
+        note = attrs.get("note", "")
+        session = self.get_session()
+        jas = JobApplicationStatus(
+            application_id=obj.id,
+            status_id=status_obj.id,
+            note=note
+        )
+        session.add(jas)
+        session.commit()
+
+        # Update Application.status for convenience
+        obj.status = status_obj.status
+        session.add(obj)
+        session.commit()
+
+        ser = JobApplicationStatusSerializer()
+        payload = {"data": ser.to_resource(jas)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([jas], include_rels, request)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
 
 class StatusViewSet(BaseSAViewSet):
     model = Status

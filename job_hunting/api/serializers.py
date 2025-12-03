@@ -383,7 +383,12 @@ class ResumeSerializer(BaseSASerializer):
             if hasattr(obj, "company") and obj.company:
                 return "company", [obj.company]
             # Fallback to job_post.company
-            elif hasattr(obj, "job_post") and obj.job_post and hasattr(obj.job_post, "company") and obj.job_post.company:
+            elif (
+                hasattr(obj, "job_post")
+                and obj.job_post
+                and hasattr(obj.job_post, "company")
+                and obj.job_post.company
+            ):
                 return "company", [obj.job_post.company]
             else:
                 return "company", []
@@ -532,7 +537,11 @@ class CompanySerializer(BaseSASerializer):
     relationships = {
         "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
         "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
-        "applications": {"attr": "applications", "type": "job-application", "uselist": True},
+        "applications": {
+            "attr": "applications",
+            "type": "job-application",
+            "uselist": True,
+        },
     }
 
 
@@ -567,14 +576,19 @@ class CoverLetterSerializer(BaseSASerializer):
                     "related": f"{_resource_base_path('user')}/{obj.user_id}",
                 },
             }
-        
+
         # Add company relationship via job_post fallback
         company_id = None
         if hasattr(obj, "company_id") and obj.company_id:
             company_id = obj.company_id
-        elif hasattr(obj, "job_post") and obj.job_post and hasattr(obj.job_post, "company_id") and obj.job_post.company_id:
+        elif (
+            hasattr(obj, "job_post")
+            and obj.job_post
+            and hasattr(obj.job_post, "company_id")
+            and obj.job_post.company_id
+        ):
             company_id = obj.job_post.company_id
-        
+
         if company_id:
             res.setdefault("relationships", {})["company"] = {
                 "data": {"type": "company", "id": str(company_id)},
@@ -591,7 +605,7 @@ class CoverLetterSerializer(BaseSASerializer):
                     "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/company",
                 },
             }
-        
+
         return res
 
     def get_related(self, obj, rel_name):
