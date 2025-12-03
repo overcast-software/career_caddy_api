@@ -107,10 +107,10 @@ class EducationOut(BaseModel):
 
 class ProjectOut(BaseModel):
     title: str
-    role: Optional[str] = None
+    description: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    bullets: list[str] = Field(default_factory=list)
+    bullets: Optional[list[str]] = Field(default_factory=list)
     tech: list[str] = Field(default_factory=list)
 
 
@@ -351,10 +351,10 @@ class IngestResume:
             ResumeEducation.first_or_create(resume=self.db_resume, education=education)
 
         print("Creating projects...")
-        for proj_data in (parsed_resume.projects or []):
+        for proj_data in parsed_resume.projects or []:
             project = Project(
                 title=proj_data.title,
-                role=proj_data.role,
+                user_id=self.user.id,
                 start_date=self.parse_date(proj_data.start_date),
                 end_date=self.parse_date(proj_data.end_date),
             )
