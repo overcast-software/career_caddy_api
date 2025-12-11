@@ -22,17 +22,12 @@ class Application(BaseModel):
     status = Column(String)  # e.g., submitted, interview, rejected, offer
     tracking_url = Column(String)  # link to ATS or application portal
     notes = Column(Text)
-    company_id = Column(
-        Integer, ForeignKey("company.id", ondelete="SET NULL"), nullable=True
-    )
-
     # Relationships
     user = relationship("User", back_populates="applications")
     job_post = relationship("JobPost", back_populates="applications")
     company = relationship("Company", back_populates="applications")
     resume = relationship("Resume", back_populates="applications")
     cover_letter = relationship("CoverLetter", back_populates="application")
-    company = relationship("Company", back_populates="applications")
     application_statuses = relationship(
         "JobApplicationStatus",
         back_populates="application",

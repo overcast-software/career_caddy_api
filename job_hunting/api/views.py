@@ -2968,6 +2968,17 @@ class CompanyViewSet(BaseSAViewSet):
     model = Company
     serializer_class = CompanySerializer
 
+    def list(self, request):
+        session = self.get_session()
+        items = session.query(self.model).all()
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
     @action(detail=True, methods=["get"], url_path="job-posts")
     def job_posts(self, request, pk=None):
         company = self.model.get(int(pk))
@@ -3325,6 +3336,113 @@ class ApplicationViewSet(BaseSAViewSet):
     model = Application
     serializer_class = ApplicationSerializer
 
+    def _record_status_if_changed(self, session, app_obj, old_status, new_status, note=None):
+        """Record status history if the status has changed."""
+        # Normalize status values
+        old_norm = str(old_status or "").strip().lower() if old_status else ""
+        new_norm = str(new_status or "").strip().lower() if new_status else ""
+        
+        # Skip if new status is empty or unchanged
+        if not new_norm or old_norm == new_norm:
+            return
+        
+        # Resolve or create Status row
+        status_obj, _ = Status.first_or_create(
+            session=session, 
+            status=new_norm, 
+            defaults={"status_type": ""}
+        )
+        
+        # Create JobApplicationStatus row
+        jas = JobApplicationStatus(
+            application_id=app_obj.id,
+            status_id=status_obj.id,
+            note=(note or "")
+        )
+        session.add(jas)
+        
+        # Sync Application.status to canonical value
+        app_obj.status = status_obj.status
+        session.add(app_obj)
+        
+        session.commit()
+
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+
+        attrs = self.pre_save_payload(request, attrs, creating=True)
+        
+        # Respect model schema: only set created_by_id if the model supports it
+        if hasattr(self.model, "created_by_id"):
+            # Ignore any client-supplied created_by_id; set from authenticated user if available
+            attrs.pop("created_by_id", None)
+            if getattr(request, "user", None) and getattr(
+                request.user, "is_authenticated", False
+            ):
+                attrs["created_by_id"] = request.user.id
+        else:
+            # Ensure unsupported ownership fields are not passed to the model
+            attrs.pop("created_by_id", None)
+            attrs.pop("created_by", None)
+            
+        obj = self.model(**attrs)
+        session = self.get_session()
+        session.add(obj)
+        session.commit()
+        
+        # Extract optional note from JSON:API body
+        data = request.data if isinstance(request.data, dict) else {}
+        note = (data.get("data") or {}).get("attributes", {}).get("note")
+        
+        # Record status history if status was provided
+        self._record_status_if_changed(
+            session, obj, old_status=None, new_status=attrs.get("status"), note=note
+        )
+        
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    def _upsert(self, request, pk, partial=False):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        attrs = self.pre_save_payload(request, attrs, creating=False)
+        
+        # Capture old status before applying changes
+        old_status_raw = obj.status
+        
+        # Do not allow changing ownership
+        attrs.pop("created_by_id", None)
+        for k, v in attrs.items():
+            setattr(obj, k, v)
+        session = self.get_session()
+        session.add(obj)
+        session.commit()
+        
+        # Extract optional note from JSON:API body
+        data = request.data if isinstance(request.data, dict) else {}
+        note = (data.get("data") or {}).get("attributes", {}).get("note")
+        
+        # Record status history if status changed
+        new_status_raw = attrs.get("status")
+        self._record_status_if_changed(
+            session, obj, old_status=old_status_raw, new_status=new_status_raw, note=note
+        )
+        
+        return Response({"data": ser.to_resource(obj)})
+
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -3362,6 +3480,93 @@ class ApplicationViewSet(BaseSAViewSet):
                 items, include_rels, request, primary_serializer=ser
             )
         return Response(payload)
+
+    @action(detail=True, methods=["get", "post"])
+    def statuses(self, request, pk=None):
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        if request.method.lower() == "get":
+            ser = JobApplicationStatusSerializer()
+            items = list(obj.application_statuses or [])
+            data = [ser.to_resource(i) for i in items]
+
+            # Build included only when ?include=... is provided
+            include_rels = self._parse_include(request)
+
+            payload = {"data": data}
+            if include_rels:
+                payload["included"] = self._build_included(
+                    items, include_rels, request, primary_serializer=ser
+                )
+            return Response(payload)
+
+        # POST - create new status update
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
+
+        # Resolve status - either by relationship or by string
+        status_obj = None
+        status_rel = relationships.get("status") or {}
+        if isinstance(status_rel, dict):
+            status_data = status_rel.get("data")
+            if isinstance(status_data, dict):
+                status_id = status_data.get("id")
+                if status_id is not None:
+                    try:
+                        status_obj = Status.get(int(status_id))
+                    except (TypeError, ValueError):
+                        pass
+                    if not status_obj:
+                        return Response(
+                            {"errors": [{"detail": "Invalid status ID"}]},
+                            status=400,
+                        )
+
+        # Fallback to creating status from string
+        if not status_obj:
+            status_str = attrs.get("status")
+            if not status_str:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": "Missing status - provide either relationships.status or attributes.status"
+                            }
+                        ]
+                    },
+                    status=400,
+                )
+
+            status_type = attrs.get("status_type", "")
+            status_obj, _ = Status.first_or_create(
+                status=str(status_str).strip().lower(),
+                defaults={"status_type": status_type},
+            )
+
+        # Create JobApplicationStatus
+        note = attrs.get("note", "")
+        session = self.get_session()
+        jas = JobApplicationStatus(
+            application_id=obj.id, status_id=status_obj.id, note=note
+        )
+        session.add(jas)
+        session.commit()
+
+        # Update Application.status for convenience
+        obj.status = status_obj.status
+        session.add(obj)
+        session.commit()
+
+        ser = JobApplicationStatusSerializer()
+        payload = {"data": ser.to_resource(jas)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([jas], include_rels, request)
+        return Response(payload, status=status.HTTP_201_CREATED)
 
 
 class StatusViewSet(BaseSAViewSet):
