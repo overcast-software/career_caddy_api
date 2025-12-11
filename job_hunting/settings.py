@@ -211,8 +211,33 @@ if DEBUG:
     print(f"CORS_ALLOWED_ORIGINS: {CORS_ALLOWED_ORIGINS}")
 
 # Test database configuration
-if TESTING and os.environ.get("TEST_DB_NAME"):
-    DATABASES["default"]["TEST"] = {"NAME": os.environ["TEST_DB_NAME"]}
+if TESTING:
+    # Disable persistent connections during tests to prevent "database is being accessed by other users"
+    DATABASES["default"]["CONN_MAX_AGE"] = 0
+    
+    # Generate unique test database name to prevent collisions across parallel CI runs
+    import re
+    
+    base_name = os.environ.get("TEST_DB_NAME", "job_hunting_ci")
+    
+    # Create unique suffix from CI metadata or process ID
+    suffix_parts = []
+    if os.environ.get("GITHUB_RUN_ID"):
+        suffix_parts.append(os.environ["GITHUB_RUN_ID"])
+    if os.environ.get("GITHUB_RUN_ATTEMPT"):
+        suffix_parts.append(os.environ["GITHUB_RUN_ATTEMPT"])
+    
+    # Fallback to process ID if no CI metadata
+    if not suffix_parts:
+        suffix_parts.append(str(os.getpid()))
+    
+    suffix = "_".join(suffix_parts)
+    unique_name = f"{base_name}_{suffix}"
+    
+    # Sanitize name to only alphanumeric and underscores, trim to 63 chars (Postgres limit)
+    unique_name = re.sub(r'[^a-zA-Z0-9_]', '_', unique_name)[:63]
+    
+    DATABASES["default"]["TEST"] = {"NAME": unique_name}
 
 # Optional: allow matching origins by regex (comma-separated)
 CORS_ALLOWED_ORIGIN_REGEXES_ENV = os.environ.get("CORS_ALLOWED_ORIGIN_REGEXES", "")
