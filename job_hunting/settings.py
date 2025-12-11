@@ -154,9 +154,12 @@ REST_FRAMEWORK = {
 
 STATIC_URL = "/static/"
 
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, "static"),
-]
+# Only include static directory if it exists (prevents W004 warning in CI)
+static_dir = os.path.join(BASE_DIR, "static")
+if os.path.isdir(static_dir):
+    STATICFILES_DIRS = [static_dir]
+else:
+    STATICFILES_DIRS = []
 
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 

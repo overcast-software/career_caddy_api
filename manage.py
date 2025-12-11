@@ -19,6 +19,17 @@ def main():
             "available on your PYTHONPATH environment variable? Did you "
             "forget to activate a virtual environment?"
         ) from exc
+    
+    # Auto-add --noinput for tests in CI to prevent interactive prompts
+    if "test" in sys.argv and "--noinput" not in sys.argv:
+        ci_env = os.environ.get("CI", "").lower() in ("true", "1")
+        github_actions = os.environ.get("GITHUB_ACTIONS", "").lower() in ("true", "1")
+        if ci_env or github_actions:
+            sys.argv.append("--noinput")
+            # Optionally keep DB for faster CI runs
+            if os.environ.get("CI_KEEPDB", "").lower() in ("true", "1") and "--keepdb" not in sys.argv:
+                sys.argv.append("--keepdb")
+    
     execute_from_command_line(sys.argv)
 
 
