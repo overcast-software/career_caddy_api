@@ -2,6 +2,11 @@
 import os
 import sys
 
+REQUIRED_PY_VERSION = (3, 12, 12)
+if sys.version_info[:3] != REQUIRED_PY_VERSION:
+    sys.stderr.write(f"Error: This project requires Python {REQUIRED_PY_VERSION[0]}.{REQUIRED_PY_VERSION[1]}.{REQUIRED_PY_VERSION[2]}, but running {sys.version.split()[0]}\n")
+    sys.exit(1)
+
 
 def main():
     """Run administrative tasks."""
