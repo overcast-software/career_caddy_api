@@ -85,84 +85,124 @@ def profile(request):
 
 @csrf_exempt
 def healthcheck(request):
-    # Compute bootstrap gate
-    try:
-        User = get_user_model()
-        user_count = User.objects.count()
-    except Exception:
-        # If Django ORM isn't initialized yet, still report ok but unknown gate
-        user_count = None
-
+    """Simple health check endpoint that only reports system health."""
     if request.method == "GET":
+        return JsonResponse({"healthy": True})
+    
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@csrf_exempt
+def initialize(request):
+    """Initialize the application with first-time setup."""
+    if request.method == "GET":
+        # Check if initialization is needed
+        try:
+            User = get_user_model()
+            user_count = User.objects.count()
+        except Exception:
+            # If Django ORM isn't initialized yet, initialization is needed
+            user_count = None
+
         if user_count is None:
             status_str = "unknown"
-            bootstrap_open = None
+            initialization_needed = True
         else:
-            bootstrap_open = user_count == 0
-            status_str = "bootstrapped" if not bootstrap_open else "bootstrap"
+            initialization_needed = user_count == 0
+            status_str = "initialized" if not initialization_needed else "needs_initialization"
+        
         return JsonResponse(
             {
-                "healthy": True,
+                "initialization_needed": initialization_needed,
                 "status": status_str,
-                "bootstrap_open": bootstrap_open,
             }
         )
 
     if request.method == "POST":
-        # Allow setting the OpenAI API key after bootstrap as well.
-        # Authorization options:
-        # - Authenticated superuser may always set the key
-        allow_bootstrap = getattr(settings, "ALLOW_BOOTSTRAP_SUPERUSER", False)
-        bootstrap_token = getattr(settings, "BOOTSTRAP_TOKEN", "")
-        user = getattr(request, "user", None)
-        is_superuser = bool(
-            user and user.is_authenticated and getattr(user, "is_superuser", False)
+        # Handle initial setup
+        try:
+            User = get_user_model()
+            user_count = User.objects.count()
+        except Exception:
+            user_count = None
+
+        # Only allow initialization when no users exist
+        if user_count is not None and user_count > 0:
+            return JsonResponse(
+                {"errors": [{"detail": "Application already initialized"}]}, status=403
+            )
+
+        # Parse request data
+        try:
+            import json
+            data = json.loads(request.body.decode("utf-8") or "{}")
+        except Exception:
+            data = {}
+
+        # Handle both JSON:API and plain JSON formats
+        attrs = {}
+        if isinstance(data.get("data"), dict):
+            attrs = data["data"].get("attributes") or {}
+        else:
+            attrs = data or {}
+
+        # Extract user creation parameters
+        username = attrs.get("username") or attrs.get("name") or "admin"
+        email = (attrs.get("email") or None) or None
+        password = attrs.get("password") or "admin"
+        first_name = attrs.get("first_name") or attrs.get("name") or ""
+        last_name = attrs.get("last_name") or ""
+
+        # Extract OpenAI API key
+        api_key = (
+            attrs.get("openai_api_key")
+            or attrs.get("OPENAI_API_KEY")
+            or attrs.get("openaiApiKey")
         )
 
-        if not is_superuser:
-            # Fallback to original bootstrap gate (no users yet and bootstrap enabled)
-            if not allow_bootstrap or not bootstrap_token:
-                return JsonResponse(
-                    {"errors": [{"detail": "Bootstrap disabled"}]}, status=403
-                )
-            if user_count is not None and user_count > 0:
-                return JsonResponse(
-                    {"errors": [{"detail": "bootstrap closed"}]}, status=403
-                )
-
-        # Accept API key via header or JSON/JSON:API body
-        api_key = (request.META.get("HTTP_X_OPENAI_API_KEY", "") or "").strip()
-        if not api_key:
-            try:
-                import json
-
-                data = json.loads(request.body.decode("utf-8") or "{}")
-            except Exception:
-                data = {}
-            attrs = {}
-            if isinstance(data.get("data"), dict):
-                attrs = data["data"].get("attributes") or {}
-            elif isinstance(data, dict):
-                attrs = data
-            api_key = (
-                attrs.get("openai_api_key")
-                or attrs.get("OPENAI_API_KEY")
-                or attrs.get("openaiApiKey")
-                or ""
-            )
-            api_key = str(api_key).strip()
-
-        if not api_key:
-            return JsonResponse(
-                {"errors": [{"detail": "Missing openai_api_key"}]}, status=400
-            )
-
+        # Create superuser
         try:
-            set_api_key(api_key)
+            user = User.objects.create_superuser(
+                username=username,
+                email=email,
+                password=password,
+            )
+            if first_name:
+                user.first_name = first_name
+            if last_name:
+                user.last_name = last_name
+            user.save()
         except Exception as e:
-            return JsonResponse({"errors": [{"detail": str(e)}]}, status=400)
+            return JsonResponse(
+                {"errors": [{"detail": f"Failed to create user: {str(e)}"}]}, 
+                status=400
+            )
 
-        return JsonResponse({"healthy": True, "openai_api_key_saved": True}, status=201)
+        # Optionally set OpenAI API key
+        meta = {}
+        if api_key:
+            try:
+                set_api_key(str(api_key).strip())
+                meta["openai_api_key_saved"] = True
+            except Exception as e:
+                meta["openai_api_key_saved"] = False
+                meta["openai_api_key_error"] = str(e)
+
+        # Return success response
+        response_data = {
+            "initialized": True,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+            }
+        }
+        if meta:
+            response_data["meta"] = meta
+
+        return JsonResponse(response_data, status=201)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
 
@@ -1057,58 +1097,17 @@ class DjangoUserViewSet(viewsets.ViewSet):
         permission_classes=[AllowAny],
     )
     def bootstrap_superuser(self, request):
-
-        # Only allow when no users exist
-        User = get_user_model()
-        if User.objects.count() > 0:
-            return Response({"errors": [{"detail": "bootstrap closed"}]}, status=403)
-
-        # Accept both JSON:API and plain JSON
-        data = request.data if isinstance(request.data, dict) else {}
-        attrs = {}
-        if isinstance(data.get("data"), dict):
-            attrs = data["data"].get("attributes") or {}
-        else:
-            attrs = data or {}
-
-        username = attrs.get("username") or attrs.get("name") or "admin"
-        email = (attrs.get("email") or None) or None
-        password = attrs.get("password") or "admin"
-        first_name = attrs.get("first_name") or attrs.get("name") or ""
-        last_name = attrs.get("last_name") or ""
-        # Optional: allow setting OpenAI API key during bootstrap
-        api_key = (
-            attrs.get("openai_api_key")
-            or attrs.get("OPENAI_API_KEY")
-            or attrs.get("openaiApiKey")
+        """Deprecated: Use /api/v1/initialize/ instead."""
+        return Response(
+            {
+                "errors": [
+                    {
+                        "detail": "This endpoint is deprecated. Use /api/v1/initialize/ instead."
+                    }
+                ]
+            },
+            status=410,  # Gone
         )
-
-        user = User.objects.create_superuser(
-            username=username,
-            email=email,
-            password=password,
-        )
-        if first_name:
-            user.first_name = first_name
-        if last_name:
-            user.last_name = last_name
-        user.save()
-
-        # Optionally persist the AI API key securely during bootstrap
-        meta = {}
-        if api_key:
-            try:
-                set_api_key(str(api_key).strip())
-                meta["openai_api_key_saved"] = True
-            except Exception as e:
-                meta["openai_api_key_saved"] = False
-                meta["openai_api_key_error"] = str(e)
-
-        ser = self.get_serializer()
-        payload = {"data": ser.to_resource(user)}
-        if meta:
-            payload["meta"] = meta
-        return Response(payload, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"])
     def resumes(self, request, pk=None):

@@ -41,6 +41,7 @@ from job_hunting.api.views import (
     QuestionViewSet,
     AnswerViewSet,
     healthcheck,
+    initialize,
     profile,
 )
 
@@ -67,6 +68,8 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/healthcheck$", healthcheck, name="healthcheck-noslash"),
+    path("api/v1/initialize/", initialize, name="initialize"),
+    re_path(r"^api/v1/initialize$", initialize, name="initialize-noslash"),
     re_path(
         r"^api/v1/companies/(?P<pk>\d+)/job-posts$",
         CompanyViewSet.as_view({"get": "job_posts"}),
