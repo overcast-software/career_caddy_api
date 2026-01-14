@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .base import BaseModel
@@ -17,6 +17,7 @@ class Question(BaseModel):
         Integer, ForeignKey("auth_user.id", ondelete="SET NULL"), nullable=True
     )
     content = Column(Text, nullable=False)
+    favorite = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

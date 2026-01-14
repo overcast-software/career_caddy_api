@@ -1,5 +1,5 @@
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import Column, Integer, Text, ForeignKey, String
+from sqlalchemy import Column, Integer, Text, ForeignKey, String, Boolean
 from sqlalchemy.orm import relationship
 from .base import BaseModel, Base
 
@@ -15,6 +15,7 @@ class Resume(BaseModel):
     title = Column(String)
     name = Column(String)  # internal name
     notes = Column(Text)  # notes about this flavor resume
+    favorite = Column(Boolean, default=False, nullable=False)
     # Relationships
     user = relationship("User", back_populates="resumes")
     scores = relationship("Score", back_populates="resume")
