@@ -88,27 +88,31 @@ class AnswerService:
         elif job_post and hasattr(job_post, "company"):
             company = job_post.company
 
-        # Resolve resume(s)
+        # Resolve resume(s) (favorites only)
         resumes = []
         resume = None
         if user:
             resumes = (
                 self.session.query(Resume)
-                .filter_by(user_id=user.id)
+                .filter_by(user_id=user.id, favorite=True)
                 .order_by(desc(Resume.id))
                 .all()
             )
         if application and hasattr(application, "resume") and application.resume:
             resume = application.resume
-            if resume and all(r.id != getattr(resume, "id", None) for r in resumes):
+            # Only include application resume if it's a favorite or if no favorite resumes exist
+            if resume and getattr(resume, "favorite", False):
+                if all(r.id != getattr(resume, "id", None) for r in resumes):
+                    resumes.insert(0, resume)
+            elif not resumes:  # Fallback if no favorite resumes exist
                 resumes.insert(0, resume)
         else:
             resume = resumes[0] if resumes else None
 
-        # Retrieve cover letters
+        # Retrieve cover letters (favorites only)
         cover_letters = []
         if user:
-            # Get all cover letters for the user (owned by user OR associated to user's resumes)
+            # Get favorite cover letters for the user (owned by user OR associated to user's resumes)
             cover_letters_query = (
                 self.session.query(CoverLetter)
                 .options(
@@ -116,6 +120,7 @@ class AnswerService:
                     joinedload(CoverLetter.resume),
                 )
                 .filter(
+                    CoverLetter.favorite == True,
                     or_(
                         CoverLetter.user_id == user.id,
                         CoverLetter.resume.has(user_id=user.id),
@@ -125,11 +130,12 @@ class AnswerService:
             )
             cover_letters.extend(cover_letters_query.all())
 
-        # Add application's cover letter if not already included
+        # Add application's cover letter if not already included and it's a favorite
         if (
             application
             and hasattr(application, "cover_letter")
             and application.cover_letter
+            and getattr(application.cover_letter, "favorite", False)
         ):
             app_cover_letter = application.cover_letter
             if not any(cl.id == app_cover_letter.id for cl in cover_letters):
@@ -142,22 +148,27 @@ class AnswerService:
             # 1) Build unified set of question IDs from multiple sources
             question_ids = set()
 
-            # User-authored questions (excluding current)
+            # User-authored favorite questions (excluding current)
             user_questions = (
                 self.session.query(Question)
-                .filter(Question.created_by_id == user.id, Question.id != question.id)
+                .filter(
+                    Question.created_by_id == user.id, 
+                    Question.id != question.id,
+                    Question.favorite == True
+                )
                 .order_by(Question.created_at, Question.id)
                 .all()
             )
             question_ids.update(q.id for q in user_questions)
 
-            # Application-linked questions (excluding current)
+            # Application-linked favorite questions (excluding current)
             if application:
                 app_questions = (
                     self.session.query(Question)
                     .filter(
                         Question.application_id == application.id,
                         Question.id != question.id,
+                        Question.favorite == True,
                     )
                     .order_by(Question.created_at, Question.id)
                     .all()
@@ -167,12 +178,15 @@ class AnswerService:
             # Convert to list for query
             question_ids_list = list(question_ids)
 
-            # 2) Get answers for those questions (no limit)
+            # 2) Get favorite answers for those questions (no limit)
             if question_ids_list:
                 answers_query = (
                     self.session.query(Answer)
                     .options(joinedload(Answer.question))
-                    .filter(Answer.question_id.in_(question_ids_list))
+                    .filter(
+                        Answer.question_id.in_(question_ids_list),
+                        Answer.favorite == True
+                    )
                     .order_by(Answer.created_at, Answer.id)
                     .all()
                 )
@@ -190,7 +204,7 @@ class AnswerService:
                         }
                     )
 
-            # 4) Build unified questions list (user-authored + application-linked), de-duped
+            # 4) Build unified favorite questions list (user-authored + application-linked), de-duped
             all_questions = list(user_questions)
             if application:
                 app_questions = (
@@ -198,6 +212,7 @@ class AnswerService:
                     .filter(
                         Question.application_id == application.id,
                         Question.id != question.id,
+                        Question.favorite == True,
                     )
                     .order_by(Question.created_at, Question.id)
                     .all()
