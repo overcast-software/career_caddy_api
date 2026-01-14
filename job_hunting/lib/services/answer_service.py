@@ -178,9 +178,12 @@ class AnswerService:
             # Convert to list for query
             question_ids_list = list(question_ids)
 
-            # 2) Get favorite answers for those questions (no limit)
+            # 2) Get answers for those questions with special logic:
+            # - Include favorite answers
+            # - Include non-favorite answers if the question is favorited and has only one answer
             if question_ids_list:
-                answers_query = (
+                # First get all favorite answers
+                favorite_answers = (
                     self.session.query(Answer)
                     .options(joinedload(Answer.question))
                     .filter(
@@ -191,8 +194,46 @@ class AnswerService:
                     .all()
                 )
 
+                # Track which questions already have favorite answers
+                questions_with_favorite_answers = {a.question_id for a in favorite_answers}
+                
+                # For favorited questions without favorite answers, check if they have only one answer
+                questions_without_favorite_answers = [
+                    qid for qid in question_ids_list 
+                    if qid not in questions_with_favorite_answers
+                ]
+                
+                additional_answers = []
+                if questions_without_favorite_answers:
+                    # Get count of answers per question for questions without favorite answers
+                    from sqlalchemy import func
+                    answer_counts = (
+                        self.session.query(Answer.question_id, func.count(Answer.id))
+                        .filter(Answer.question_id.in_(questions_without_favorite_answers))
+                        .group_by(Answer.question_id)
+                        .all()
+                    )
+                    
+                    # Find questions with exactly one answer
+                    single_answer_questions = [
+                        qid for qid, count in answer_counts if count == 1
+                    ]
+                    
+                    if single_answer_questions:
+                        # Get the single answers for these questions
+                        additional_answers = (
+                            self.session.query(Answer)
+                            .options(joinedload(Answer.question))
+                            .filter(Answer.question_id.in_(single_answer_questions))
+                            .order_by(Answer.created_at, Answer.id)
+                            .all()
+                        )
+
+                # Combine favorite answers and additional single answers
+                all_answers = favorite_answers + additional_answers
+
                 # 3) Assemble Q&A pairs
-                for answer in answers_query:
+                for answer in all_answers:
                     qas.append(
                         {
                             "question": getattr(answer.question, "content", ""),
