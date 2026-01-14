@@ -323,7 +323,7 @@ class DjangoUserSerializer:
 class ResumeSerializer(BaseSASerializer):
     type = "resume"
     model = Resume
-    attributes = ["file_path", "title", "name", "notes", "user_id"]
+    attributes = ["file_path", "title", "name", "notes", "user_id", "favorite"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -539,7 +539,7 @@ class CompanySerializer(BaseSASerializer):
 class CoverLetterSerializer(BaseSASerializer):
     type = "cover-letter"
     model = CoverLetter
-    attributes = ["content", "created_at"]
+    attributes = ["content", "created_at", "favorite"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
@@ -940,7 +940,7 @@ class JobApplicationStatusSerializer(BaseSASerializer):
 class AnswerSerializer(BaseSASerializer):
     type = "answer"
     model = Answer
-    attributes = ["content", "created_at"]
+    attributes = ["content", "created_at", "favorite"]
     relationships = {
         "question": {"attr": "question", "type": "question", "uselist": False},
     }
@@ -950,7 +950,7 @@ class AnswerSerializer(BaseSASerializer):
 class QuestionSerializer(BaseSASerializer):
     type = "question"
     model = Question
-    attributes = ["content", "created_at"]
+    attributes = ["content", "created_at", "favorite"]
     relationships = {
         "application": {
             "attr": "application",
