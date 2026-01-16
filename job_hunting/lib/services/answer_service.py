@@ -1,18 +1,19 @@
-from typing import Optional, List, Dict
 from datetime import datetime
+from typing import Dict, List, Optional
+
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import joinedload, selectinload
 
 from job_hunting.lib.models import (
     Answer,
-    Question,
     Application,
-    JobPost,
+    BaseModel,
     Company,
+    CoverLetter,
+    JobPost,
+    Question,
     Resume,
     User,
-    CoverLetter,
-    BaseModel,
 )
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
@@ -33,12 +34,13 @@ class AnswerService:
         self.temperature = temperature
         self.previous_limit = previous_limit  # None means no limit
         self.max_section_chars = max_section_chars
-        self.prompt_builder = ApplicationPromptBuilder(max_section_chars=self.max_section_chars)
+        self.prompt_builder = ApplicationPromptBuilder(
+            max_section_chars=self.max_section_chars
+        )
         self.question = None
 
     def _get_session(self):
         return BaseModel.get_session()
-
 
     def _load_context(self):
 
@@ -124,7 +126,7 @@ class AnswerService:
                     or_(
                         CoverLetter.user_id == user.id,
                         CoverLetter.resume.has(user_id=user.id),
-                    )
+                    ),
                 )
                 .order_by(desc(CoverLetter.created_at), desc(CoverLetter.id))
             )
@@ -152,13 +154,14 @@ class AnswerService:
             user_questions = (
                 self.session.query(Question)
                 .filter(
-                    Question.created_by_id == user.id, 
+                    Question.created_by_id == user.id,
                     Question.id != question.id,
-                    Question.favorite == True
+                    Question.favorite,
                 )
                 .order_by(Question.created_at, Question.id)
                 .all()
             )
+
             question_ids.update(q.id for q in user_questions)
 
             # Application-linked favorite questions (excluding current)
@@ -188,37 +191,43 @@ class AnswerService:
                     .options(joinedload(Answer.question))
                     .filter(
                         Answer.question_id.in_(question_ids_list),
-                        Answer.favorite == True
+                        Answer.favorite == True,
                     )
                     .order_by(Answer.created_at, Answer.id)
                     .all()
                 )
 
                 # Track which questions already have favorite answers
-                questions_with_favorite_answers = {a.question_id for a in favorite_answers}
-                
+                questions_with_favorite_answers = {
+                    a.question_id for a in favorite_answers
+                }
+
                 # For favorited questions without favorite answers, check if they have only one answer
                 questions_without_favorite_answers = [
-                    qid for qid in question_ids_list 
+                    qid
+                    for qid in question_ids_list
                     if qid not in questions_with_favorite_answers
                 ]
-                
+
                 additional_answers = []
                 if questions_without_favorite_answers:
                     # Get count of answers per question for questions without favorite answers
                     from sqlalchemy import func
+
                     answer_counts = (
                         self.session.query(Answer.question_id, func.count(Answer.id))
-                        .filter(Answer.question_id.in_(questions_without_favorite_answers))
+                        .filter(
+                            Answer.question_id.in_(questions_without_favorite_answers)
+                        )
                         .group_by(Answer.question_id)
                         .all()
                     )
-                    
+
                     # Find questions with exactly one answer
                     single_answer_questions = [
                         qid for qid, count in answer_counts if count == 1
                     ]
-                    
+
                     if single_answer_questions:
                         # Get the single answers for these questions
                         additional_answers = (
@@ -282,8 +291,6 @@ class AnswerService:
             "previous_qas": qas,  # Backward compatibility
             "question": question,
         }
-
-
 
     def _call_ai(self, prompt: str) -> str:
         messages = [

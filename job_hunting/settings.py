@@ -48,14 +48,16 @@ else:
 
 # Add frontend origins to CSRF trusted origins for cookie-based auth
 if DEBUG or not CSRF_TRUSTED_ORIGINS:
-    CSRF_TRUSTED_ORIGINS.extend([
-        "http://localhost:3000",
-        "http://localhost:4200", 
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:4200",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-    ])
+    CSRF_TRUSTED_ORIGINS.extend(
+        [
+            "http://localhost:3000",
+            "http://localhost:4200",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:4200",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+        ]
+    )
 
 USE_TZ = True
 
@@ -95,7 +97,11 @@ if DATABASE_URL:
 else:
     # Default to localhost Postgres in development
     if DEBUG:
-        DATABASES = {"default": dj_database_url.parse("postgresql://postgres:postgres@localhost:5432/job_hunting")}
+        DATABASES = {
+            "default": dj_database_url.parse(
+                "postgresql://postgres:postgres@localhost:5432/job_hunting"
+            )
+        }
     else:
         # In production, DATABASE_URL must be set
         raise ImproperlyConfigured(
@@ -221,7 +227,11 @@ else:
     CORS_ALLOWED_ORIGIN_REGEXES = []
 
 # Whether to allow credentials (cookies/Authorization with CORS)
-CORS_ALLOW_CREDENTIALS = os.environ.get("CORS_ALLOW_CREDENTIALS", "True").lower() in ("true", "1", "yes")
+CORS_ALLOW_CREDENTIALS = os.environ.get("CORS_ALLOW_CREDENTIALS", "True").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-user-id",
