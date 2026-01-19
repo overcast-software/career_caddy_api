@@ -2902,8 +2902,6 @@ class ScrapeViewSet(BaseSAViewSet):
         # Lazy import to avoid hard dependency at module import time
         from job_hunting.lib.remote_playwright_client import RpcPlaywrightClient
 
-        # Lazy import to avoid heavy deps at module import time
-
         client = get_client(required=False)
         if client is None:
             return Response(
