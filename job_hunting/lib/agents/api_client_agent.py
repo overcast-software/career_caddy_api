@@ -246,6 +246,118 @@ async def get_companies(ctx: RunContext[APIContext]) -> APIResponse:
 
 
 @api_agent.tool
+async def get_favorite_resume(ctx: RunContext[APIContext]) -> APIResponse:
+    """Get the user's first/favorite resume."""
+    try:
+        if not ctx.deps.access_token:
+            return APIResponse(success=False, error="Not authenticated")
+
+        if not ctx.deps.client:
+            return APIResponse(success=False, error="HTTP client not initialized")
+
+        url = urljoin(ctx.deps.credentials.base_url, "/api/v1/resumes/")
+        response = await ctx.deps.client.get(url)
+
+        if response.status_code == 200:
+            data = response.json()
+            resumes = data.get("data", [])
+            if resumes:
+                # Return the first resume as the "favorite"
+                favorite = resumes[0]
+                return APIResponse(
+                    success=True, 
+                    data={"favorite_resume": favorite}, 
+                    status_code=response.status_code
+                )
+            else:
+                return APIResponse(
+                    success=False, 
+                    error="No resumes found", 
+                    status_code=404
+                )
+        else:
+            return APIResponse(
+                success=False,
+                error=f"Failed to fetch resumes: {response.status_code}",
+                status_code=response.status_code,
+            )
+
+    except Exception as e:
+        return APIResponse(success=False, error=f"Error fetching favorite resume: {str(e)}")
+
+
+@api_agent.tool
+async def create_score(
+    ctx: RunContext[APIContext],
+    job_post_id: int,
+    user_id: int,
+    resume_id: Optional[int] = None,
+) -> APIResponse:
+    """Create a job score. If resume_id is not provided, uses the user's favorite resume."""
+    try:
+        if not ctx.deps.access_token:
+            return APIResponse(success=False, error="Not authenticated")
+
+        if not ctx.deps.client:
+            return APIResponse(success=False, error="HTTP client not initialized")
+
+        # If no resume_id provided, get the favorite resume
+        if resume_id is None:
+            favorite_response = await get_favorite_resume(ctx)
+            if not favorite_response.success:
+                return APIResponse(
+                    success=False, 
+                    error=f"Could not get favorite resume: {favorite_response.error}"
+                )
+            
+            favorite_resume = favorite_response.data.get("favorite_resume")
+            if not favorite_resume:
+                return APIResponse(
+                    success=False, 
+                    error="No favorite resume available"
+                )
+            
+            resume_id = int(favorite_resume.get("id"))
+            
+            # Confirm with user about using favorite resume
+            resume_title = favorite_resume.get("attributes", {}).get("title", "Untitled")
+            confirmation_msg = f"No resume specified. Using your favorite resume: '{resume_title}' (ID: {resume_id}). Proceeding with score creation."
+            logger.info(confirmation_msg)
+
+        url = urljoin(ctx.deps.credentials.base_url, "/api/v1/scores/")
+
+        payload = {
+            "data": {
+                "type": "score",
+                "attributes": {},
+                "relationships": {
+                    "job-post": {"data": {"type": "job-post", "id": str(job_post_id)}},
+                    "user": {"data": {"type": "user", "id": str(user_id)}},
+                    "resume": {"data": {"type": "resume", "id": str(resume_id)}},
+                },
+            }
+        }
+
+        response = await ctx.deps.client.post(url, json=payload)
+
+        if response.status_code in [200, 201]:
+            return APIResponse(
+                success=True, data=response.json(), status_code=response.status_code
+            )
+        else:
+            return APIResponse(
+                success=False,
+                error=f"Failed to create score: {response.status_code}",
+                status_code=response.status_code,
+            )
+
+    except Exception as e:
+        return APIResponse(
+            success=False, error=f"Error creating score: {str(e)}"
+        )
+
+
+@api_agent.tool
 async def create_job_application(
     ctx: RunContext[APIContext],
     job_post_id: int,
@@ -367,6 +479,13 @@ async def example_usage():
         # Get job applications
         result = await api_agent.run("Show me my job applications", deps=context)
         print(f"Job applications: {result.output}")
+
+        # Example: Create a score (will use favorite resume if not specified)
+        result = await api_agent.run(
+            "Create a score for job post ID 1 and user ID 1", 
+            deps=context
+        )
+        print(f"Score creation result: {result.output}")
 
     finally:
         await cleanup_client(context)
