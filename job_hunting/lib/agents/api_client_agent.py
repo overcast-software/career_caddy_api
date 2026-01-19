@@ -5,6 +5,7 @@ Handles authentication and provides methods to interact with various endpoints.
 
 import asyncio
 import json
+import os
 import logging
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urljoin
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 class APICredentials(BaseModel):
     """Credentials for API authentication."""
+
     username: str
     password: str
     base_url: str = "http://localhost:8000"
@@ -25,8 +27,9 @@ class APICredentials(BaseModel):
 
 class APIContext(BaseModel):
     """Context for API operations."""
+
     model_config = {"arbitrary_types_allowed": True}
-    
+
     credentials: APICredentials
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
@@ -35,6 +38,7 @@ class APIContext(BaseModel):
 
 class APIResponse(BaseModel):
     """Standardized API response."""
+
     success: bool
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -47,12 +51,12 @@ api_agent = Agent(
     deps_type=APIContext,
     system_prompt="""
     You are an API client agent for a job hunting application. You can:
-    
+
     1. Authenticate with the API using JWT tokens
     2. Fetch and manage resumes, job applications, companies, and other resources
     3. Create, update, and delete resources through the API
     4. Handle API errors gracefully
-    
+
     Always use the provided HTTP client and maintain authentication state.
     Return structured responses with success/error status.
     """,
@@ -74,42 +78,40 @@ async def login(ctx: RunContext[APIContext]) -> APIResponse:
     try:
         if not ctx.deps.client:
             ctx.deps.client = httpx.AsyncClient()
-        
-        login_url = urljoin(ctx.deps.credentials.base_url, "/api/token/")
-        
+
+        login_url = urljoin(ctx.deps.credentials.base_url, "/api/v1/token/")
+
         response = await ctx.deps.client.post(
             login_url,
             json={
                 "username": ctx.deps.credentials.username,
                 "password": ctx.deps.credentials.password,
-            }
+            },
         )
-        
+
         if response.status_code == 200:
             tokens = response.json()
             ctx.deps.access_token = tokens.get("access")
             ctx.deps.refresh_token = tokens.get("refresh")
-            
+
             # Set authorization header for future requests
-            ctx.deps.client.headers.update({
-                "Authorization": f"Bearer {ctx.deps.access_token}"
-            })
-            
+            ctx.deps.client.headers.update(
+                {"Authorization": f"Bearer {ctx.deps.access_token}"}
+            )
+
             logger.info("Successfully authenticated with API")
             return APIResponse(
                 success=True,
                 data={"message": "Successfully authenticated"},
-                status_code=response.status_code
+                status_code=response.status_code,
             )
         else:
             error_msg = f"Authentication failed: {response.status_code}"
             logger.error(error_msg)
             return APIResponse(
-                success=False,
-                error=error_msg,
-                status_code=response.status_code
+                success=False, error=error_msg, status_code=response.status_code
             )
-            
+
     except Exception as e:
         error_msg = f"Login error: {str(e)}"
         logger.error(error_msg)
@@ -122,38 +124,37 @@ async def refresh_access_token(ctx: RunContext[APIContext]) -> APIResponse:
     try:
         if not ctx.deps.refresh_token:
             return APIResponse(success=False, error="No refresh token available")
-        
+
         if not ctx.deps.client:
             ctx.deps.client = httpx.AsyncClient()
-        
+
         refresh_url = urljoin(ctx.deps.credentials.base_url, "/api/token/refresh/")
-        
+
         response = await ctx.deps.client.post(
-            refresh_url,
-            json={"refresh": ctx.deps.refresh_token}
+            refresh_url, json={"refresh": ctx.deps.refresh_token}
         )
-        
+
         if response.status_code == 200:
             tokens = response.json()
             ctx.deps.access_token = tokens.get("access")
-            
+
             # Update authorization header
-            ctx.deps.client.headers.update({
-                "Authorization": f"Bearer {ctx.deps.access_token}"
-            })
-            
+            ctx.deps.client.headers.update(
+                {"Authorization": f"Bearer {ctx.deps.access_token}"}
+            )
+
             return APIResponse(
                 success=True,
                 data={"message": "Token refreshed successfully"},
-                status_code=response.status_code
+                status_code=response.status_code,
             )
         else:
             return APIResponse(
                 success=False,
                 error=f"Token refresh failed: {response.status_code}",
-                status_code=response.status_code
+                status_code=response.status_code,
             )
-            
+
     except Exception as e:
         return APIResponse(success=False, error=f"Token refresh error: {str(e)}")
 
@@ -164,26 +165,24 @@ async def get_resumes(ctx: RunContext[APIContext]) -> APIResponse:
     try:
         if not ctx.deps.access_token:
             return APIResponse(success=False, error="Not authenticated")
-        
+
         if not ctx.deps.client:
             return APIResponse(success=False, error="HTTP client not initialized")
-        
+
         url = urljoin(ctx.deps.credentials.base_url, "/api/v1/resumes/")
         response = await ctx.deps.client.get(url)
-        
+
         if response.status_code == 200:
             return APIResponse(
-                success=True,
-                data=response.json(),
-                status_code=response.status_code
+                success=True, data=response.json(), status_code=response.status_code
             )
         else:
             return APIResponse(
                 success=False,
                 error=f"Failed to fetch resumes: {response.status_code}",
-                status_code=response.status_code
+                status_code=response.status_code,
             )
-            
+
     except Exception as e:
         return APIResponse(success=False, error=f"Error fetching resumes: {str(e)}")
 
@@ -194,28 +193,28 @@ async def get_job_applications(ctx: RunContext[APIContext]) -> APIResponse:
     try:
         if not ctx.deps.access_token:
             return APIResponse(success=False, error="Not authenticated")
-        
+
         if not ctx.deps.client:
             return APIResponse(success=False, error="HTTP client not initialized")
-        
+
         url = urljoin(ctx.deps.credentials.base_url, "/api/v1/job-applications/")
         response = await ctx.deps.client.get(url)
-        
+
         if response.status_code == 200:
             return APIResponse(
-                success=True,
-                data=response.json(),
-                status_code=response.status_code
+                success=True, data=response.json(), status_code=response.status_code
             )
         else:
             return APIResponse(
                 success=False,
                 error=f"Failed to fetch job applications: {response.status_code}",
-                status_code=response.status_code
+                status_code=response.status_code,
             )
-            
+
     except Exception as e:
-        return APIResponse(success=False, error=f"Error fetching job applications: {str(e)}")
+        return APIResponse(
+            success=False, error=f"Error fetching job applications: {str(e)}"
+        )
 
 
 @api_agent.tool
@@ -224,84 +223,78 @@ async def get_companies(ctx: RunContext[APIContext]) -> APIResponse:
     try:
         if not ctx.deps.access_token:
             return APIResponse(success=False, error="Not authenticated")
-        
+
         if not ctx.deps.client:
             return APIResponse(success=False, error="HTTP client not initialized")
-        
+
         url = urljoin(ctx.deps.credentials.base_url, "/api/v1/companies/")
         response = await ctx.deps.client.get(url)
-        
+
         if response.status_code == 200:
             return APIResponse(
-                success=True,
-                data=response.json(),
-                status_code=response.status_code
+                success=True, data=response.json(), status_code=response.status_code
             )
         else:
             return APIResponse(
                 success=False,
                 error=f"Failed to fetch companies: {response.status_code}",
-                status_code=response.status_code
+                status_code=response.status_code,
             )
-            
+
     except Exception as e:
         return APIResponse(success=False, error=f"Error fetching companies: {str(e)}")
 
 
 @api_agent.tool
 async def create_job_application(
-    ctx: RunContext[APIContext], 
+    ctx: RunContext[APIContext],
     job_post_id: int,
     resume_id: int,
-    cover_letter_id: Optional[int] = None
+    cover_letter_id: Optional[int] = None,
 ) -> APIResponse:
     """Create a new job application."""
     try:
         if not ctx.deps.access_token:
             return APIResponse(success=False, error="Not authenticated")
-        
+
         if not ctx.deps.client:
             return APIResponse(success=False, error="HTTP client not initialized")
-        
+
         url = urljoin(ctx.deps.credentials.base_url, "/api/v1/job-applications/")
-        
+
         payload = {
             "data": {
                 "type": "job-application",
                 "attributes": {},
                 "relationships": {
-                    "job-post": {
-                        "data": {"type": "job-post", "id": str(job_post_id)}
-                    },
-                    "resume": {
-                        "data": {"type": "resume", "id": str(resume_id)}
-                    }
-                }
+                    "job-post": {"data": {"type": "job-post", "id": str(job_post_id)}},
+                    "resume": {"data": {"type": "resume", "id": str(resume_id)}},
+                },
             }
         }
-        
+
         if cover_letter_id:
             payload["data"]["relationships"]["cover-letter"] = {
                 "data": {"type": "cover-letter", "id": str(cover_letter_id)}
             }
-        
+
         response = await ctx.deps.client.post(url, json=payload)
-        
+
         if response.status_code in [200, 201]:
             return APIResponse(
-                success=True,
-                data=response.json(),
-                status_code=response.status_code
+                success=True, data=response.json(), status_code=response.status_code
             )
         else:
             return APIResponse(
                 success=False,
                 error=f"Failed to create job application: {response.status_code}",
-                status_code=response.status_code
+                status_code=response.status_code,
             )
-            
+
     except Exception as e:
-        return APIResponse(success=False, error=f"Error creating job application: {str(e)}")
+        return APIResponse(
+            success=False, error=f"Error creating job application: {str(e)}"
+        )
 
 
 @api_agent.tool
@@ -310,37 +303,37 @@ async def api_request(
     method: str,
     endpoint: str,
     data: Optional[Dict[str, Any]] = None,
-    params: Optional[Dict[str, Any]] = None
+    params: Optional[Dict[str, Any]] = None,
 ) -> APIResponse:
     """Make a generic API request."""
     try:
         if not ctx.deps.access_token:
             return APIResponse(success=False, error="Not authenticated")
-        
+
         if not ctx.deps.client:
             return APIResponse(success=False, error="HTTP client not initialized")
-        
+
         url = urljoin(ctx.deps.credentials.base_url, endpoint)
-        
+
         kwargs = {}
         if data:
             kwargs["json"] = data
         if params:
             kwargs["params"] = params
-        
+
         response = await ctx.deps.client.request(method.upper(), url, **kwargs)
-        
+
         try:
             response_data = response.json()
         except:
             response_data = {"text": response.text}
-        
+
         return APIResponse(
             success=response.status_code < 400,
             data=response_data,
-            status_code=response.status_code
+            status_code=response.status_code,
         )
-        
+
     except Exception as e:
         return APIResponse(success=False, error=f"API request error: {str(e)}")
 
@@ -355,26 +348,26 @@ async def cleanup_client(ctx: APIContext):
 async def example_usage():
     """Example of how to use the API agent."""
     credentials = APICredentials(
-        username="your_username",
-        password="your_password",
-        base_url="http://localhost:8000"
+        username=os.environ.get("USERNAME"),
+        password=os.environ.get("PASSWORD"),
+        base_url=os.environ.get("APP_URL", "http://localhost:8000"),
     )
-    
+
     context = APIContext(credentials=credentials)
-    
+
     try:
         # Login
         result = await api_agent.run("Please login to the API", deps=context)
-        print(f"Login result: {result.data}")
-        
+        print(f"Login result: {result.output}")
+
         # Get resumes
         result = await api_agent.run("Fetch all my resumes", deps=context)
-        print(f"Resumes: {result.data}")
-        
+        print(f"Resumes: {result.output}")
+
         # Get job applications
         result = await api_agent.run("Show me my job applications", deps=context)
-        print(f"Job applications: {result.data}")
-        
+        print(f"Job applications: {result.output}")
+
     finally:
         await cleanup_client(context)
 
