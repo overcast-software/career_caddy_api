@@ -472,20 +472,64 @@ async def example_usage():
         result = await api_agent.run("Please login to the API", deps=context)
         print(f"Login result: {result.output}")
 
-        # Get resumes
-        result = await api_agent.run("Fetch all my resumes", deps=context)
-        print(f"Resumes: {result.output}")
+        # Ask user for URL to scrape
+        url = input("Please enter a job posting URL to scrape: ").strip()
+        if not url:
+            print("No URL provided, skipping scrape example")
+            return
 
-        # Get job applications
-        result = await api_agent.run("Show me my job applications", deps=context)
-        print(f"Job applications: {result.output}")
-
-        # Example: Create a score (will use favorite resume if not specified)
+        # Create scrape request
+        scrape_payload = {
+            "data": {
+                "type": "scrape",
+                "attributes": {
+                    "url": url
+                }
+            }
+        }
+        
         result = await api_agent.run(
-            "Create a score for job post ID 1 and user ID 1", 
+            f"Create a scrape for the URL: {url}",
             deps=context
         )
-        print(f"Score creation result: {result.output}")
+        print(f"Scrape creation result: {result.output}")
+
+        # Wait a moment for processing
+        import asyncio
+        await asyncio.sleep(2)
+
+        # Get job posts to find the newly created one
+        result = await api_agent.run("Fetch all job posts", deps=context)
+        print(f"Job posts: {result.output}")
+        
+        # Extract job post ID from the response (assuming the newest one is what we want)
+        job_post_id = None
+        try:
+            # Parse the response to find job post ID
+            # This is a simplified approach - in practice you'd want more robust parsing
+            if "data" in str(result.output):
+                # Look for job post ID in the response
+                import re
+                id_matches = re.findall(r'"id":\s*"?(\d+)"?', str(result.output))
+                if id_matches:
+                    job_post_id = int(id_matches[-1])  # Get the last (newest) one
+        except Exception as e:
+            print(f"Error parsing job post ID: {e}")
+
+        if job_post_id:
+            print(f"Found job post ID: {job_post_id}")
+            
+            # Get user ID (assuming user ID 1 for this example)
+            user_id = 1
+            
+            # Create a score using the job post and favorite resume (resume_id will be auto-selected)
+            result = await api_agent.run(
+                f"Create a score for job post ID {job_post_id} and user ID {user_id}",
+                deps=context
+            )
+            print(f"Score creation result: {result.output}")
+        else:
+            print("Could not find job post ID from scrape result")
 
     finally:
         await cleanup_client(context)
