@@ -7,7 +7,7 @@ from markdownify import markdownify as md
 class GenericService:
     def __init__(self, url, ai_client, rpc_client=None, creds={}):
         self.url = url
-        self.creds = creds  # Not referenced
+        self.creds = creds
         self.rpc_client = rpc_client or RpcPlaywrightClient()
         self.parser = GenericParser(ai_client)
         self.scrape = None
@@ -17,7 +17,8 @@ class GenericService:
         
         if is_new or scrape.html is None:
             print("contents needs to be downloaded")
-            html = await self.rpc_client.get_html(self.url)
+            # Pass credentials to the new scraper API if available
+            html = await self.rpc_client.get_html(self.url, credentials=self.creds if self.creds else None)
             scrape.html = html
         else:
             print("contents already downloaded")
