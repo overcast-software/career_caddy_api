@@ -25,6 +25,8 @@ class APICredentials(BaseModel):
 
 class APIContext(BaseModel):
     """Context for API operations."""
+    model_config = {"arbitrary_types_allowed": True}
+    
     credentials: APICredentials
     access_token: Optional[str] = None
     refresh_token: Optional[str] = None
