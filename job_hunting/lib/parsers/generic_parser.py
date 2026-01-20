@@ -1,8 +1,45 @@
 from job_hunting.lib.models import Scrape, JobPost, Company
 import sys
 import json
+from datetime import datetime, date
+from typing import Optional
+from pydantic import BaseModel, Field, validator
 from jinja2 import Environment, FileSystemLoader
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
+
+
+class ParsedJobData(BaseModel):
+    """Pydantic model for validating parsed job data structure."""
+    title: str = Field(..., min_length=1, max_length=500, description="Job title")
+    company_name: str = Field(..., min_length=1, max_length=200, description="Company name")
+    company_display_name: Optional[str] = Field(None, max_length=200, description="Company display name")
+    description: Optional[str] = Field(None, description="Job description")
+    posted_date: Optional[datetime] = Field(None, description="Job posting date")
+    extraction_date: Optional[datetime] = Field(None, description="Data extraction date")
+    
+    @validator('title')
+    def validate_title(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Job title cannot be empty')
+        return v.strip()
+    
+    @validator('company_name')
+    def validate_company_name(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Company name cannot be empty')
+        return v.strip()
+    
+    @validator('company_display_name')
+    def validate_company_display_name(cls, v):
+        if v is not None:
+            return v.strip() if v.strip() else None
+        return v
+    
+    @validator('description')
+    def validate_description(cls, v):
+        if v is not None:
+            return v.strip() if v.strip() else None
+        return v
 
 
 class GenericParser:
@@ -13,34 +50,66 @@ class GenericParser:
 
     def parse(self, scrape: Scrape):
         job_description = self.analyze_html_with_ai(scrape)
-        evaluation = json.loads(job_description)
-        self.process_evaluation(scrape, evaluation)
+        try:
+            raw_evaluation = json.loads(job_description)
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse AI response as JSON: {e}")
+            print(f"Raw response: {job_description}")
+            raise ValueError(f"Invalid JSON response from AI: {e}")
+        
+        # Validate the parsed data using Pydantic
+        try:
+            validated_data = ParsedJobData(**raw_evaluation)
+        except Exception as e:
+            print(f"Data validation failed: {e}")
+            print(f"Raw data: {raw_evaluation}")
+            raise ValueError(f"Invalid job data structure: {e}")
+        
+        self.process_evaluation(scrape, validated_data)
 
-    def process_evaluation(self, scrape, evaluation):
+    def process_evaluation(self, scrape, validated_data: ParsedJobData):
         """
-        Push dom into chatgpt for evaluation
+        Process validated job data and save to database
         """
         try:
             print("*" * 88)
-            print("save off data")
+            print("save off validated data")
             print("*" * 88)
 
+            # Create or find company using validated data
             company, _ = Company.first_or_create(
-                name=evaluation["company_name"],
-                display_name=evaluation.get("company_display_name", None),
+                name=validated_data.company_name,
+                display_name=validated_data.company_display_name,
             )
             print(f"company id: {company.id}")
+            
+            # Prepare job post defaults with validated data
+            job_defaults = {}
+            if validated_data.description:
+                job_defaults["description"] = validated_data.description
+            if validated_data.posted_date:
+                job_defaults["posted_date"] = validated_data.posted_date
+            if validated_data.extraction_date:
+                job_defaults["extraction_date"] = validated_data.extraction_date
+            
+            # Create or find job post using validated data
             job, _ = JobPost.first_or_create(
-                title=evaluation["title"],
+                title=validated_data.title,
                 company_id=company.id,
-                defaults={"description": evaluation.get("description")},
+                defaults=job_defaults,
             )
             print(f"job post id: {job.id}")
+            
+            # Link scrape to job post
             scrape.job_post_id = job.id
             scrape.save()
+            
+            print(f"Successfully processed job: {validated_data.title} at {validated_data.company_name}")
+            
         except Exception as e:
-            print(e)
-            breakpoint()
+            print(f"Error processing validated evaluation: {e}")
+            print(f"Validated data: {validated_data.dict()}")
+            raise
 
     def analyze_html_with_ai(self, scrape: Scrape) -> str:
         # Load and render the template
