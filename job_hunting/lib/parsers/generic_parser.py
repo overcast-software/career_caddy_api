@@ -1,8 +1,12 @@
 from job_hunting.lib.models import Scrape, JobPost, Company
 import sys
+import os
 from datetime import datetime, date
 from typing import Optional
 from pydantic import BaseModel, Field, validator
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
+from pydantic_ai.providers.ollama import OllamaProvider
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
@@ -41,12 +45,33 @@ class ParsedJobData(BaseModel):
 
 
 class GenericParser:
-    def __init__(self, client):
+    def __init__(self, client=None):
         self.client = client
+        self.agent = None
 
     def parse(self, scrape: Scrape):
         validated_data = self.analyze_html_with_ai(scrape)
         self.process_evaluation(scrape, validated_data)
+
+    def get_agent(self):
+        """Get or create a Pydantic AI agent for structured job data extraction."""
+        if self.agent:
+            return self.agent
+            
+        # Prefer OpenAI if available; otherwise fall back to local Ollama
+        try:
+            if os.getenv("OPENAI_API_KEY"):
+                openai_model = OpenAIResponsesModel("gpt-4o")
+                return Agent(openai_model, output_type=ParsedJobData)
+        except Exception:
+            # Fall back to Ollama if OpenAI model initialization fails
+            pass
+
+        ollama_model = OpenAIChatModel(
+            model_name="qwen3-coder",
+            provider=OllamaProvider(base_url="http://localhost:11434/v1"),
+        )
+        return Agent(ollama_model, output_type=ParsedJobData)
 
     def process_evaluation(self, scrape, validated_data: ParsedJobData):
         """
@@ -101,13 +126,13 @@ class GenericParser:
             print(f"HTML too large ({len(content_to_analyze)} chars), using job_content instead")
             content_to_analyze = scrape.job_content
         
-        # Create a direct prompt without template
+        # Create a direct prompt for the agent
         prompt = f"""
 Extract job posting information from the following content and return structured data.
 
 Please extract:
 - Job title
-- Company name
+- Company name  
 - Company display name (if different from name)
 - Job description
 - Posted date (if available)
@@ -126,30 +151,15 @@ Content to analyze:
             },
         )
 
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a job posting data extraction bot. Extract structured job information from the provided content.",
-            },
-            {"role": "user", "content": prompt},
-        ]
+        # Get or create the agent
+        if self.agent is None:
+            self.agent = self.get_agent()
 
         try:
-            response = self.client.beta.chat.completions.parse(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=2000,
-                response_format=ParsedJobData
-            )
-            
-            # Extract the parsed content directly as a Pydantic model
-            parsed_data = response.choices[0].message.parsed
-            if parsed_data:
-                return parsed_data
-            
-            # Fallback: if parsing failed, raise an error
-            raise ValueError("AI failed to return structured data")
+            # Use the Pydantic AI agent to get structured output
+            result = self.agent.run_sync(prompt)
+            return result.output
             
         except Exception as e:
-            print(f"Error analyzing with ChatGPT: {e}")
+            print(f"Error analyzing with AI agent: {e}")
             raise
