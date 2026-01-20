@@ -133,76 +133,28 @@ class GenericParser:
             },
         )
 
-        # Create structured output schema for the AI
-        schema = {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Job title",
-                    "minLength": 1,
-                    "maxLength": 500
-                },
-                "company_name": {
-                    "type": "string", 
-                    "description": "Company name",
-                    "minLength": 1,
-                    "maxLength": 200
-                },
-                "company_display_name": {
-                    "type": ["string", "null"],
-                    "description": "Company display name (optional)",
-                    "maxLength": 200
-                },
-                "description": {
-                    "type": ["string", "null"],
-                    "description": "Job description (optional)"
-                },
-                "posted_date": {
-                    "type": ["string", "null"],
-                    "description": "Job posting date in ISO format (optional)"
-                },
-                "extraction_date": {
-                    "type": ["string", "null"], 
-                    "description": "Data extraction date in ISO format (optional)"
-                }
-            },
-            "required": ["title", "company_name"],
-            "additionalProperties": False
-        }
-
         messages = [
             {
                 "role": "system",
-                "content": "You are a bot that evaluates content of job posts to extract relevant data. Return only valid JSON that matches the required schema.",
+                "content": "You are a bot that evaluates content of job posts to extract relevant data. Return only valid JSON that matches the ParsedJobData structure.",
             },
             {"role": "user", "content": prompt},
         ]
 
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.beta.chat.completions.parse(
                 model="gpt-4o",
                 messages=messages,
                 max_tokens=2000,
-                response_format={"type": "json_object"},
-                tools=[{
-                    "type": "function",
-                    "function": {
-                        "name": "extract_job_data",
-                        "description": "Extract structured job posting data",
-                        "parameters": schema
-                    }
-                }],
-                tool_choice={"type": "function", "function": {"name": "extract_job_data"}}
+                response_format=ParsedJobData
             )
             
-            # Extract the function call result
-            if response.choices[0].message.tool_calls:
-                tool_call = response.choices[0].message.tool_calls[0]
-                if tool_call.function.name == "extract_job_data":
-                    return tool_call.function.arguments
+            # Extract the parsed content directly as a Pydantic model
+            parsed_data = response.choices[0].message.parsed
+            if parsed_data:
+                return parsed_data.model_dump_json()
             
-            # Fallback to regular content if no tool calls
+            # Fallback to regular content if parsing failed
             return response.choices[0].message.content.strip()
             
         except Exception as e:
