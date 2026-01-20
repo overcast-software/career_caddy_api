@@ -358,6 +358,77 @@ async def create_score(
 
 
 @api_agent.tool
+async def create_scrape(
+    ctx: RunContext[APIContext],
+    url: str,
+) -> APIResponse:
+    """Create a scrape request for the given URL."""
+    try:
+        if not ctx.deps.access_token:
+            return APIResponse(success=False, error="Not authenticated")
+
+        if not ctx.deps.client:
+            return APIResponse(success=False, error="HTTP client not initialized")
+
+        api_url = urljoin(ctx.deps.credentials.base_url, "/api/v1/scrapes/")
+
+        payload = {
+            "data": {
+                "type": "scrape",
+                "attributes": {
+                    "url": url
+                }
+            }
+        }
+
+        response = await ctx.deps.client.post(api_url, json=payload)
+
+        if response.status_code in [200, 201, 202]:
+            return APIResponse(
+                success=True, data=response.json(), status_code=response.status_code
+            )
+        else:
+            return APIResponse(
+                success=False,
+                error=f"Failed to create scrape: {response.status_code}",
+                status_code=response.status_code,
+            )
+
+    except Exception as e:
+        return APIResponse(
+            success=False, error=f"Error creating scrape: {str(e)}"
+        )
+
+
+@api_agent.tool
+async def get_job_posts(ctx: RunContext[APIContext]) -> APIResponse:
+    """Fetch all job posts."""
+    try:
+        if not ctx.deps.access_token:
+            return APIResponse(success=False, error="Not authenticated")
+
+        if not ctx.deps.client:
+            return APIResponse(success=False, error="HTTP client not initialized")
+
+        url = urljoin(ctx.deps.credentials.base_url, "/api/v1/job-posts/")
+        response = await ctx.deps.client.get(url)
+
+        if response.status_code == 200:
+            return APIResponse(
+                success=True, data=response.json(), status_code=response.status_code
+            )
+        else:
+            return APIResponse(
+                success=False,
+                error=f"Failed to fetch job posts: {response.status_code}",
+                status_code=response.status_code,
+            )
+
+    except Exception as e:
+        return APIResponse(success=False, error=f"Error fetching job posts: {str(e)}")
+
+
+@api_agent.tool
 async def create_job_application(
     ctx: RunContext[APIContext],
     job_post_id: int,
@@ -478,16 +549,7 @@ async def example_usage():
             print("No URL provided, skipping scrape example")
             return
 
-        # Create scrape request
-        scrape_payload = {
-            "data": {
-                "type": "scrape",
-                "attributes": {
-                    "url": url
-                }
-            }
-        }
-        
+        # Create scrape request using the API
         result = await api_agent.run(
             f"Create a scrape for the URL: {url}",
             deps=context
@@ -499,7 +561,7 @@ async def example_usage():
         await asyncio.sleep(2)
 
         # Get job posts to find the newly created one
-        result = await api_agent.run("Fetch all job posts", deps=context)
+        result = await api_agent.run("Get all job posts", deps=context)
         print(f"Job posts: {result.output}")
         
         # Extract job post ID from the response (assuming the newest one is what we want)
