@@ -112,9 +112,17 @@ class GenericParser:
             raise
 
     def analyze_html_with_ai(self, scrape: Scrape) -> str:
+        # Determine content to analyze - use job_content if HTML is too large
+        max_html_size = 50000  # Adjust this threshold as needed
+        content_to_analyze = scrape.html or ""
+        
+        if len(content_to_analyze) > max_html_size and scrape.job_content:
+            print(f"HTML too large ({len(content_to_analyze)} chars), using job_content instead")
+            content_to_analyze = scrape.job_content
+        
         # Load and render the template
         template = self.env.get_template("job_parser_prompt.j2")
-        prompt = template.render(html_content=scrape.html)
+        prompt = template.render(html_content=content_to_analyze)
 
         write_prompt_to_file(
             prompt,
@@ -125,19 +133,78 @@ class GenericParser:
             },
         )
 
+        # Create structured output schema for the AI
+        schema = {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Job title",
+                    "minLength": 1,
+                    "maxLength": 500
+                },
+                "company_name": {
+                    "type": "string", 
+                    "description": "Company name",
+                    "minLength": 1,
+                    "maxLength": 200
+                },
+                "company_display_name": {
+                    "type": ["string", "null"],
+                    "description": "Company display name (optional)",
+                    "maxLength": 200
+                },
+                "description": {
+                    "type": ["string", "null"],
+                    "description": "Job description (optional)"
+                },
+                "posted_date": {
+                    "type": ["string", "null"],
+                    "description": "Job posting date in ISO format (optional)"
+                },
+                "extraction_date": {
+                    "type": ["string", "null"], 
+                    "description": "Data extraction date in ISO format (optional)"
+                }
+            },
+            "required": ["title", "company_name"],
+            "additionalProperties": False
+        }
+
         messages = [
             {
                 "role": "system",
-                "content": "You are a bot that evaluates html of job posts to extract relevant data as JSON",
+                "content": "You are a bot that evaluates content of job posts to extract relevant data. Return only valid JSON that matches the required schema.",
             },
             {"role": "user", "content": prompt},
         ]
 
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4o", messages=messages, max_tokens=2000
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=2000,
+                response_format={"type": "json_object"},
+                tools=[{
+                    "type": "function",
+                    "function": {
+                        "name": "extract_job_data",
+                        "description": "Extract structured job posting data",
+                        "parameters": schema
+                    }
+                }],
+                tool_choice={"type": "function", "function": {"name": "extract_job_data"}}
             )
+            
+            # Extract the function call result
+            if response.choices[0].message.tool_calls:
+                tool_call = response.choices[0].message.tool_calls[0]
+                if tool_call.function.name == "extract_job_data":
+                    return tool_call.function.arguments
+            
+            # Fallback to regular content if no tool calls
             return response.choices[0].message.content.strip()
+            
         except Exception as e:
             print(f"Error analyzing with ChatGPT: {e}")
             raise
