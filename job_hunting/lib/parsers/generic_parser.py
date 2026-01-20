@@ -1,10 +1,8 @@
 from job_hunting.lib.models import Scrape, JobPost, Company
 import sys
-import json
 from datetime import datetime, date
 from typing import Optional
 from pydantic import BaseModel, Field, validator
-from jinja2 import Environment, FileSystemLoader
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
@@ -45,26 +43,9 @@ class ParsedJobData(BaseModel):
 class GenericParser:
     def __init__(self, client):
         self.client = client
-        # Set up Jinja2 environment
-        self.env = Environment(loader=FileSystemLoader("templates"))
 
     def parse(self, scrape: Scrape):
-        job_description = self.analyze_html_with_ai(scrape)
-        try:
-            raw_evaluation = json.loads(job_description)
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse AI response as JSON: {e}")
-            print(f"Raw response: {job_description}")
-            raise ValueError(f"Invalid JSON response from AI: {e}")
-        
-        # Validate the parsed data using Pydantic
-        try:
-            validated_data = ParsedJobData(**raw_evaluation)
-        except Exception as e:
-            print(f"Data validation failed: {e}")
-            print(f"Raw data: {raw_evaluation}")
-            raise ValueError(f"Invalid job data structure: {e}")
-        
+        validated_data = self.analyze_html_with_ai(scrape)
         self.process_evaluation(scrape, validated_data)
 
     def process_evaluation(self, scrape, validated_data: ParsedJobData):
@@ -111,7 +92,7 @@ class GenericParser:
             print(f"Validated data: {validated_data.dict()}")
             raise
 
-    def analyze_html_with_ai(self, scrape: Scrape) -> str:
+    def analyze_html_with_ai(self, scrape: Scrape) -> ParsedJobData:
         # Determine content to analyze - use job_content if HTML is too large
         max_html_size = 50000  # Adjust this threshold as needed
         content_to_analyze = scrape.html or ""
@@ -120,9 +101,21 @@ class GenericParser:
             print(f"HTML too large ({len(content_to_analyze)} chars), using job_content instead")
             content_to_analyze = scrape.job_content
         
-        # Load and render the template
-        template = self.env.get_template("job_parser_prompt.j2")
-        prompt = template.render(html_content=content_to_analyze)
+        # Create a direct prompt without template
+        prompt = f"""
+Extract job posting information from the following content and return structured data.
+
+Please extract:
+- Job title
+- Company name
+- Company display name (if different from name)
+- Job description
+- Posted date (if available)
+- Extraction date (current date/time)
+
+Content to analyze:
+{content_to_analyze}
+"""
 
         write_prompt_to_file(
             prompt,
@@ -136,7 +129,7 @@ class GenericParser:
         messages = [
             {
                 "role": "system",
-                "content": "You are a bot that evaluates content of job posts to extract relevant data. Return only valid JSON that matches the ParsedJobData structure.",
+                "content": "You are a job posting data extraction bot. Extract structured job information from the provided content.",
             },
             {"role": "user", "content": prompt},
         ]
@@ -152,10 +145,10 @@ class GenericParser:
             # Extract the parsed content directly as a Pydantic model
             parsed_data = response.choices[0].message.parsed
             if parsed_data:
-                return parsed_data.model_dump_json()
+                return parsed_data
             
-            # Fallback to regular content if parsing failed
-            return response.choices[0].message.content.strip()
+            # Fallback: if parsing failed, raise an error
+            raise ValueError("AI failed to return structured data")
             
         except Exception as e:
             print(f"Error analyzing with ChatGPT: {e}")
