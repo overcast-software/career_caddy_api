@@ -13,21 +13,7 @@ class GenericService:
         self.parser = GenericParser(ai_client)
         self.scrape = None
 
-    def process(self) -> Scrape:
-        try:
-            # Try to get the current event loop
-            loop = asyncio.get_running_loop()
-            # If we get here, there's already a running loop
-            # We need to run in a thread pool to avoid "already running" error
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, self._async_process())
-                return future.result()
-        except RuntimeError:
-            # No event loop is running, safe to use asyncio.run()
-            return asyncio.run(self._async_process())
-
-    async def _async_process(self) -> Scrape:
+    async def process(self) -> Scrape:
         scrape, is_new = Scrape.first_or_initialize(url=self.url)
 
         if is_new or scrape.html is None:

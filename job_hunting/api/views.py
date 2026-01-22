@@ -2922,8 +2922,7 @@ class ScrapeViewSet(BaseSAViewSet):
         )
 
         try:
-
-            scrape = service.process()
+            scrape = await service.process()
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to process URL: {e}"}]},
