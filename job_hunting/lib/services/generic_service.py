@@ -1,3 +1,4 @@
+import asyncio
 from job_hunting.lib.parsers.generic_parser import GenericParser
 from job_hunting.lib.remote_playwright_client import RpcPlaywrightClient
 from job_hunting.lib.models import Scrape
@@ -12,7 +13,10 @@ class GenericService:
         self.parser = GenericParser(ai_client)
         self.scrape = None
 
-    async def process(self) -> Scrape:
+    def process(self) -> Scrape:
+        return asyncio.run(self._async_process())
+
+    async def _async_process(self) -> Scrape:
         scrape, is_new = Scrape.first_or_initialize(url=self.url)
 
         scrape.html = None
