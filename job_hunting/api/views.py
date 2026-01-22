@@ -2886,7 +2886,7 @@ class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
-    async def create(self, request):
+    def create(self, request):
 
         # Check if scraping is enabled
         if not getattr(settings, "SCRAPING_ENABLED", False):
@@ -2922,7 +2922,7 @@ class ScrapeViewSet(BaseSAViewSet):
         )
 
         try:
-            scrape = await service.process()
+            scrape = service.process()
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to process URL: {e}"}]},

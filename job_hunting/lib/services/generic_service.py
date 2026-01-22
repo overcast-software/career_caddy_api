@@ -1,4 +1,3 @@
-import asyncio
 from job_hunting.lib.parsers.generic_parser import GenericParser
 from job_hunting.lib.remote_playwright_client import RpcPlaywrightClient
 from job_hunting.lib.models import Scrape
@@ -13,12 +12,13 @@ class GenericService:
         self.parser = GenericParser(ai_client)
         self.scrape = None
 
-    async def process(self) -> Scrape:
+    def process(self) -> Scrape:
         scrape, is_new = Scrape.first_or_initialize(url=self.url)
 
         if is_new or scrape.html is None:
             print("contents needs to be downloaded")
-            html = await self.rpc_client.get_html(self.url)
+            # Note: This will need to be updated when RpcPlaywrightClient is made synchronous
+            html = self.rpc_client.get_html(self.url)
             scrape.html = html
         else:
             print("contents already downloaded")
