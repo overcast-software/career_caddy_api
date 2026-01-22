@@ -2886,7 +2886,7 @@ class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
-    def create(self, request):
+    async def create(self, request):
 
         # Check if scraping is enabled
         if not getattr(settings, "SCRAPING_ENABLED", False):
