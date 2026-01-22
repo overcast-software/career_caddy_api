@@ -10,19 +10,19 @@ class RpcPlaywrightClient:
         )
         self.timeout = timeout
 
-    async def get_html(
+    def get_html(
         self, url: str, credentials: Optional[Dict[str, str]] = None
     ) -> Optional[str]:
         """Get HTML content from a URL using the new scraper API"""
-        return await self.scrape(url, format="html", credentials=credentials)
+        return self.scrape(url, format="html", credentials=credentials)
 
-    async def get_markdown(
+    def get_markdown(
         self, url: str, credentials: Optional[Dict[str, str]] = None
     ) -> Optional[str]:
         """Get markdown content from a URL using the new scraper API"""
-        return await self.scrape(url, format="markdown", credentials=credentials)
+        return self.scrape(url, format="markdown", credentials=credentials)
 
-    async def scrape(
+    def scrape(
         self,
         url: str,
         format: str = "html",
@@ -37,8 +37,8 @@ class RpcPlaywrightClient:
         if credentials:
             payload["credentials"] = credentials
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.base_url}/scrape", json=payload)
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(f"{self.base_url}/scrape", json=payload)
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
@@ -54,10 +54,10 @@ class RpcPlaywrightClient:
 
             return data.get("content")
 
-    async def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> Dict[str, Any]:
         """Check if the scraper service is healthy"""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.get(f"{self.base_url}/health")
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(f"{self.base_url}/health")
 
             if response.status_code != 200:
                 raise Exception(f"Health check failed: HTTP {response.status_code}")

@@ -17,7 +17,6 @@ class GenericService:
 
         if is_new or scrape.html is None:
             print("contents needs to be downloaded")
-            # Note: This will need to be updated when RpcPlaywrightClient is made synchronous
             html = self.rpc_client.get_html(self.url)
             scrape.html = html
         else:
