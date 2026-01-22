@@ -88,7 +88,7 @@ def healthcheck(request):
     """Simple health check endpoint that only reports system health."""
     if request.method == "GET":
         return JsonResponse({"healthy": True})
-    
+
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
@@ -109,8 +109,10 @@ def initialize(request):
             initialization_needed = True
         else:
             initialization_needed = user_count == 0
-            status_str = "initialized" if not initialization_needed else "needs_initialization"
-        
+            status_str = (
+                "initialized" if not initialization_needed else "needs_initialization"
+            )
+
         return JsonResponse(
             {
                 "initialization_needed": initialization_needed,
@@ -135,6 +137,7 @@ def initialize(request):
         # Parse request data
         try:
             import json
+
             data = json.loads(request.body.decode("utf-8") or "{}")
         except Exception:
             data = {}
@@ -174,8 +177,7 @@ def initialize(request):
             user.save()
         except Exception as e:
             return JsonResponse(
-                {"errors": [{"detail": f"Failed to create user: {str(e)}"}]}, 
-                status=400
+                {"errors": [{"detail": f"Failed to create user: {str(e)}"}]}, status=400
             )
 
         # Optionally set OpenAI API key
@@ -197,7 +199,7 @@ def initialize(request):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-            }
+            },
         }
         if meta:
             response_data["meta"] = meta
@@ -2920,12 +2922,8 @@ class ScrapeViewSet(BaseSAViewSet):
         )
 
         try:
-            try:
-                scrape = asyncio.run(service.process())
-            except RuntimeError:
-                # If an event loop is already running (e.g., under ASGI), use it
-                loop = asyncio.get_event_loop()
-                scrape = loop.run_until_complete(service.process())
+
+            scrape = service.process()
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to process URL: {e}"}]},
