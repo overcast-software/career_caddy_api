@@ -13,11 +13,9 @@ class GenericService:
         self.parser = GenericParser(ai_client)
         self.scrape = None
 
-    def process(self) -> Scrape:
-        return asyncio.run(self._async_process())
-
-    async def _async_process(self) -> Scrape:
+    async def process(self) -> Scrape:
         scrape, is_new = Scrape.first_or_initialize(url=self.url)
+        breakpoint()
 
         if is_new or scrape.html is None:
             print("contents needs to be downloaded")
