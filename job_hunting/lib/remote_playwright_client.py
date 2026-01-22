@@ -10,21 +10,30 @@ class RpcPlaywrightClient:
         )
         self.timeout = timeout
 
-    async def get_html(self, url: str, credentials: Optional[Dict[str, str]] = None) -> Optional[str]:
+    async def get_html(
+        self, url: str, credentials: Optional[Dict[str, str]] = None
+    ) -> Optional[str]:
         """Get HTML content from a URL using the new scraper API"""
         return await self.scrape(url, format="html", credentials=credentials)
 
-    async def get_markdown(self, url: str, credentials: Optional[Dict[str, str]] = None) -> Optional[str]:
+    async def get_markdown(
+        self, url: str, credentials: Optional[Dict[str, str]] = None
+    ) -> Optional[str]:
         """Get markdown content from a URL using the new scraper API"""
         return await self.scrape(url, format="markdown", credentials=credentials)
 
-    async def scrape(self, url: str, format: str = "html", credentials: Optional[Dict[str, str]] = None) -> Optional[str]:
+    async def scrape(
+        self,
+        url: str,
+        format: str = "html",
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
         """Scrape a URL and return content in the specified format"""
         payload = {
             "url": url,
             "format": format,
         }
-        
+
         if credentials:
             payload["credentials"] = credentials
 
@@ -49,8 +58,8 @@ class RpcPlaywrightClient:
         """Check if the scraper service is healthy"""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(f"{self.base_url}/health")
-            
+
             if response.status_code != 200:
                 raise Exception(f"Health check failed: HTTP {response.status_code}")
-                
+
             return response.json()
