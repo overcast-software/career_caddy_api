@@ -19,14 +19,13 @@ class GenericService:
     async def _async_process(self) -> Scrape:
         scrape, is_new = Scrape.first_or_initialize(url=self.url)
 
-        scrape.html = None
         if is_new or scrape.html is None:
             print("contents needs to be downloaded")
             html = await self.rpc_client.get_html(self.url)
-
             scrape.html = html
         else:
             print("contents already downloaded")
+            html = scrape.html
 
         # Convert to markdown
         scrape.job_content = md(html)
