@@ -261,11 +261,6 @@ class ApplicationPromptBuilder:
         if cover_letters_text:
             sections.append(f"## Cover Letters\n{cover_letters_text}")
 
-        # User Questions
-        questions_text = self._questions_text(context.get("questions", []))
-        if questions_text:
-            sections.append(f"## User Questions\n{questions_text}")
-
         # Q&A History
         qas_text = self._qas_text(context["qas"])
         if qas_text:

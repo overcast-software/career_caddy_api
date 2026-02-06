@@ -1,30 +1,44 @@
 import os
 import httpx
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 class RpcPlaywrightClient:
     def __init__(self, base_url: Optional[str] = None, timeout: float = 30.0):
         self.base_url = base_url or os.getenv(
-            "PLAYWRIGHT_RPC_URL", "http://localhost:3000/rpc"
+            "PLAYWRIGHT_RPC_URL", "http://localhost:8001"
         )
         self.timeout = timeout
-        self._request_id = 0
 
-    def _next_id(self) -> int:
-        self._request_id += 1
-        return self._request_id
+    def get_html(
+        self, url: str, credentials: Optional[Dict[str, str]] = None
+    ) -> Optional[str]:
+        """Get HTML content from a URL using the new scraper API"""
+        return self.scrape(url, format="html", credentials=credentials)
 
-    async def get_html(self, url: str) -> Optional[str]:
+    def get_markdown(
+        self, url: str, credentials: Optional[Dict[str, str]] = None
+    ) -> Optional[str]:
+        """Get markdown content from a URL using the new scraper API"""
+        return self.scrape(url, format="markdown", credentials=credentials)
+
+    def scrape(
+        self,
+        url: str,
+        format: str = "html",
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        """Scrape a URL and return content in the specified format"""
         payload = {
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "getHTML",
-            "params": {"url": url},
+            "url": url,
+            "format": format,
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(self.base_url, json=payload)
+        if credentials:
+            payload["credentials"] = credentials
+
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(f"{self.base_url}/scrape", json=payload)
 
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}: {response.text}")
@@ -34,15 +48,18 @@ class RpcPlaywrightClient:
             except Exception as e:
                 raise Exception(f"Invalid JSON response: {e}")
 
-            if "error" in data:
-                error = data["error"]
-                message = error.get("message", "Unknown error")
-                raise Exception(f"JSON-RPC error: {message}")
+            if not data.get("success", False):
+                error_msg = data.get("error", "Unknown error")
+                raise Exception(f"Scraper error: {error_msg}")
 
-            result = data.get("result")
-            if isinstance(result, str):
-                return result
-            elif isinstance(result, dict) and "html" in result:
-                return result["html"]
-            else:
-                return None
+            return data.get("content")
+
+    def health_check(self) -> Dict[str, Any]:
+        """Check if the scraper service is healthy"""
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(f"{self.base_url}/health")
+
+            if response.status_code != 200:
+                raise Exception(f"Health check failed: HTTP {response.status_code}")
+
+            return response.json()

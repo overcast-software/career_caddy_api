@@ -24,6 +24,7 @@ from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.lib.services.answer_service import AnswerService
 
 from job_hunting.lib.models import (
+    ApiKey,
     Resume,
     Score,
     Scrape,
@@ -50,6 +51,7 @@ from job_hunting.lib.models import (
 )
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
+    ApiKeySerializer,
     DjangoUserSerializer,
     ResumeSerializer,
     ScoreSerializer,
@@ -88,7 +90,7 @@ def healthcheck(request):
     """Simple health check endpoint that only reports system health."""
     if request.method == "GET":
         return JsonResponse({"healthy": True})
-    
+
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
@@ -109,8 +111,10 @@ def initialize(request):
             initialization_needed = True
         else:
             initialization_needed = user_count == 0
-            status_str = "initialized" if not initialization_needed else "needs_initialization"
-        
+            status_str = (
+                "initialized" if not initialization_needed else "needs_initialization"
+            )
+
         return JsonResponse(
             {
                 "initialization_needed": initialization_needed,
@@ -135,6 +139,7 @@ def initialize(request):
         # Parse request data
         try:
             import json
+
             data = json.loads(request.body.decode("utf-8") or "{}")
         except Exception:
             data = {}
@@ -174,8 +179,7 @@ def initialize(request):
             user.save()
         except Exception as e:
             return JsonResponse(
-                {"errors": [{"detail": f"Failed to create user: {str(e)}"}]}, 
-                status=400
+                {"errors": [{"detail": f"Failed to create user: {str(e)}"}]}, status=400
             )
 
         # Optionally set OpenAI API key
@@ -197,7 +201,7 @@ def initialize(request):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-            }
+            },
         }
         if meta:
             response_data["meta"] = meta
@@ -1172,6 +1176,24 @@ class DjangoUserViewSet(viewsets.ViewSet):
         session = Summary.get_session()
         summaries = session.query(Summary).filter_by(user_id=user.id).all()
         data = [SummarySerializer().to_resource(s) for s in summaries]
+        return Response({"data": data})
+
+    @action(detail=True, methods=["get"], url_path="api-keys")
+    def api_keys(self, request, pk=None):
+        """Get API keys for a user"""
+        User = get_user_model()
+        try:
+            user = User.objects.get(id=int(pk))
+        except (User.DoesNotExist, ValueError):
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        # Only allow users to see their own API keys or staff to see any
+        if not request.user.is_staff and user.id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        session = ApiKey.get_session()
+        api_keys = session.query(ApiKey).filter_by(user_id=user.id).all()
+        data = [ApiKeySerializer().to_resource(k) for k in api_keys]
         return Response({"data": data})
 
     @action(
@@ -2902,8 +2924,6 @@ class ScrapeViewSet(BaseSAViewSet):
         # Lazy import to avoid hard dependency at module import time
         from job_hunting.lib.remote_playwright_client import RpcPlaywrightClient
 
-        # Lazy import to avoid heavy deps at module import time
-
         client = get_client(required=False)
         if client is None:
             return Response(
@@ -2922,12 +2942,7 @@ class ScrapeViewSet(BaseSAViewSet):
         )
 
         try:
-            try:
-                scrape = asyncio.run(service.process())
-            except RuntimeError:
-                # If an event loop is already running (e.g., under ASGI), use it
-                loop = asyncio.get_event_loop()
-                scrape = loop.run_until_complete(service.process())
+            scrape = service.process()
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to process URL: {e}"}]},
@@ -4173,6 +4188,114 @@ class DescriptionViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         data = [ExperienceSerializer().to_resource(e) for e in (obj.experiences or [])]
         return Response({"data": data})
+
+
+class ApiKeyViewSet(BaseSAViewSet):
+    model = ApiKey
+    serializer_class = ApiKeySerializer
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        """List API keys for the authenticated user"""
+        session = self.get_session()
+        items = session.query(self.model).filter_by(user_id=request.user.id).all()
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        """Get a specific API key"""
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        
+        # Verify ownership
+        if obj.user_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+        
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def create(self, request):
+        """Create a new API key"""
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        
+        name = attrs.get("name")
+        if not name:
+            return Response(
+                {"errors": [{"detail": "Name is required"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        expires_days = attrs.get("expires_days")
+        scopes = attrs.get("scopes", ["read", "write"])  # Default scopes
+        
+        try:
+            api_key_obj, plain_key = ApiKey.generate_key(
+                name=name,
+                user_id=request.user.id,
+                expires_days=expires_days,
+                scopes=scopes
+            )
+        except Exception as e:
+            return Response(
+                {"errors": [{"detail": f"Failed to create API key: {str(e)}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        ser = self.get_serializer()
+        resource = ser.to_resource(api_key_obj)
+        
+        # Include the plain key in the response (only time it's available)
+        resource["attributes"]["key"] = plain_key
+        
+        payload = {"data": resource}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([api_key_obj], include_rels, request)
+        
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    def destroy(self, request, pk=None):
+        """Revoke an API key"""
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response(status=204)
+        
+        # Verify ownership
+        if obj.user_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+        
+        obj.revoke()
+        return Response(status=204)
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        """Revoke an API key (alternative to DELETE)"""
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        
+        # Verify ownership
+        if obj.user_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+        
+        obj.revoke()
+        
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        return Response(payload)
 
 
 # Note: Ingest flow timeouts can be configured via:

@@ -5,6 +5,7 @@ import dateparser
 from django.contrib.auth import get_user_model
 
 from job_hunting.lib.models import (
+    ApiKey,
     Application,
     Certification,
     Company,
@@ -323,7 +324,7 @@ class DjangoUserSerializer:
 class ResumeSerializer(BaseSASerializer):
     type = "resume"
     model = Resume
-    attributes = ["file_path", "title", "name", "notes", "user_id"]
+    attributes = ["file_path", "title", "name", "notes", "user_id", "favorite"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -539,7 +540,7 @@ class CompanySerializer(BaseSASerializer):
 class CoverLetterSerializer(BaseSASerializer):
     type = "cover-letter"
     model = CoverLetter
-    attributes = ["content", "created_at"]
+    attributes = ["content", "created_at", "favorite"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
@@ -940,17 +941,56 @@ class JobApplicationStatusSerializer(BaseSASerializer):
 class AnswerSerializer(BaseSASerializer):
     type = "answer"
     model = Answer
-    attributes = ["content", "created_at"]
+    attributes = ["content", "created_at", "favorite"]
     relationships = {
         "question": {"attr": "question", "type": "question", "uselist": False},
     }
     relationship_fks = {"question": "question_id"}
 
 
+class ApiKeySerializer(BaseSASerializer):
+    type = "api-key"
+    model = ApiKey
+    attributes = ["name", "key_prefix", "is_active", "last_used_at", "expires_at", "created_at"]
+    relationships = {
+        "user": {"attr": "user", "type": "user", "uselist": False},
+    }
+    relationship_fks = {"user": "user_id"}
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # Add scopes to attributes
+        if hasattr(obj, "get_scopes"):
+            res["attributes"]["scopes"] = obj.get_scopes()
+        else:
+            res["attributes"]["scopes"] = []
+        
+        # Ensure user relationship linkage points to Django user
+        if hasattr(obj, "user_id") and obj.user_id:
+            res.setdefault("relationships", {})["user"] = {
+                "data": {"type": "user", "id": str(obj.user_id)},
+                "links": {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
+                },
+            }
+        return res
+
+    def get_related(self, obj, rel_name):
+        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
+            User = get_user_model()
+            try:
+                user = User.objects.get(id=obj.user_id)
+                return "user", [user]
+            except User.DoesNotExist:
+                return "user", []
+        return super().get_related(obj, rel_name)
+
+
 class QuestionSerializer(BaseSASerializer):
     type = "question"
     model = Question
-    attributes = ["content", "created_at"]
+    attributes = ["content", "created_at", "favorite"]
     relationships = {
         "application": {
             "attr": "application",
@@ -1038,6 +1078,7 @@ class QuestionSerializer(BaseSASerializer):
 
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
+    "api-key": ApiKeySerializer,
     "resume": ResumeSerializer,
     "score": ScoreSerializer,
     "job-post": JobPostSerializer,

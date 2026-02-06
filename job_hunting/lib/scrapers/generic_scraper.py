@@ -1,3 +1,4 @@
+# DO we want?
 from job_hunting.lib.models.scrape import Scrape
 from markdownify import markdownify as md
 
@@ -25,7 +26,7 @@ class GenericScraper:
             )
 
         # convert that shit to markdown
-        markdown_text = md(html_content or "")
+        markdown_text = md(html_content)
         scrape.job_content = markdown_text
         scrape.save()
-        yield scrape
+        return scrape

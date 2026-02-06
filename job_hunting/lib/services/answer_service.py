@@ -1,18 +1,19 @@
-from typing import Optional, List, Dict
 from datetime import datetime
+from typing import Dict, List, Optional
+
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import joinedload, selectinload
 
 from job_hunting.lib.models import (
     Answer,
-    Question,
     Application,
-    JobPost,
+    BaseModel,
     Company,
+    CoverLetter,
+    JobPost,
+    Question,
     Resume,
     User,
-    CoverLetter,
-    BaseModel,
 )
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
@@ -33,12 +34,13 @@ class AnswerService:
         self.temperature = temperature
         self.previous_limit = previous_limit  # None means no limit
         self.max_section_chars = max_section_chars
-        self.prompt_builder = ApplicationPromptBuilder(max_section_chars=self.max_section_chars)
+        self.prompt_builder = ApplicationPromptBuilder(
+            max_section_chars=self.max_section_chars
+        )
         self.question = None
 
     def _get_session(self):
         return BaseModel.get_session()
-
 
     def _load_context(self):
 
@@ -88,27 +90,31 @@ class AnswerService:
         elif job_post and hasattr(job_post, "company"):
             company = job_post.company
 
-        # Resolve resume(s)
+        # Resolve resume(s) (favorites only)
         resumes = []
         resume = None
         if user:
             resumes = (
                 self.session.query(Resume)
-                .filter_by(user_id=user.id)
+                .filter_by(user_id=user.id, favorite=True)
                 .order_by(desc(Resume.id))
                 .all()
             )
         if application and hasattr(application, "resume") and application.resume:
             resume = application.resume
-            if resume and all(r.id != getattr(resume, "id", None) for r in resumes):
+            # Only include application resume if it's a favorite or if no favorite resumes exist
+            if resume and getattr(resume, "favorite", False):
+                if all(r.id != getattr(resume, "id", None) for r in resumes):
+                    resumes.insert(0, resume)
+            elif not resumes:  # Fallback if no favorite resumes exist
                 resumes.insert(0, resume)
         else:
             resume = resumes[0] if resumes else None
 
-        # Retrieve cover letters
+        # Retrieve cover letters (favorites only)
         cover_letters = []
         if user:
-            # Get all cover letters for the user (owned by user OR associated to user's resumes)
+            # Get favorite cover letters for the user (owned by user OR associated to user's resumes)
             cover_letters_query = (
                 self.session.query(CoverLetter)
                 .options(
@@ -116,20 +122,22 @@ class AnswerService:
                     joinedload(CoverLetter.resume),
                 )
                 .filter(
+                    CoverLetter.favorite == True,
                     or_(
                         CoverLetter.user_id == user.id,
                         CoverLetter.resume.has(user_id=user.id),
-                    )
+                    ),
                 )
                 .order_by(desc(CoverLetter.created_at), desc(CoverLetter.id))
             )
             cover_letters.extend(cover_letters_query.all())
 
-        # Add application's cover letter if not already included
+        # Add application's cover letter if not already included and it's a favorite
         if (
             application
             and hasattr(application, "cover_letter")
             and application.cover_letter
+            and getattr(application.cover_letter, "favorite", False)
         ):
             app_cover_letter = application.cover_letter
             if not any(cl.id == app_cover_letter.id for cl in cover_letters):
@@ -142,22 +150,28 @@ class AnswerService:
             # 1) Build unified set of question IDs from multiple sources
             question_ids = set()
 
-            # User-authored questions (excluding current)
+            # User-authored favorite questions (excluding current)
             user_questions = (
                 self.session.query(Question)
-                .filter(Question.created_by_id == user.id, Question.id != question.id)
+                .filter(
+                    Question.created_by_id == user.id,
+                    Question.id != question.id,
+                    Question.favorite,
+                )
                 .order_by(Question.created_at, Question.id)
                 .all()
             )
+
             question_ids.update(q.id for q in user_questions)
 
-            # Application-linked questions (excluding current)
+            # Application-linked favorite questions (excluding current)
             if application:
                 app_questions = (
                     self.session.query(Question)
                     .filter(
                         Question.application_id == application.id,
                         Question.id != question.id,
+                        Question.favorite == True,
                     )
                     .order_by(Question.created_at, Question.id)
                     .all()
@@ -167,18 +181,68 @@ class AnswerService:
             # Convert to list for query
             question_ids_list = list(question_ids)
 
-            # 2) Get answers for those questions (no limit)
+            # 2) Get answers for those questions with special logic:
+            # - Include favorite answers
+            # - Include non-favorite answers if the question is favorited and has only one answer
             if question_ids_list:
-                answers_query = (
+                # First get all favorite answers
+                favorite_answers = (
                     self.session.query(Answer)
                     .options(joinedload(Answer.question))
-                    .filter(Answer.question_id.in_(question_ids_list))
+                    .filter(
+                        Answer.question_id.in_(question_ids_list),
+                        Answer.favorite == True,
+                    )
                     .order_by(Answer.created_at, Answer.id)
                     .all()
                 )
 
+                # Track which questions already have favorite answers
+                questions_with_favorite_answers = {
+                    a.question_id for a in favorite_answers
+                }
+
+                # For favorited questions without favorite answers, check if they have only one answer
+                questions_without_favorite_answers = [
+                    qid
+                    for qid in question_ids_list
+                    if qid not in questions_with_favorite_answers
+                ]
+
+                additional_answers = []
+                if questions_without_favorite_answers:
+                    # Get count of answers per question for questions without favorite answers
+                    from sqlalchemy import func
+
+                    answer_counts = (
+                        self.session.query(Answer.question_id, func.count(Answer.id))
+                        .filter(
+                            Answer.question_id.in_(questions_without_favorite_answers)
+                        )
+                        .group_by(Answer.question_id)
+                        .all()
+                    )
+
+                    # Find questions with exactly one answer
+                    single_answer_questions = [
+                        qid for qid, count in answer_counts if count == 1
+                    ]
+
+                    if single_answer_questions:
+                        # Get the single answers for these questions
+                        additional_answers = (
+                            self.session.query(Answer)
+                            .options(joinedload(Answer.question))
+                            .filter(Answer.question_id.in_(single_answer_questions))
+                            .order_by(Answer.created_at, Answer.id)
+                            .all()
+                        )
+
+                # Combine favorite answers and additional single answers
+                all_answers = favorite_answers + additional_answers
+
                 # 3) Assemble Q&A pairs
-                for answer in answers_query:
+                for answer in all_answers:
                     qas.append(
                         {
                             "question": getattr(answer.question, "content", ""),
@@ -190,7 +254,7 @@ class AnswerService:
                         }
                     )
 
-            # 4) Build unified questions list (user-authored + application-linked), de-duped
+            # 4) Build unified favorite questions list (user-authored + application-linked), de-duped
             all_questions = list(user_questions)
             if application:
                 app_questions = (
@@ -198,6 +262,7 @@ class AnswerService:
                     .filter(
                         Question.application_id == application.id,
                         Question.id != question.id,
+                        Question.favorite == True,
                     )
                     .order_by(Question.created_at, Question.id)
                     .all()
@@ -226,8 +291,6 @@ class AnswerService:
             "previous_qas": qas,  # Backward compatibility
             "question": question,
         }
-
-
 
     def _call_ai(self, prompt: str) -> str:
         messages = [

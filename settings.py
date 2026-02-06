@@ -63,40 +63,57 @@ except Exception:
     STATIC_URL = "static/"
 
 # Merge/extend ALLOWED_HOSTS, CORS, and CSRF from env with sensible defaults
-ALLOWED_HOSTS = list(set(
-    (globals().get("ALLOWED_HOSTS") or []) +
-    [h for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h] +
-    ["api.careercaddy.online"]
-))
+ALLOWED_HOSTS = list(
+    set(
+        (globals().get("ALLOWED_HOSTS") or [])
+        + [h for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h]
+        + ["api.careercaddy.online"]
+    )
+)
 
-CORS_ALLOWED_ORIGINS = list(set(
-    (globals().get("CORS_ALLOWED_ORIGINS") or []) +
-    [o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()] +
-    ([os.environ.get("CORS_ALLOWED_ORIGIN").strip()] if os.environ.get("CORS_ALLOWED_ORIGIN") else []) +
-    ["https://careercaddy.online"]
-))
+CORS_ALLOWED_ORIGINS = list(
+    set(
+        (globals().get("CORS_ALLOWED_ORIGINS") or [])
+        + [
+            o.strip()
+            for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",")
+            if o.strip()
+        ]
+        + (
+            [os.environ.get("CORS_ALLOWED_ORIGIN").strip()]
+            if os.environ.get("CORS_ALLOWED_ORIGIN")
+            else []
+        )
+        + ["https://careercaddy.online"]
+    )
+)
 
 # Add development origins for CORS
 if os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes"):
-    CORS_ALLOWED_ORIGINS.extend([
-        "http://localhost:3000",
-        "http://localhost:4200", 
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:4200",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5173",  # Vite default
-        "http://127.0.0.1:5173",
-    ])
+    CORS_ALLOWED_ORIGINS.extend(
+        [
+            "http://localhost:3000",
+            "http://localhost:4200",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:4200",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://localhost:5173",  # Vite default
+            "http://127.0.0.1:5173",
+        ]
+    )
 
 # De-duplicate CORS origins
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys(CORS_ALLOWED_ORIGINS))
 
-CSRF_TRUSTED_ORIGINS = list(set(
-    (globals().get("CSRF_TRUSTED_ORIGINS") or []) +
-    [o for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if o] +
-    ["https://careercaddy.online", "https://api.careercaddy.online"]
-))
+CSRF_TRUSTED_ORIGINS = list(
+    set(
+        (globals().get("CSRF_TRUSTED_ORIGINS") or [])
+        + [o for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if o]
+        + ["https://careercaddy.online", "https://api.careercaddy.online"]
+    )
+)
+
 
 def _build_db_from_env():
     db_url = os.environ.get("DATABASE_URL")
@@ -106,9 +123,12 @@ def _build_db_from_env():
             return {
                 "default": {
                     "ENGINE": "django.db.backends.postgresql",
-                    "NAME": parsed.path.lstrip("/") or os.environ.get("POSTGRES_DB", "job_hunting"),
-                    "USER": parsed.username or os.environ.get("POSTGRES_USER", "postgres"),
-                    "PASSWORD": parsed.password or os.environ.get("POSTGRES_PASSWORD", ""),
+                    "NAME": parsed.path.lstrip("/")
+                    or os.environ.get("POSTGRES_DB", "job_hunting"),
+                    "USER": parsed.username
+                    or os.environ.get("POSTGRES_USER", "postgres"),
+                    "PASSWORD": parsed.password
+                    or os.environ.get("POSTGRES_PASSWORD", ""),
                     "HOST": parsed.hostname or os.environ.get("POSTGRES_HOST", "db"),
                     "PORT": str(parsed.port or os.environ.get("POSTGRES_PORT", "5432")),
                 }
@@ -125,6 +145,7 @@ def _build_db_from_env():
             }
         }
     return None
+
 
 _env_db = _build_db_from_env()
 if _env_db:
