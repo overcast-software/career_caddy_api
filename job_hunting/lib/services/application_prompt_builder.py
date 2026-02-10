@@ -1,5 +1,7 @@
 from typing import Optional
 from datetime import datetime
+from job_hunting.lib.models import CareerData
+from jinja2 import Environment, FileSystemLoader
 
 
 class ApplicationPromptBuilder:
@@ -20,54 +22,13 @@ class ApplicationPromptBuilder:
         return str(val).strip()
 
     def _resume_text(self, resume):
+        env = Environment(loader=FileSystemLoader("templates"))
+        template = env.get_template("resume_markedown.j2")
         if not resume:
-            return ""
+            raise ValueError("Resume cannot be None")
 
-        try:
-            if hasattr(resume, "collated_content"):
-                content = resume.collated_content()
-                if content:
-                    return self._truncate(content, self.max_section_chars)
-        except Exception:
-            pass
-
-        try:
-            # Fallback to export context
-            context = resume.to_export_context()
-            parts = []
-
-            # Header
-            header = context.get("header", {})
-            if header.get("name"):
-                parts.append(f"Name: {header['name']}")
-            if header.get("title"):
-                parts.append(f"Title: {header['title']}")
-
-            # Summary
-            summary = context.get("summary", "").strip()
-            if summary:
-                parts.append(f"Summary: {summary}")
-
-            # Experiences (limit to 3-5 bullet points each)
-            experiences = context.get("experiences", [])
-            if experiences:
-                exp_parts = []
-                for exp in experiences[:5]:  # Limit experiences
-                    exp_text = f"{exp.get('title', '')} at {exp.get('company', '')}"
-                    if exp.get("date_range"):
-                        exp_text += f" ({exp['date_range']})"
-                    descriptions = exp.get("descriptions", [])[:3]  # Limit bullets
-                    if descriptions:
-                        exp_text += "\n" + "\n".join(
-                            f"- {desc}" for desc in descriptions
-                        )
-                    exp_parts.append(exp_text)
-                parts.append("Experience:\n" + "\n\n".join(exp_parts))
-
-            content = "\n\n".join(parts)
-            return self._truncate(content, self.max_section_chars)
-        except Exception:
-            return ""
+        context = resume.to_export_context()
+        template.render(resume=context)
 
     def _job_post_text(self, job_post):
         if not job_post:
@@ -211,6 +172,26 @@ class ApplicationPromptBuilder:
             if text:
                 pieces.append(f"{header}\n{text}")
         return "\n\n".join(pieces).strip()
+
+    def build_from_career_data(
+        self, context: CareerData, instructions: Optional[str] = None
+    ) -> str:
+        sections = []
+        if instructions is None:
+            instructions = (
+                "Answer the user's application question in clear, professional markdown. "
+                "Be concise, truthful, and specific to the job. If you need to assume, state assumptions briefly. "
+                "Use the provided contextual information to make a more personalized answer."
+            )
+        sections.append(instructions)
+        sections.append("#Resumes")
+        for resume in context.resumes:
+            resume_context = resume.to_export_context()
+            sections.append("##header")
+            sections.append(resume_context.get("header"))
+            sections.append("##summary")
+
+        sections.append(context.resumes)
 
     def build(self, context: dict, instructions: Optional[str] = None) -> str:
         sections = []

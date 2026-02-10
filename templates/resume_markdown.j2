@@ -1,32 +1,71 @@
 # {{ resume.user.name }}
-## {{ resume.title }}
-Email: {{ resume.user.email }}
+## {{resume.title }}
+Email: {{resume.user.email}}
+Phone: {{resume.user.phone}}
+{% if summary %}
+    ### Summary
+    {{ resume.summary_content }}
+{% endif %}
+{% if skills %}
+    ### Skills
+    {% if resume.language_skills %}
+        Languages: {{ resume.language_skills | join(", ") }}
+    {%- endif -%}
 
-{% if resume.active_skill %}
-### Skills
-- {{ resume.active_skill }}
+    {% if resume.database_skills %}
+        Databases: {{ resume.database_skills | join(", ")}}
+    {%- endif -%}
+
+    {% if resume.framework_skills %}
+        Frameworks: {{ resume.framework_skills | join(", ")}}
+    {%- endif -%}
+
+    {% if resume.tool_skills %}
+        Platforms: {{ resume.tool_skills | join(", ")}}
+    {%- endif -%}
+
+    {% if resume.security_skills %}
+        Security: {{ resume.security_skills | join(", ")}}
+    {%- endif -%}
+{%- endif -%}
+{% if resume.experiences %}
+    ### Experience
+    {% for experience in resume.experiences %}
+        {% if experience.date_range %}
+            {{ experience.date_range }}
+        {% endif %}
+        {% if experience.company %} — {{ experience.company.name }}{% endif %}{% if experience.location %} — {{ experience.location }}{% endif %}
+
+        {% if experience.summary %}
+            {{ experience.summary }}
+        {%- endif -%}
+
+        {% for d in experience.descriptions %}
+            - {{ d }}
+        {%- endfor -%}
+    {% endfor %}
 {% endif %}
 
-### Experience
-{% for experience in resume.experiences %}
-#### {{ experience.title }}
-- **Company:** {{ experience.company.name }}
-  * Description:
-    {% for description in experience.descriptions %}
-    - {{ description.content }}
+{% if resume.certifications %}
+    ### Certifications
+    {% for cert in resume.certifications %}
+        {{ cert.title }}{% if cert.issuer %} — {{ cert.issuer }}{% endif %}{% if cert.issue_date %} — {{ cert.issue_date }}{% endif %}
+        {% if cert.content %}{{ cert.content }}{% endif %}
     {% endfor %}
-{% endfor %}
+{% endif %}
 
-### Certifications
-{% for cert in resume.certifications %}
-- {{ cert.title }}{% if cert.issuer %} ({{ cert.issuer }}){% endif %}
-{% endfor %}
+{% if educations %}
+    ### Education
+    {% for edu in resume.educations %}
+        {{ edu.institution }}{% if edu.degree %} — {{ edu.degree }}{% endif %}{% if edu.major %} — {{ edu.major }}{% endif %}{% if edu.minor %} — Minor: {{ edu.minor }}{% endif %}{% if edu.issue_date %} — {{ edu.issue_date }}{% endif %}
+    {% endfor %}
+{% endif %}
 
-### Education
-{% for edu in resume.educations %}
-- **Degree:** {{ edu.degree }}
-- **Institution:** {{ edu.institution }}
-- **Major:** {{ edu.major }}
-- **Minor:** {{ edu.minor }}
-- **Issued Date:** {{ edu.issue_date }}
-{% endfor %}
+{% if resume.projects %}
+    ### Projects
+    {% for proj in resume.projects %}
+        {% for bullet in proj.description %}
+            - {{ bullet }}
+        {%- endfor -%}
+    {% endfor %}
+{% endif %}

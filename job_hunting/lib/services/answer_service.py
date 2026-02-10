@@ -42,8 +42,11 @@ class AnswerService:
     def _get_session(self):
         return BaseModel.get_session()
 
-    def _load_context(self):
+    def load_context(self):
+        pass
 
+    def load_context_for_question(self, question):
+        """Load context data for a given question. Can be used independently of AI generation."""
         # Reload question with relationships
         question = (
             self.session.query(Question)
@@ -56,11 +59,10 @@ class AnswerService:
                 joinedload(Question.user),
                 joinedload(Question.company),
             )
-            .filter_by(id=self.question.id)
+            .filter_by(id=question.id)
             .first()
         )
 
-        self.question = question
         if not question:
             question = self.question
 
@@ -291,6 +293,13 @@ class AnswerService:
             "previous_qas": qas,  # Backward compatibility
             "question": question,
         }
+
+    def _load_context(self):
+        """Load context for the current question. Used internally by generate_answer."""
+        if self.question:
+            return self.load_context_for_question(self.question)
+        else:
+            return self.load_context()
 
     def _call_ai(self, prompt: str) -> str:
         messages = [

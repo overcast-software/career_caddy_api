@@ -11,6 +11,7 @@ class CoverLetter(BaseModel):
     user_id = Column(Integer, ForeignKey("auth_user.id"))
     resume_id = Column(Integer, ForeignKey("resume.id"))
     job_post_id = Column(Integer, ForeignKey("job_post.id"))
+    company_id = Column(Integer, ForeignKey("company.id"))
     favorite = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -18,6 +19,7 @@ class CoverLetter(BaseModel):
     user = relationship("User", back_populates="cover_letters")
     resume = relationship("Resume", back_populates="cover_letters")
     job_post = relationship("JobPost", back_populates="cover_letters")
+    company = relationship("Company", back_populates="cover_letters")
     application = relationship(
         "Application", back_populates="cover_letter", uselist=False
     )

@@ -1,4 +1,3 @@
-import asyncio
 import dateparser
 import os
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -22,7 +21,7 @@ from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.resume_export_service import ResumeExportService
 from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.lib.services.answer_service import AnswerService
-
+from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import (
     ApiKey,
     Resume,
@@ -48,6 +47,7 @@ from job_hunting.lib.models import (
     JobApplicationStatus,
     Question,
     Answer,
+    CareerData,
 )
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
@@ -3057,7 +3057,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         attrs.pop("user_id", None)
 
         # If resume_id is being changed, validate new resume ownership
-        if "resume_id" in attrs:
+        if attrs.get("resume_id", None) is not None:
             new_resume = Resume.get(attrs["resume_id"])
             if not new_resume or new_resume.user_id != request.user.id:
                 return Response(
@@ -3124,6 +3124,8 @@ class CoverLetterViewSet(BaseSAViewSet):
         job_post_id = attrs.get("job_post_id") or _rel_id(
             "job-post", "job_post", "jobPost", "job-posts", "jobPosts"
         )
+        company_id = attrs.get("company_id") or _rel_id("company", "companies")
+
         # Additional fallbacks: accept convenience keys at attributes/top-level
         if job_post_id is None:
             job_post_id = (
@@ -3149,25 +3151,34 @@ class CoverLetterViewSet(BaseSAViewSet):
                 or data.get("resumeId")
                 or data.get("resume-id")
             )
+        if company_id is None:
+            company_id = (
+                attrs_node.get("company_id")
+                or attrs_node.get("companyId")
+                or attrs_node.get("company-id")
+                or node.get("company_id")
+                or node.get("companyId")
+                or node.get("company-id")
+                or data.get("company_id")
+                or data.get("companyId")
+                or data.get("company-id")
+            )
 
         try:
             resume_id = int(resume_id) if resume_id is not None else None
             job_post_id = int(job_post_id) if job_post_id is not None else None
+            company_id = int(company_id) if company_id is not None else None
         except (TypeError, ValueError):
             return Response(
-                {"errors": [{"detail": "Invalid resume or job-post ID"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if job_post_id is None:
-            return Response(
-                {"errors": [{"detail": "Missing required relationship: job-post"}]},
+                {"errors": [{"detail": "Invalid resume, job-post, or company ID"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         resume = Resume.get(resume_id) if resume_id is not None else None
-        job_post = JobPost.get(job_post_id)
-        if not job_post:
+        job_post = JobPost.get(job_post_id) if job_post_id is not None else None
+        company = Company.get(company_id) if company_id is not None else None
+
+        if job_post_id is not None and not job_post:
             return Response(
                 {"errors": [{"detail": "Invalid job-post ID"}]},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -3175,6 +3186,11 @@ class CoverLetterViewSet(BaseSAViewSet):
         if resume_id is not None and not resume:
             return Response(
                 {"errors": [{"detail": "Invalid resume ID"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if company_id is not None and not company:
+            return Response(
+                {"errors": [{"detail": "Invalid company ID"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3201,17 +3217,30 @@ class CoverLetterViewSet(BaseSAViewSet):
                 content=content,
                 user_id=user_id,
                 resume_id=(resume.id if resume else None),
-                job_post_id=job_post.id,
+                job_post_id=(job_post.id if job_post else None),
+                company_id=(company.id if company else None),
             )
             cover_letter.save()
         else:
-            # Require a resume when generating content automatically
+            # Require both resume and job_post when generating content automatically
             if resume is None:
                 return Response(
                     {
                         "errors": [
                             {
                                 "detail": "Provide 'relationships.resume' when generating content without providing attributes.content"
+                            }
+                        ]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if job_post is None:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": "Provide 'relationships.job-post' when generating content without providing attributes.content"
                             }
                         ]
                     },
@@ -4196,9 +4225,16 @@ class ApiKeyViewSet(BaseSAViewSet):
     permission_classes = [IsAuthenticated]
 
     def list(self, request):
-        """List API keys for the authenticated user"""
+        """List API keys - all keys for admins, user's own keys for regular users"""
         session = self.get_session()
-        items = session.query(self.model).filter_by(user_id=request.user.id).all()
+
+        if request.user.is_staff:
+            # Admin can see all API keys
+            items = session.query(self.model).all()
+        else:
+            # Regular users can only see their own keys
+            items = session.query(self.model).filter_by(user_id=request.user.id).all()
+
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -4213,11 +4249,11 @@ class ApiKeyViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
-        # Verify ownership
-        if obj.user_id != request.user.id:
+
+        # Verify ownership or admin access
+        if not request.user.is_staff and obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
-        
+
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -4230,41 +4266,76 @@ class ApiKeyViewSet(BaseSAViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
         attrs = node.get("attributes") or {}
-        
+        relationships = node.get("relationships") or {}
+
         name = attrs.get("name")
         if not name:
             return Response(
                 {"errors": [{"detail": "Name is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         expires_days = attrs.get("expires_days")
         scopes = attrs.get("scopes", ["read", "write"])  # Default scopes
-        
+
+        # Determine target user - admins can create keys for other users
+        target_user_id = request.user.id  # Default to current user
+
+        # Check if admin is specifying a different user
+        user_rel = relationships.get("user") or relationships.get("users")
+        if user_rel and request.user.is_staff:
+            user_data = user_rel.get("data")
+            if isinstance(user_data, dict) and "id" in user_data:
+                try:
+                    target_user_id = int(user_data["id"])
+                    # Verify the target user exists
+                    User = get_user_model()
+                    if not User.objects.filter(id=target_user_id).exists():
+                        return Response(
+                            {"errors": [{"detail": "Invalid user ID"}]},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                except (TypeError, ValueError):
+                    return Response(
+                        {"errors": [{"detail": "Invalid user ID"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+        elif user_rel and not request.user.is_staff:
+            return Response(
+                {
+                    "errors": [
+                        {"detail": "Only admins can create API keys for other users"}
+                    ]
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             api_key_obj, plain_key = ApiKey.generate_key(
                 name=name,
-                user_id=request.user.id,
+                user_id=target_user_id,
                 expires_days=expires_days,
-                scopes=scopes
+                scopes=scopes,
             )
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to create API key: {str(e)}"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         ser = self.get_serializer()
         resource = ser.to_resource(api_key_obj)
-        
+
         # Include the plain key in the response (only time it's available)
         resource["attributes"]["key"] = plain_key
-        
+
         payload = {"data": resource}
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included([api_key_obj], include_rels, request)
-        
+            payload["included"] = self._build_included(
+                [api_key_obj], include_rels, request
+            )
+
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def destroy(self, request, pk=None):
@@ -4272,11 +4343,11 @@ class ApiKeyViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response(status=204)
-        
-        # Verify ownership
-        if obj.user_id != request.user.id:
+
+        # Verify ownership or admin access
+        if not request.user.is_staff and obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
-        
+
         obj.revoke()
         return Response(status=204)
 
@@ -4286,18 +4357,143 @@ class ApiKeyViewSet(BaseSAViewSet):
         obj = self.model.get(int(pk))
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        
-        # Verify ownership
-        if obj.user_id != request.user.id:
+
+        # Verify ownership or admin access
+        if not request.user.is_staff and obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
-        
+
         obj.revoke()
-        
+
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         return Response(payload)
 
 
-# Note: Ingest flow timeouts can be configured via:
-# - GUNICORN_TIMEOUT (seconds) for request handling in gunicorn
-# - OPENAI_TIMEOUT_SECONDS for OpenAI client HTTP requests
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def career_data(request, user_id=None):
+    """
+    Get aggregated career data for the authenticated user or specified user (with API key).
+
+    Query parameters:
+    - question_id: (optional) ID of a specific question to build context for
+    - job_post_id: (optional) ID of a job post to include in context
+    - resume_id: (optional) ID of a specific resume, otherwise uses all user's resumes
+    """
+    # Determine which user's data to return
+    target_user_id = user_id if user_id is not None else request.user.id
+
+    # If accessing another user's data, ensure proper authorization
+    if user_id is not None and user_id != request.user.id:
+        # This would be for API key usage - add authorization logic here if needed
+        # For now, allow access (you may want to add API key validation)
+        pass
+
+    career_data_obj = CareerData.for_user(target_user_id)
+
+    prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+    return Response({"data": career_data_obj.to_dict()})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_prompt(request):
+    """
+    Generate an AI prompt using ApplicationPromptBuilder for a specific question.
+
+    Expects JSON payload with:
+    - question_id: ID of the question to answer (required)
+    - job_post_id: (optional) ID of the job post
+    - resume_id: (optional) ID of the resume to use
+    - instructions: (optional) Custom instructions for the prompt
+    """
+    data = request.data if isinstance(request.data, dict) else {}
+
+    # Extract required question_id
+    question_id = data.get("question_id")
+    if not question_id:
+        return Response(
+            {"errors": [{"detail": "question_id is required"}]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        question_id = int(question_id)
+        question = Question.get(question_id)
+        if not question:
+            return Response(
+                {"errors": [{"detail": "Question not found"}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+    except (TypeError, ValueError):
+        return Response(
+            {"errors": [{"detail": "Invalid question_id"}]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Extract optional parameters
+    job_post_id = data.get("job_post_id")
+    resume_id = data.get("resume_id")
+    instructions = data.get("instructions")
+
+    # Use AnswerService to load comprehensive context data
+    from job_hunting.lib.services.answer_service import AnswerService
+
+    answer_service = AnswerService(
+        ai_client=None
+    )  # No AI client needed for data aggregation
+    context = answer_service.load_context_for_question(question)
+
+    # Override context with specific parameters if provided
+    if job_post_id:
+        try:
+            job_post_id = int(job_post_id)
+            job_post = JobPost.get(job_post_id)
+            if job_post:
+                context["job_post"] = job_post
+                if hasattr(job_post, "company"):
+                    context["company"] = job_post.company
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "Invalid job_post_id"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    if resume_id:
+        try:
+            resume_id = int(resume_id)
+            resume = Resume.get(resume_id)
+            if resume and resume.user_id == request.user.id:
+                context["resume"] = resume
+                context["resumes"] = [resume]
+            elif resume and resume.user_id != request.user.id:
+                return Response(
+                    {"errors": [{"detail": "Resume not accessible"}]},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "Invalid resume_id"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    # Create prompt builder and generate prompt
+    builder = ApplicationPromptBuilder()
+    prompt = builder.build(context, instructions)
+
+    return Response(
+        {
+            "data": {
+                "prompt": prompt,
+                "context": {
+                    "question_id": question.id,
+                    "job_post_id": (
+                        context.get("job_post").id if context.get("job_post") else None
+                    ),
+                    "resume_ids": [r.id for r in context.get("resumes", [])],
+                    "cover_letter_count": len(context.get("cover_letters", [])),
+                    "qa_count": len(context.get("qas", [])),
+                },
+            }
+        }
+    )

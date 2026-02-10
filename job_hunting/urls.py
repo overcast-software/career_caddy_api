@@ -40,9 +40,12 @@ from job_hunting.api.views import (
     JobApplicationStatusViewSet,
     QuestionViewSet,
     AnswerViewSet,
+    ApiKeyViewSet,
     healthcheck,
     initialize,
     profile,
+    career_data,
+    generate_prompt,
 )
 
 router = routers.DefaultRouter(trailing_slash="/?")
@@ -63,6 +66,7 @@ router.register(r"statuses", StatusViewSet, basename="statuses")
 router.register(r"job-application-statuses", JobApplicationStatusViewSet, basename="job-application-statuses")
 router.register(r"questions", QuestionViewSet, basename="questions")
 router.register(r"answers", AnswerViewSet, basename="answers")
+router.register(r"api-keys", ApiKeyViewSet, basename="api-keys")
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -88,6 +92,9 @@ urlpatterns = [
     ),
     path("api/v1/me/", DjangoUserViewSet.as_view({"get": "me"}), name="me"),
     path("api/v1/profile/", profile, name="profile"),
+    path("api/v1/career-data/", career_data, name="career-data"),
+    path("api/v1/users/<int:user_id>/career-data/", career_data, name="user-career-data"),
+    path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
     path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/v1/token/verify/", TokenVerifyView.as_view(), name="token_verify"),

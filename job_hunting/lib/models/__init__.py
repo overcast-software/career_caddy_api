@@ -27,4 +27,5 @@ from .job_application_status import JobApplicationStatus
 from .question import Question
 from .answer import Answer
 from .api_key import ApiKey
+from .career_data import CareerData
 

@@ -18,31 +18,36 @@ class ApiKey(BaseModel):
     expires_at = Column(DateTime, nullable=True)
     scopes = Column(Text, nullable=True)  # JSON array of scopes
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
 
     @classmethod
-    def generate_key(cls, name: str, user_id: int, expires_days: int = None, scopes: list = None):
+    def generate_key(
+        cls, name: str, user_id: int, expires_days: int = None, scopes: list = None
+    ):
         """Generate a new API key"""
         # Generate a secure random key
         key = f"jh_{secrets.token_urlsafe(32)}"
-        
+
         # Create hash for storage
         key_hash = hashlib.sha256(key.encode()).hexdigest()
-        
+
         # Extract prefix for identification
         key_prefix = key[:12]
-        
+
         # Set expiration
         expires_at = None
         if expires_days:
             expires_at = datetime.utcnow() + timedelta(days=expires_days)
-        
+
         # Convert scopes to JSON string
         scopes_json = None
         if scopes:
             import json
+
             scopes_json = json.dumps(scopes)
-        
+
         # Create the API key record
         api_key = cls(
             name=name,
@@ -50,10 +55,10 @@ class ApiKey(BaseModel):
             key_prefix=key_prefix,
             user_id=user_id,
             expires_at=expires_at,
-            scopes=scopes_json
+            scopes=scopes_json,
         )
         api_key.save()
-        
+
         # Return the plain key (only time it's available)
         return api_key, key
 
