@@ -67,34 +67,37 @@ class ApiKey(BaseModel):
         """Authenticate an API key and return the associated user_id"""
         if not key or not key.startswith("jh_"):
             return None
-        
+
         # Hash the provided key
         key_hash = hashlib.sha256(key.encode()).hexdigest()
-        
+
         # Find the API key
         session = cls.get_session()
-        api_key = session.query(cls).filter_by(key_hash=key_hash, is_active=True).first()
-        
+        api_key = (
+            session.query(cls).filter_by(key_hash=key_hash, is_active=True).first()
+        )
+
         if not api_key:
             return None
-        
+
         # Check if expired
         if api_key.expires_at and api_key.expires_at < datetime.utcnow():
             return None
-        
+
         # Update last used timestamp
         api_key.last_used_at = datetime.utcnow()
         session.add(api_key)
         session.commit()
-        
+
         return api_key
 
     def get_scopes(self):
         """Get the scopes as a list"""
         if not self.scopes:
             return []
-        
+
         import json
+
         try:
             return json.loads(self.scopes)
         except (json.JSONDecodeError, TypeError):
@@ -118,7 +121,9 @@ class ApiKey(BaseModel):
             "key_prefix": self.key_prefix,
             "user_id": self.user_id,
             "is_active": self.is_active,
-            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_used_at": (
+                self.last_used_at.isoformat() if self.last_used_at else None
+            ),
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "scopes": self.get_scopes(),
             "created_at": self.created_at.isoformat() if self.created_at else None,
