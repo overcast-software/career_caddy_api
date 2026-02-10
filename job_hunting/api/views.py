@@ -4372,14 +4372,7 @@ class ApiKeyViewSet(BaseSAViewSet):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def career_data(request, user_id=None):
-    """
-    Get aggregated career data for the authenticated user or specified user (with API key).
-
-    Query parameters:
-    - question_id: (optional) ID of a specific question to build context for
-    - job_post_id: (optional) ID of a job post to include in context
-    - resume_id: (optional) ID of a specific resume, otherwise uses all user's resumes
-    """
+    # Get aggregated career data for the authenticated user or specified user (with API key).
     # Determine which user's data to return
     target_user_id = user_id if user_id is not None else request.user.id
 
@@ -4389,10 +4382,11 @@ def career_data(request, user_id=None):
         # For now, allow access (you may want to add API key validation)
         pass
 
-    career_data_obj = CareerData.for_user(target_user_id)
+    career_data = CareerData.for_user(target_user_id)
 
     prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
-    return Response({"data": career_data_obj.to_dict()})
+    career_data_prompt = prompt_builder.build_from_career_data(career_data)
+    return Response({"data": career_data_prompt})
 
 
 @api_view(["POST"])

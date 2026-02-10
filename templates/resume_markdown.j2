@@ -1,4 +1,4 @@
-# {{ resume.user.name }}
+## {{ resume.user.name }}
 ## {{resume.title }}
 Email: {{resume.user.email}}
 Phone: {{resume.user.phone}}
@@ -41,7 +41,7 @@ Phone: {{resume.user.phone}}
         {%- endif -%}
 
         {% for d in experience.descriptions %}
-            - {{ d }}
+            - {{ d.content }}
         {%- endfor -%}
     {% endfor %}
 {% endif %}
@@ -65,7 +65,7 @@ Phone: {{resume.user.phone}}
     ### Projects
     {% for proj in resume.projects %}
         {% for bullet in proj.description %}
-            - {{ bullet }}
+            - {{ bullet.content }}
         {%- endfor -%}
     {% endfor %}
 {% endif %}

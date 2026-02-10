@@ -23,12 +23,11 @@ class ApplicationPromptBuilder:
 
     def _resume_text(self, resume):
         env = Environment(loader=FileSystemLoader("templates"))
-        template = env.get_template("resume_markedown.j2")
+        template = env.get_template("resume_markdown.j2")
         if not resume:
             raise ValueError("Resume cannot be None")
 
-        context = resume.to_export_context()
-        template.render(resume=context)
+        return template.render(resume=resume)
 
     def _job_post_text(self, job_post):
         if not job_post:
@@ -117,21 +116,13 @@ class ApplicationPromptBuilder:
 
         return "\n".join(lines).strip()
 
-    def _qas_text(self, qas):
-        if not qas:
+    def _qas_text(self, answer):
+        if not answer:
             return ""
-
         lines = []
-        per_item_budget = max(1000, self.max_section_chars // 8)
-
-        for qa in qas:
-            question = self._truncate(qa.get("question", ""), per_item_budget)
-            answer = self._truncate(qa.get("answer", ""), per_item_budget)
-            if question and answer:
-                lines.append(f"Q: {question}")
-                lines.append(f"A: {answer}")
-                lines.append("")  # Empty line between Q&A pairs
-
+        lines.append(f"Q: {answer.question.content}")
+        lines.append(f"A: {answer.content}")
+        lines.append("")  # Empty line between Q&A pairs
         return "\n".join(lines).strip()
 
     def _questions_text(self, questions):
@@ -154,44 +145,31 @@ class ApplicationPromptBuilder:
         return "\n".join(lines).strip()
 
     def _resumes_text(self, resumes):
-        if not resumes:
+        if len(resumes) < 1:
             return ""
-        pieces = []
-        per_item_budget = max(3000, self.max_section_chars // max(1, len(resumes)))
-        for r in resumes:
-            header_bits = []
-            name = self._safe_str(getattr(r, "name", ""))
-            if name:
-                header_bits.append(name)
-            created_at = getattr(r, "created_at", None)
-            if isinstance(created_at, datetime):
-                header_bits.append(created_at.strftime("%Y-%m-%d"))
-            header = " | ".join(header_bits) if header_bits else "Resume"
-            text = self._resume_text(r)
-            text = self._truncate(text, per_item_budget)
-            if text:
-                pieces.append(f"{header}\n{text}")
-        return "\n\n".join(pieces).strip()
+        lines = []
+        for resume in resumes:
+            lines.append(self._resume_text(resume))
+        return "\n".join(lines).strip()
 
     def build_from_career_data(
-        self, context: CareerData, instructions: Optional[str] = None
+        self, context: CareerData, instructions: Optional[str] = ""
     ) -> str:
         sections = []
-        if instructions is None:
-            instructions = (
-                "Answer the user's application question in clear, professional markdown. "
-                "Be concise, truthful, and specific to the job. If you need to assume, state assumptions briefly. "
-                "Use the provided contextual information to make a more personalized answer."
-            )
         sections.append(instructions)
         sections.append("#Resumes")
         for resume in context.resumes:
-            resume_context = resume.to_export_context()
-            sections.append("##header")
-            sections.append(resume_context.get("header"))
-            sections.append("##summary")
+            sections.append(self._resume_text(resume))
 
-        sections.append(context.resumes)
+        sections.append("#Prior Questions and Answers")
+        for answer in context.answers:
+            sections.append(self._qas_text(answer))
+
+        sections.append("#Coverletters")
+        for cover_letter in context.cover_letters:
+            sections.append(cover_letter.content)
+            sections.append("")
+        return "\n".join(sections)
 
     def build(self, context: dict, instructions: Optional[str] = None) -> str:
         sections = []

@@ -8,31 +8,31 @@ class ApiKeyAuthentication(BaseAuthentication):
     """
     Custom authentication class for API keys in Django REST Framework.
     """
-
+    
     def authenticate(self, request):
         """
         Authenticate the request using API key.
         Returns a tuple of (user, api_key) if successful, None otherwise.
         """
         api_key = self._extract_api_key(request)
-
+        
         if not api_key:
             return None
-
+            
         # Authenticate with API key
         api_key_obj = ApiKey.authenticate(api_key)
         if not api_key_obj:
             raise AuthenticationFailed('Invalid API key')
-
+            
         # Get the user
         User = get_user_model()
         try:
             user = User.objects.get(id=api_key_obj.user_id)
         except User.DoesNotExist:
             raise AuthenticationFailed('User associated with API key not found')
-
+            
         return (user, api_key_obj)
-
+    
     def _extract_api_key(self, request):
         """Extract API key from various sources"""
         # 1. Authorization header
