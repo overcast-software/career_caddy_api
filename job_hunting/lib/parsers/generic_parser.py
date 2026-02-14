@@ -146,6 +146,10 @@ class GenericParser:
 
         for code in soup.find_all("code"):
             code.extract()
+
+        for img in soup.find_all("img"):
+            img.extract()
+
         cleaned_html = str(soup)
         scrape.job_content = md(cleaned_html)
         content_to_analyze = scrape.job_content

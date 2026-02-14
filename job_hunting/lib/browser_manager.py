@@ -1,6 +1,8 @@
 # BrowserManager
-# Sensible defaults for typical scraping
+# Standalone HTTP server for browser scraping
 import json
+import asyncio
+from aiohttp import web, ClientTimeout
 from playwright.async_api import async_playwright, TimeoutError
 
 
@@ -12,7 +14,7 @@ class BrowserManager:
         self.cookies_file = cookies_file
         self.page = None
 
-    async def start_browser(self, headless=True, navigation_timeout=30000):
+    async def start_browser(self, headless=False, navigation_timeout=30000):
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=headless)
         self.context = await self.browser.new_context()
@@ -57,3 +59,76 @@ class BrowserManager:
                 await self.context.add_cookies(cookies)
         except FileNotFoundError:
             pass
+
+    async def handle_scrape_request(self, request):
+        """Handle HTTP POST requests to scrape URLs"""
+        try:
+            data = await request.json()
+            url = data.get("url")
+            
+            if not url:
+                return web.json_response(
+                    {"error": "URL is required"}, 
+                    status=400
+                )
+            
+            print(f"Scraping URL: {url}")
+            html_content = await self.get_page_content(url)
+            
+            if html_content is None:
+                return web.json_response(
+                    {"error": "Failed to fetch content"}, 
+                    status=500
+                )
+            
+            return web.json_response({"html": html_content})
+            
+        except Exception as e:
+            print(f"Error handling scrape request: {e}")
+            return web.json_response(
+                {"error": str(e)}, 
+                status=500
+            )
+
+    async def start_server(self, port=8888):
+        """Start the HTTP server"""
+        app = web.Application()
+        app.router.add_post('/', self.handle_scrape_request)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        
+        site = web.TCPSite(runner, 'localhost', port)
+        await site.start()
+        
+        print(f"Browser service started on http://localhost:{port}")
+        return runner
+
+    async def run_server(self, port=8888):
+        """Run the complete browser service"""
+        # Start browser in non-headless mode
+        await self.start_browser(headless=False)
+        
+        # Start HTTP server
+        runner = await self.start_server(port)
+        
+        try:
+            # Keep server running
+            print("Browser service is running. Press Ctrl+C to stop.")
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            print("Shutting down browser service...")
+        finally:
+            await runner.cleanup()
+            await self.close_browser()
+
+
+async def main():
+    """Main entry point for running as standalone service"""
+    browser_manager = BrowserManager()
+    await browser_manager.run_server()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

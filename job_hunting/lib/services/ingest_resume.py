@@ -11,7 +11,6 @@ import tempfile
 from job_hunting.lib.parsers.docx_parser import DocxParser
 from datetime import date
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.settings import ModelSettings
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.models.openai import OpenAIResponsesModel
 from job_hunting.lib.models.experience import Experience
@@ -106,8 +105,7 @@ class EducationOut(BaseModel):
 
 
 class ProjectOut(BaseModel):
-    name: str
-    role: Optional[str] = None
+    title: str
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     bullets: list[str] = Field(default_factory=list)
@@ -353,17 +351,16 @@ class IngestResume:
         print("Creating projects...")
         for proj_data in parsed_resume.projects:
             project = Project(
-                name=proj_data.name,
-                role=proj_data.role,
+                title=proj_data.title,
                 start_date=self.parse_date(proj_data.start_date),
                 end_date=self.parse_date(proj_data.end_date),
+                user_id=user_id,
             )
             project.save()
 
             # Create project descriptions
             for bullet in proj_data.bullets:
-                desc = Description(content=bullet)
-                desc.save()
+                desc, _ = Description.first_or_create(content=bullet)
                 # Link description to project
                 # This assumes ProjectDescription is the linking table
                 ProjectDescription.first_or_create(
@@ -397,7 +394,6 @@ class IngestResume:
                 )
             except Exception as e:
                 print(e)
-                breakpoint()
 
         print("Resume data saved successfully!")
         print(result.usage())

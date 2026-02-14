@@ -13,7 +13,6 @@ class ProjectDescription(BaseModel):
         Integer, ForeignKey("description.id", ondelete="CASCADE"), nullable=False
     )
     order = Column(Integer)
-    content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

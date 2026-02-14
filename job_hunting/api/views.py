@@ -14,9 +14,9 @@ from rest_framework.parsers import JSONParser, MultiPartParser
 from .parsers import VndApiJSONParser
 from job_hunting.lib.scoring.job_scorer import JobScorer
 from job_hunting.lib.ai_client import get_client, set_api_key
+from job_hunting.lib.scraper import Scraper
 from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.lib.services.cover_letter_service import CoverLetterService
-from job_hunting.lib.services.generic_service import GenericService
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.resume_export_service import ResumeExportService
 from job_hunting.lib.services.ingest_resume import IngestResume
@@ -2921,28 +2921,20 @@ class ScrapeViewSet(BaseSAViewSet):
         if url is None and isinstance(data.get("data"), dict):
             url = (data["data"].get("attributes") or {}).get("url")
 
-        # Lazy import to avoid hard dependency at module import time
-        from job_hunting.lib.remote_playwright_client import RpcPlaywrightClient
+        # Use standalone browser service
+        import asyncio
 
-        client = get_client(required=False)
-        if client is None:
-            return Response(
-                {
-                    "errors": [
-                        {"detail": "AI client not configured. Set OPENAI_API_KEY."}
-                    ]
-                },
-                status=503,
+        async def run_scraper():
+            # Create scraper with browser service URL
+            browser_service_url = getattr(
+                settings, "BROWSER_SERVICE_URL", "http://localhost:8888"
             )
-
-        nav_timeout = int(getattr(settings, "SCRAPER_NAV_TIMEOUT_MS", 30000))
-        rpc_client = RpcPlaywrightClient(timeout=(nav_timeout / 1000.0))
-        service = GenericService(
-            url=url, ai_client=client, rpc_client=rpc_client, creds={}
-        )
+            scraper = Scraper(browser_service_url, url)
+            return await scraper.process()
 
         try:
-            scrape = service.process()
+            # Run the async scraper
+            scrape = asyncio.run(run_scraper())
         except Exception as e:
             return Response(
                 {"errors": [{"detail": f"Failed to process URL: {e}"}]},
@@ -3600,7 +3592,7 @@ class AnswerViewSet(BaseSAViewSet):
                 status=400,
             )
 
-        # Determine content and ai_assist flag
+        # Determine content, ai_assist flag, and injected_prompt
         content = attrs.get("content")
         if isinstance(content, str):
             content = content.strip()
@@ -3611,6 +3603,22 @@ class AnswerViewSet(BaseSAViewSet):
             or data.get("ai_assist")
             or attrs.get("ai_assist")
         )
+
+        # Extract injected prompt for AI assistance
+        injected_prompt = (
+            attrs_node.get("injected_prompt")
+            or attrs_node.get("prompt")
+            or node.get("injected_prompt")
+            or node.get("prompt")
+            or data.get("injected_prompt")
+            or data.get("prompt")
+            or attrs.get("injected_prompt")
+            or attrs.get("prompt")
+        )
+        if isinstance(injected_prompt, str):
+            injected_prompt = injected_prompt.strip()
+        else:
+            injected_prompt = None
 
         def _to_bool(v):
             if isinstance(v, bool):
@@ -3637,11 +3645,15 @@ class AnswerViewSet(BaseSAViewSet):
             try:
                 svc = AnswerService(client)
                 if hasattr(svc, "generate_answer"):
-                    # Try to call with save=True if supported
+                    # Try to call with save=True and injected_prompt if supported
                     try:
-                        result = svc.generate_answer(question=question, save=True)
+                        result = svc.generate_answer(question=question, save=True, injected_prompt=injected_prompt)
                     except TypeError:
-                        result = svc.generate_answer(question=question)
+                        # Fallback for older signature without injected_prompt
+                        try:
+                            result = svc.generate_answer(question=question, save=True)
+                        except TypeError:
+                            result = svc.generate_answer(question=question)
                 elif hasattr(svc, "answer_question"):
                     result = svc.answer_question(question)
                 else:

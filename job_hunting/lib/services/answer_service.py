@@ -343,10 +343,22 @@ class AnswerService:
 
         return ""
 
-    def generate_answer(self, question: Question, save=True) -> Answer:
+    def generate_answer(self, question: Question, save=True, injected_prompt=None) -> Answer:
         self.question = question
         context = self._load_context()
-        prompt = self.prompt_builder.build(context)
+        
+        # Build the base prompt
+        base_prompt = self.prompt_builder.build(context)
+        
+        # If there's an injected prompt, append it to the base prompt
+        if injected_prompt and isinstance(injected_prompt, str):
+            injected_prompt = injected_prompt.strip()
+            if injected_prompt:
+                prompt = f"{base_prompt}\n\nAdditional Instructions:\n{injected_prompt}"
+            else:
+                prompt = base_prompt
+        else:
+            prompt = base_prompt
 
         write_prompt_to_file(
             prompt,
