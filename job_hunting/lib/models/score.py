@@ -18,3 +18,10 @@ class Score(BaseModel):
     resume = relationship("Resume", back_populates="scores")
     job_post = relationship("JobPost", back_populates="scores")
     user = relationship("User", overlaps="scores")
+
+    @property
+    def company(self):
+        """Get the company for this score through job_post"""
+        if self.job_post:
+            return self.job_post.company
+        return None

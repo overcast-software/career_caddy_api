@@ -27,6 +27,14 @@ class JobPost(BaseModel):
     summaries = relationship("Summary", back_populates="job_post")
     cover_letters = relationship("CoverLetter", back_populates="job_post")
     applications = relationship("Application", back_populates="job_post")
+    questions = relationship(
+        "Question",
+        secondary="application",
+        primaryjoin="JobPost.id == Application.job_post_id",
+        secondaryjoin="Application.id == Question.application_id",
+        foreign_keys="[Application.job_post_id, Question.application_id]",
+        viewonly=True,
+    )
 
     @classmethod
     def from_json(

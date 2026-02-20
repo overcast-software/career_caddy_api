@@ -24,3 +24,9 @@ class Question(BaseModel):
     application = relationship("Application", back_populates="questions")
     company = relationship("Company")
     user = relationship("User", foreign_keys=[created_by_id])
+    @property
+    def job_post(self):
+        """Get the job post for this question through application"""
+        if self.application:
+            return self.application.job_post
+        return None

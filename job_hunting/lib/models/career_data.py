@@ -40,15 +40,6 @@ class CareerData:
         )
 
     # Favorite questions - filters to only favorite=True
-    @property
-    def favorite_questions(self):
-        from .question import Question
-
-        return (
-            self.session.query(Question)
-            .filter(Question.created_by_id == self.user_id, Question.favorite == True)
-            .all()
-        )
 
     # Favorite answers - through favorite questions, filters to only favorite=True answers
     @property
@@ -62,8 +53,7 @@ class CareerData:
             .join(Question, Answer.question_id == Question.id)
             .filter(
                 Question.created_by_id == self.user_id,
-                Question.favorite == True,
-                Answer.favorite == True,
+                Answer.favorite is True,
             )
             .all()
         )

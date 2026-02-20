@@ -384,7 +384,12 @@ class ResumeSerializer(BaseSASerializer):
             if hasattr(obj, "company") and obj.company:
                 return "company", [obj.company]
             # Fallback to job_post.company
-            elif hasattr(obj, "job_post") and obj.job_post and hasattr(obj.job_post, "company") and obj.job_post.company:
+            elif (
+                hasattr(obj, "job_post")
+                and obj.job_post
+                and hasattr(obj.job_post, "company")
+                and obj.job_post.company
+            ):
                 return "company", [obj.job_post.company]
             else:
                 return "company", []
@@ -399,6 +404,7 @@ class ScoreSerializer(BaseSASerializer):
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "user": {"attr": "user", "type": "user", "uselist": False},
+        "company": {"attr": "company", "type": "company", "uselist": False},
     }
     relationship_fks = {
         "resume": "resume_id",
@@ -468,8 +474,6 @@ class JobPostSerializer(BaseSASerializer):
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
-        "scores": {"attr": "scores", "type": "score", "uselist": True},
-        "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
         "cover-letters": {
             "attr": "cover_letters",
             "type": "cover-letter",
@@ -481,29 +485,9 @@ class JobPostSerializer(BaseSASerializer):
             "uselist": True,
         },
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
+        "questions": {"attr": "questions", "type": "question", "uselist": True},
     }
     relationship_fks = {"company": "company_id"}
-
-    def parse_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        out = super().parse_payload(payload)
-
-        # Remove created_at to prevent user from overwriting system timestamps
-        out.pop("created_at", None)
-
-        # Parse and validate datetime fields
-        if "posted_date" in out:
-            parsed_dt = _parse_datetime(out["posted_date"])
-            if parsed_dt is None and out["posted_date"]:
-                raise ValueError("Invalid posted_date")
-            out["posted_date"] = parsed_dt
-
-        if "extraction_date" in out:
-            parsed_dt = _parse_datetime(out["extraction_date"])
-            if parsed_dt is None and out["extraction_date"]:
-                raise ValueError("Invalid extraction_date")
-            out["extraction_date"] = parsed_dt
-
-        return out
 
 
 class ScrapeSerializer(BaseSASerializer):
@@ -533,7 +517,11 @@ class CompanySerializer(BaseSASerializer):
     relationships = {
         "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
         "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
-        "applications": {"attr": "applications", "type": "job-application", "uselist": True},
+        "job-applications": {
+            "attr": "applications",
+            "type": "job-application",
+            "uselist": True,
+        },
     }
 
 
@@ -568,14 +556,19 @@ class CoverLetterSerializer(BaseSASerializer):
                     "related": f"{_resource_base_path('user')}/{obj.user_id}",
                 },
             }
-        
+
         # Add company relationship via job_post fallback
         company_id = None
         if hasattr(obj, "company_id") and obj.company_id:
             company_id = obj.company_id
-        elif hasattr(obj, "job_post") and obj.job_post and hasattr(obj.job_post, "company_id") and obj.job_post.company_id:
+        elif (
+            hasattr(obj, "job_post")
+            and obj.job_post
+            and hasattr(obj.job_post, "company_id")
+            and obj.job_post.company_id
+        ):
             company_id = obj.job_post.company_id
-        
+
         if company_id:
             res.setdefault("relationships", {})["company"] = {
                 "data": {"type": "company", "id": str(company_id)},
@@ -592,7 +585,7 @@ class CoverLetterSerializer(BaseSASerializer):
                     "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/company",
                 },
             }
-        
+
         return res
 
     def get_related(self, obj, rel_name):
@@ -951,7 +944,14 @@ class AnswerSerializer(BaseSASerializer):
 class ApiKeySerializer(BaseSASerializer):
     type = "api-key"
     model = ApiKey
-    attributes = ["name", "key_prefix", "is_active", "last_used_at", "expires_at", "created_at"]
+    attributes = [
+        "name",
+        "key_prefix",
+        "is_active",
+        "last_used_at",
+        "expires_at",
+        "created_at",
+    ]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
     }
@@ -964,7 +964,7 @@ class ApiKeySerializer(BaseSASerializer):
             res["attributes"]["scopes"] = obj.get_scopes()
         else:
             res["attributes"]["scopes"] = []
-        
+
         # Ensure user relationship linkage points to Django user
         if hasattr(obj, "user_id") and obj.user_id:
             res.setdefault("relationships", {})["user"] = {
@@ -999,6 +999,7 @@ class QuestionSerializer(BaseSASerializer):
         },
         "company": {"attr": "company", "type": "company", "uselist": False},
         "user": {"attr": "user", "type": "user", "uselist": False},
+        "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "answers": {"attr": "answers", "type": "answer", "uselist": True},
     }
     relationship_fks = {

@@ -320,68 +320,63 @@ class BaseSAViewSet(viewsets.ViewSet):
         return out
 
     def _normalize_rel_for_serializer(self, name: str, serializer) -> str:
+        """
+        Normalize relationship names to match serializer relationship keys.
+        Frontend convention: dasherized singular model names (e.g., 'job-application')
+        Serializer convention: dasherized plural relationship keys (e.g., 'job-applications')
+        """
         rels = getattr(serializer, "relationships", {}) or {}
         rel_keys = set(rels.keys())
 
-        # Build candidate names in order of preference
-        candidates = []
+        # Direct match - return immediately if found
+        if name in rel_keys:
+            return name
 
-        # Base forms with hyphen/underscore variants
-        base_forms = [name, name.replace("-", "_"), name.replace("_", "-")]
+        # Convert to dasherized form if not already
+        dasherized = name.replace("_", "-")
+        if dasherized in rel_keys:
+            return dasherized
 
-        for base in base_forms:
-            candidates.append(base)
-
-            # Plural/singular variants for each base form
-            if base.endswith("ies"):
-                candidates.append(base[:-3] + "y")
-            elif base.endswith("y") and not base.endswith(
-                ("ay", "ey", "iy", "oy", "uy")
-            ):
-                candidates.append(base[:-1] + "ies")
-
-            if base.endswith("s") and len(base) > 1:
-                candidates.append(base[:-1])
-            elif not base.endswith("s"):
-                candidates.append(base + "s")
-
-        # Special mappings for common relationship names
-        special_mappings = {
-            "job-post": "job-post",
-            "job_post": "job-post",
-            "jobPost": "job-post",
-            "job-posts": "job-post",
-            "jobPosts": "job-post",
+        # Static mapping from frontend model names (singular) to backend relationship keys
+        MODEL_TO_RELATIONSHIP = {
+            # Plural relationships (to-many)
+            "answer": "answers",
+            "api-key": "api-keys",
+            "certification": "certifications",
+            "cover-letter": "cover-letters",
+            "description": "descriptions",
+            "education": "educations",
+            "experience": "experiences",
+            "job-application": "applications",
+            "job-post": "job-posts",
+            "question": "questions",
+            "resume": "resumes",
+            "score": "scores",
+            "scrape": "scrapes",
+            "skill": "skills",
+            "status": "statuses",
+            "summary": "summaries",
+            "user": "users",
+            
+            # Singular relationships (to-one) - map to themselves
+            "company": "company",
+            "career-data": "career-data",
         }
 
-        if name in special_mappings:
-            mapped = special_mappings[name]
-            if mapped in rel_keys:
-                candidates.insert(0, mapped)
+        # Look up in mapping - this is the primary normalization path
+        mapped = MODEL_TO_RELATIONSHIP.get(dasherized)
+        if mapped and mapped in rel_keys:
+            return mapped
 
-        # Return first candidate that exists in rel_keys
-        for candidate in candidates:
-            if candidate in rel_keys:
-                return candidate
-
-        # Fallback: if include segment looks like a type (e.g., 'job-application'),
-        # map it to the first relationship whose configured type matches.
+        # Fallback: check if the relationship type matches the requested name
         for rel_key, cfg in rels.items():
             rel_type = (cfg or {}).get("type")
-            if not rel_type:
-                continue
-            # Check exact and simple variants against the relationship type
-            type_variants = {
-                rel_type,
-                rel_type.replace("-", "_"),
-                rel_type.replace("_", "-"),
-                (rel_type + "s"),
-                (rel_type.replace("-", "_") + "s"),
-                (rel_type.replace("_", "-") + "s"),
-            }
-            if name in type_variants or any(c in type_variants for c in candidates):
+            if rel_type == name or rel_type == dasherized:
                 return rel_key
 
+        # No match found - return the mapped value if we have one, otherwise original
+        if mapped:
+            return mapped
         return name
 
     def _build_included(
@@ -2747,8 +2742,7 @@ class JobPostViewSet(BaseSAViewSet):
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
-        # Default to include applications if none specified
-        include_rels = self._parse_include(request) or ["applications"]
+        include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
@@ -2759,8 +2753,7 @@ class JobPostViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
-        # Default to include applications if none specified
-        include_rels = self._parse_include(request) or ["applications"]
+        include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
@@ -2906,6 +2899,19 @@ class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
+    def retrieve(self, request, pk=None):
+        """Get the current status of a scrape"""
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
     def create(self, request):
 
         # Check if scraping is enabled
@@ -2921,53 +2927,185 @@ class ScrapeViewSet(BaseSAViewSet):
         if url is None and isinstance(data.get("data"), dict):
             url = (data["data"].get("attributes") or {}).get("url")
 
-        # Use standalone browser service
-        import asyncio
-
-        async def run_scraper():
-            # Create scraper with browser service URL
-            browser_service_url = getattr(
-                settings, "BROWSER_SERVICE_URL", "http://localhost:8888"
-            )
-            scraper = Scraper(browser_service_url, url)
-            return await scraper.process()
-
-        try:
-            # Run the async scraper
-            scrape = asyncio.run(run_scraper())
-        except Exception as e:
+        if not url:
             return Response(
-                {"errors": [{"detail": f"Failed to process URL: {e}"}]},
-                status=status.HTTP_502_BAD_GATEWAY,
+                {"errors": [{"detail": "URL is required"}]},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Try to resolve the created/linked JobPost; if not available, return 202 with the scrape
+        # Check for existing scrape with the same URL
         session = self.get_session()
-        job_post = None
-        try:
-            job_post = scrape.job_post
-        except Exception:
-            job_post = None
-
-        if job_post:
-            job_post_serializer = TYPE_TO_SERIALIZER.get("job-post")()
-            resource = job_post_serializer.to_resource(job_post)
-            include_rels = self._parse_include(request)
-            payload = {"data": resource}
-            if include_rels:
-                payload["included"] = self._build_included(
-                    [job_post],
-                    include_rels,
-                    request,
-                    primary_serializer=job_post_serializer,
+        existing_scrape = session.query(Scrape).filter_by(url=url).first()
+        
+        # If there's an existing scrape that's pending or completed, return it
+        if existing_scrape:
+            if existing_scrape.state in ("pending", "processing"):
+                # Return the existing pending/processing scrape
+                scr_ser = self.get_serializer()
+                scrape_resource = scr_ser.to_resource(existing_scrape)
+                return Response(
+                    {
+                        "data": scrape_resource,
+                        "meta": {"message": "Scrape already in progress for this URL"}
+                    },
+                    status=status.HTTP_200_OK,
                 )
-            return Response(payload, status=status.HTTP_201_CREATED)
+            elif existing_scrape.state == "completed":
+                # Return the existing completed scrape
+                scr_ser = self.get_serializer()
+                scrape_resource = scr_ser.to_resource(existing_scrape)
+                return Response(
+                    {
+                        "data": scrape_resource,
+                        "meta": {"message": "Scrape already completed for this URL. Use the redo action to re-scrape."}
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            # If failed, we'll create a new scrape below
 
-        # Could not resolve a JobPost yet — return the Scrape so the client can track progress
-        ScrapeSerializer = TYPE_TO_SERIALIZER["scrape"]
-        scr_ser = ScrapeSerializer()
+        # Create a pending scrape record
+        scrape = Scrape(url=url, state="pending")
+        session.add(scrape)
+        session.commit()
+
+        # Start the scraping process in the background
+        import threading
+
+        # Capture the scrape_id to avoid session issues
+        scrape_id = scrape.id
+
+        def run_scraper_background():
+            try:
+                # Create a new session for the background thread
+                from job_hunting.lib.models.base import BaseModel
+                BaseModel.clear_session()
+                
+                browser_service_url = getattr(
+                    settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
+                )
+                scraper = Scraper(browser_service_url, url, scrape_id=scrape_id)
+                job_post_data = scraper.process()
+
+                # Update scrape record with success state
+                # The browser service should handle updating the scrape record
+                # but we can add a fallback here if needed
+            except Exception as e:
+                # Update scrape record with error state
+                try:
+                    from job_hunting.lib.models.base import BaseModel
+                    
+                    # Ensure we have a fresh session for error handling
+                    BaseModel.clear_session()
+                    session = BaseModel.get_session()
+                    scrape_obj = Scrape.get(scrape_id)
+                    if scrape_obj:
+                        scrape_obj.state = "failed"
+                        scrape_obj.error_message = str(e)
+                        session.add(scrape_obj)
+                        session.commit()
+                except Exception:
+                    pass
+                finally:
+                    # Clean up the background thread's session
+                    try:
+                        BaseModel.clear_session()
+                    except Exception:
+                        pass
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper_background, daemon=True)
+        thread.start()
+
+        # Return the pending scrape immediately
+        scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(scrape)
         return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"])
+    def redo(self, request, pk=None):
+        """Redo a scrape - resets state to pending and starts a new scrape process"""
+        
+        # Check if scraping is enabled
+        if not getattr(settings, "SCRAPING_ENABLED", False):
+            return Response(
+                {"errors": [{"detail": "Scraping functionality is disabled"}]},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+
+        obj = self.model.get(int(pk))
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        # Don't allow redo if already pending or processing
+        if obj.state in ("pending", "processing"):
+            return Response(
+                {"errors": [{"detail": f"Scrape is already {obj.state}"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Reset the scrape state
+        session = self.get_session()
+        obj.state = "pending"
+        obj.error_message = None
+        session.add(obj)
+        session.commit()
+
+        # Start the scraping process in the background
+        import threading
+
+        # Capture the scrape_id to avoid session issues
+        scrape_id = obj.id
+        url = obj.url
+
+        def run_scraper_background():
+            try:
+                # Create a new session for the background thread
+                from job_hunting.lib.models.base import BaseModel
+                BaseModel.clear_session()
+                
+                browser_service_url = getattr(
+                    settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
+                )
+                scraper = Scraper(browser_service_url, url, scrape_id=scrape_id)
+                job_post_data = scraper.process()
+
+            except Exception as e:
+                # Update scrape record with error state
+                try:
+                    from job_hunting.lib.models.base import BaseModel
+                    
+                    # Ensure we have a fresh session for error handling
+                    BaseModel.clear_session()
+                    session = BaseModel.get_session()
+                    scrape_obj = Scrape.get(scrape_id)
+                    if scrape_obj:
+                        scrape_obj.state = "failed"
+                        scrape_obj.error_message = str(e)
+                        session.add(scrape_obj)
+                        session.commit()
+                except Exception:
+                    pass
+                finally:
+                    # Clean up the background thread's session
+                    try:
+                        BaseModel.clear_session()
+                    except Exception:
+                        pass
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper_background, daemon=True)
+        thread.start()
+
+        # Return the updated scrape
+        scr_ser = self.get_serializer()
+        scrape_resource = scr_ser.to_resource(obj)
+        return Response(
+            {
+                "data": scrape_resource,
+                "meta": {"message": "Scrape restarted"}
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class CompanyViewSet(BaseSAViewSet):
@@ -3360,6 +3498,21 @@ class ApplicationViewSet(BaseSAViewSet):
     model = Application
     serializer_class = ApplicationSerializer
 
+    def pre_save_payload(self, request, attrs, creating):
+        """Automatically set user_id and company_id when creating applications"""
+        if creating:
+            # Set user_id from authenticated user
+            attrs["user_id"] = request.user.id
+
+            # Set company_id from job_post if job_post_id is provided
+            job_post_id = attrs.get("job_post_id")
+            if job_post_id:
+                job_post = JobPost.get(job_post_id)
+                if job_post and hasattr(job_post, "company_id") and job_post.company_id:
+                    attrs["company_id"] = job_post.company_id
+
+        return attrs
+
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -3647,7 +3800,11 @@ class AnswerViewSet(BaseSAViewSet):
                 if hasattr(svc, "generate_answer"):
                     # Try to call with save=True and injected_prompt if supported
                     try:
-                        result = svc.generate_answer(question=question, save=True, injected_prompt=injected_prompt)
+                        result = svc.generate_answer(
+                            question=question,
+                            save=True,
+                            injected_prompt=injected_prompt,
+                        )
                     except TypeError:
                         # Fallback for older signature without injected_prompt
                         try:
