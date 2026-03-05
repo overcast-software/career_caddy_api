@@ -85,24 +85,30 @@ class Resume(BaseModel):
             resume, _ = cls.first_or_create(file_path=path, user_id=user_id)
         return resume
 
+    @property
     def language_skills(self):
-        self.skills_by_type("Language")
+        return self.skills_by_type("Language")
 
+    @property
     def database_skills(self):
-        self.skills_by_type("Database")
+        return self.skills_by_type("Database")
 
+    @property
     def framework_skills(self):
-        self.skills_by_type("Framework")
+        return self.skills_by_type("Framework")
 
+    @property
     def tool_skills(self):
-        self.skills_by_type("Tools/Platform")
+        return self.skills_by_type("Tools/Platform")
 
+    @property
     def security_skills(self):
-        self.skills_by_type("Security")
+        return self.skills_by_type("Security")
 
     def skills_by_type(self, skill_type):
         return [skill for skill in self.skills if skill.skill_type == skill_type]
 
+    @property
     def active_summary(self) -> Optional["Summary"]:
         """Return the linked Summary where ResumeSummaries.active == True if present;
         otherwise the first linked summary; otherwise None."""
@@ -129,8 +135,8 @@ class Resume(BaseModel):
         return None
 
     def active_summary_content(self) -> str:
-        """Return content from active_summary() or empty string."""
-        summary = self.active_summary()
+        """Return content from active_summary or empty string."""
+        summary = self.active_summary
         if summary:
             return getattr(summary, "content", "") or ""
         return ""

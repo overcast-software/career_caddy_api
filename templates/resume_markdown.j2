@@ -1,31 +1,31 @@
 ## {{ resume.user.name }}
 ## {{resume.title }}
-Email: {{resume.user.email}}
-Phone: {{resume.user.phone}}
-{% if summary %}
+## Email: {{resume.user.email}}
+## Phone: {{resume.user.phone}}
+{% if resume.active_summary %}
     ### Summary
-    {{ resume.summary_content }}
+    {{ resume.active_summary.content }}
 {% endif %}
 {% if resume.skills %}
     ### Skills
     {% if resume.language_skills %}
-        Languages: {{ resume.language_skills | join(", ") }}
+        Languages: {{ resume.language_skills | map(attribute='text') | join(", ") }}
     {%- endif -%}
 
     {% if resume.database_skills %}
-        Databases: {{ resume.database_skills | join(", ")}}
+        Databases: {{ resume.database_skills | map(attribute='text') | join(", ")}}
     {%- endif -%}
 
     {% if resume.framework_skills %}
-        Frameworks: {{ resume.framework_skills | join(", ")}}
+        Frameworks: {{ resume.framework_skills| map(attribute='text')  | join(", ")}}
     {%- endif -%}
 
     {% if resume.tool_skills %}
-        Platforms: {{ resume.tool_skills | join(", ")}}
+        Platforms: {{ resume.tool_skills| map(attribute='text')  | join(", ")}}
     {%- endif -%}
 
     {% if resume.security_skills %}
-        Security: {{ resume.security_skills | join(", ")}}
+        Security: {{ resume.security_skills| map(attribute='text')  | join(", ")}}
     {%- endif -%}
 {%- endif -%}
 {% if resume.experiences %}
@@ -46,6 +46,15 @@ Phone: {{resume.user.phone}}
     {% endfor %}
 {% endif %}
 
+{% if resume.projects %}
+    ### Projects
+    {% for proj in resume.projects %}
+        {% for bullet in proj.description %}
+            - {{ bullet.content }}
+        {%- endfor -%}
+    {% endfor %}
+{% endif %}
+
 {% if resume.certifications %}
     ### Certifications
     {% for cert in resume.certifications %}
@@ -58,14 +67,5 @@ Phone: {{resume.user.phone}}
     ### Education
     {% for edu in resume.educations %}
         {{ edu.institution }}{% if edu.degree %} — {{ edu.degree }}{% endif %}{% if edu.major %} — {{ edu.major }}{% endif %}{% if edu.minor %} — Minor: {{ edu.minor }}{% endif %}{% if edu.issue_date %} — {{ edu.issue_date }}{% endif %}
-    {% endfor %}
-{% endif %}
-
-{% if resume.projects %}
-    ### Projects
-    {% for proj in resume.projects %}
-        {% for bullet in proj.description %}
-            - {{ bullet.content }}
-        {%- endfor -%}
     {% endfor %}
 {% endif %}
