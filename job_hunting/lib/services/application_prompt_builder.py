@@ -5,6 +5,13 @@ from jinja2 import Environment, FileSystemLoader
 
 
 class ApplicationPromptBuilder:
+    """
+    ApplicationPromptBuilder instantiates a career-data
+    and ports it to markdown
+    build: generic build
+    build_from_career_data uses career-data
+    """
+
     def __init__(self, max_section_chars=60000):
         self.max_section_chars = max_section_chars
 

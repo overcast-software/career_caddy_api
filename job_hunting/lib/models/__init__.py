@@ -4,6 +4,7 @@ from .profile import Profile
 from .project import Project
 from .project_description import ProjectDescription
 from .resume import Resume
+from .resume_project import ResumeProject
 from .score import Score
 from .job_post import JobPost
 from .scrape import Scrape

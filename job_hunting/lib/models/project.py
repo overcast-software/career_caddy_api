@@ -26,3 +26,9 @@ class Project(BaseModel):
         order_by=lambda: Base.metadata.tables["project_description"].c.order,
         cascade="all, delete-orphan",
     )
+    resumes = relationship(
+        "Resume",
+        secondary="resume_project",
+        back_populates="projects",
+        overlaps="project,resume",
+    )

@@ -173,7 +173,7 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # CORS Configuration
-CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_ALL_ORIGINS = True
 
 cors_allowed_origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "")
 cors_allowed_origin_env = os.environ.get("CORS_ALLOWED_ORIGIN", "")

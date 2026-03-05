@@ -85,7 +85,7 @@ class CareerData:
 
     @property
     def questions(self):
-        """Alias for favorite_questions."""
+        """XXX Not used - Alias for favorite_questions."""
         return self.favorite_questions
 
     @property
@@ -95,7 +95,7 @@ class CareerData:
 
     @property
     def applications(self):
-        """Alias for question_applications."""
+        """XXX Not used - Alias for question_applications."""
         return self.question_applications
 
     @classmethod

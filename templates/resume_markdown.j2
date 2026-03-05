@@ -6,7 +6,7 @@ Phone: {{resume.user.phone}}
     ### Summary
     {{ resume.summary_content }}
 {% endif %}
-{% if skills %}
+{% if resume.skills %}
     ### Skills
     {% if resume.language_skills %}
         Languages: {{ resume.language_skills | join(", ") }}

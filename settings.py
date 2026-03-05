@@ -94,8 +94,10 @@ if os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes"):
         [
             "http://localhost:3000",
             "http://localhost:4200",
+            "http://localhost:4201",
             "http://127.0.0.1:3000",
             "http://127.0.0.1:4200",
+            "http://127.0.0.1:4201",
             "http://localhost:8080",
             "http://127.0.0.1:8080",
             "http://localhost:5173",  # Vite default

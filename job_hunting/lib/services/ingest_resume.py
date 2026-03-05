@@ -23,6 +23,7 @@ from job_hunting.lib.models.resume import Resume
 from job_hunting.lib.models.resume_experience import ResumeExperience
 from job_hunting.lib.models.resume_education import ResumeEducation
 from job_hunting.lib.models.resume_certification import ResumeCertification
+from job_hunting.lib.models.resume_project import ResumeProject
 from job_hunting.lib.models.resume_skill import ResumeSkill
 from job_hunting.lib.models.summary import Summary
 from job_hunting.lib.models.resume_summary import ResumeSummaries
@@ -349,7 +350,7 @@ class IngestResume:
             ResumeEducation.first_or_create(resume=self.db_resume, education=education)
 
         print("Creating projects...")
-        for proj_data in parsed_resume.projects:
+        for idx, proj_data in enumerate(parsed_resume.projects):
             project = Project(
                 title=proj_data.title,
                 start_date=self.parse_date(proj_data.start_date),
@@ -357,6 +358,13 @@ class IngestResume:
                 user_id=user_id,
             )
             project.save()
+
+            # Associate project with resume
+            ResumeProject.first_or_create(
+                resume_id=self.db_resume.id,
+                project_id=project.id,
+                defaults={"order": idx}
+            )
 
             # Create project descriptions
             for bullet in proj_data.bullets:

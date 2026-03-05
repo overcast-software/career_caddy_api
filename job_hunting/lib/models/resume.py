@@ -44,6 +44,14 @@ class Resume(BaseModel):
         order_by=lambda: Base.metadata.tables["resume_experience"].c.order,
     )
 
+    projects = relationship(
+        "Project",
+        secondary="resume_project",
+        back_populates="resumes",
+        overlaps="project,resume",
+        order_by=lambda: Base.metadata.tables["resume_project"].c.order,
+    )
+
     certifications = relationship(
         "Certification",
         secondary="resume_certification",
