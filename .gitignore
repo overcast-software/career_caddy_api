@@ -28,7 +28,8 @@ build/
 *.db
 *.sqlite3
 *.mo
-
+# docker's local pgdata
+/pgdata
 # Static files
 /static/
 staticfiles/
