@@ -196,7 +196,7 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         "experience_description", "profile", "project_description", "resume",
         "resume_certification", "resume_education", "resume_experience", 
         "resume_skill", "resume_summary", "scrape", "skill", "summary", "user",
-        "company", "job_post", "application", "score", "project"
+        "company", "job_post", "application", "score", "project", "resume_project"
     ]
     
     successful_imports = []

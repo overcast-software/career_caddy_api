@@ -63,7 +63,7 @@
     {% endfor %}
 {% endif %}
 
-{% if educations %}
+{% if resume.educations %}
     ### Education
     {% for edu in resume.educations %}
         {{ edu.institution }}{% if edu.degree %} — {{ edu.degree }}{% endif %}{% if edu.major %} — {{ edu.major }}{% endif %}{% if edu.minor %} — Minor: {{ edu.minor }}{% endif %}{% if edu.issue_date %} — {{ edu.issue_date }}{% endif %}
