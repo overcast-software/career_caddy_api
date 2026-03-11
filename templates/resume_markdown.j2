@@ -49,7 +49,7 @@
 {% if resume.projects %}
     ### Projects
     {% for proj in resume.projects %}
-        {% for bullet in proj.description %}
+        {% for bullet in proj.descriptions %}
             - {{ bullet.content }}
         {%- endfor -%}
     {% endfor %}
