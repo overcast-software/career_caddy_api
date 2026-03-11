@@ -357,7 +357,6 @@ class BaseSAViewSet(viewsets.ViewSet):
             "status": "statuses",
             "summary": "summaries",
             "user": "users",
-            
             # Singular relationships (to-one) - map to themselves
             "company": "company",
             "career-data": "career-data",
@@ -2936,7 +2935,7 @@ class ScrapeViewSet(BaseSAViewSet):
         # Check for existing scrape with the same URL
         session = self.get_session()
         existing_scrape = session.query(Scrape).filter_by(url=url).first()
-        
+
         # If there's an existing scrape that's pending or completed, return it
         if existing_scrape:
             if existing_scrape.state in ("pending", "processing"):
@@ -2946,7 +2945,7 @@ class ScrapeViewSet(BaseSAViewSet):
                 return Response(
                     {
                         "data": scrape_resource,
-                        "meta": {"message": "Scrape already in progress for this URL"}
+                        "meta": {"message": "Scrape already in progress for this URL"},
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -2957,7 +2956,9 @@ class ScrapeViewSet(BaseSAViewSet):
                 return Response(
                     {
                         "data": scrape_resource,
-                        "meta": {"message": "Scrape already completed for this URL. Use the redo action to re-scrape."}
+                        "meta": {
+                            "message": "Scrape already completed for this URL. Use the redo action to re-scrape."
+                        },
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -2978,8 +2979,9 @@ class ScrapeViewSet(BaseSAViewSet):
             try:
                 # Create a new session for the background thread
                 from job_hunting.lib.models.base import BaseModel
+
                 BaseModel.clear_session()
-                
+
                 browser_service_url = getattr(
                     settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
                 )
@@ -2993,7 +2995,7 @@ class ScrapeViewSet(BaseSAViewSet):
                 # Update scrape record with error state
                 try:
                     from job_hunting.lib.models.base import BaseModel
-                    
+
                     # Ensure we have a fresh session for error handling
                     BaseModel.clear_session()
                     session = BaseModel.get_session()
@@ -3024,7 +3026,7 @@ class ScrapeViewSet(BaseSAViewSet):
     @action(detail=True, methods=["post"])
     def redo(self, request, pk=None):
         """Redo a scrape - resets state to pending and starts a new scrape process"""
-        
+
         # Check if scraping is enabled
         if not getattr(settings, "SCRAPING_ENABLED", False):
             return Response(
@@ -3061,8 +3063,9 @@ class ScrapeViewSet(BaseSAViewSet):
             try:
                 # Create a new session for the background thread
                 from job_hunting.lib.models.base import BaseModel
+
                 BaseModel.clear_session()
-                
+
                 browser_service_url = getattr(
                     settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
                 )
@@ -3073,7 +3076,7 @@ class ScrapeViewSet(BaseSAViewSet):
                 # Update scrape record with error state
                 try:
                     from job_hunting.lib.models.base import BaseModel
-                    
+
                     # Ensure we have a fresh session for error handling
                     BaseModel.clear_session()
                     session = BaseModel.get_session()
@@ -3100,10 +3103,7 @@ class ScrapeViewSet(BaseSAViewSet):
         scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(obj)
         return Response(
-            {
-                "data": scrape_resource,
-                "meta": {"message": "Scrape restarted"}
-            },
+            {"data": scrape_resource, "meta": {"message": "Scrape restarted"}},
             status=status.HTTP_202_ACCEPTED,
         )
 
