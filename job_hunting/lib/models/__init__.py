@@ -5,7 +5,6 @@ from .project_description import ProjectDescription
 from .resume import Resume
 from .resume_project import ResumeProject
 from .score import Score
-from .job_post import JobPost
 from .scrape import Scrape
 from .cover_letter import CoverLetter
 from .application import Application
@@ -18,7 +17,6 @@ from .experience import Experience
 from .experience_description import ExperienceDescription
 from .resume_skill import ResumeSkill
 from .job_application_status import JobApplicationStatus
-from .question import Question
 from .answer import Answer
 from .career_data import CareerData
 

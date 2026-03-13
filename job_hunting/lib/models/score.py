@@ -11,17 +11,23 @@ class Score(BaseModel):
     score = Column(Integer, nullable=True)
     explanation = Column(Text, nullable=True)
     resume_id = Column(Integer, ForeignKey("resume.id"))
-    job_post_id = Column(Integer, ForeignKey("job_post.id"))
+    job_post_id = Column(Integer)
     user_id = Column(Integer, ForeignKey("auth_user.id"))
 
     # Relationships
     resume = relationship("Resume", back_populates="scores")
-    job_post = relationship("JobPost", back_populates="scores")
     user = relationship("User", overlaps="scores")
 
     @property
     def company(self):
         """Get the company for this score through job_post"""
-        if self.job_post:
-            return self.job_post.company
+        if self.job_post_id:
+            try:
+                from job_hunting.lib.models.base import BaseModel
+                from job_hunting.models import JobPost as DjangoJobPost, Company
+                jp = DjangoJobPost.objects.filter(pk=self.job_post_id).first()
+                if jp and jp.company_id:
+                    return Company.objects.filter(pk=jp.company_id).first()
+            except Exception:
+                pass
         return None

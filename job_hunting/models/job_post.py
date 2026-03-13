@@ -1,0 +1,50 @@
+from django.conf import settings
+from django.db import models
+
+
+class JobPost(models.Model):
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="created_by",
+        related_name="created_job_posts",
+    )
+    description = models.TextField(null=True, blank=True)
+    title = models.CharField(max_length=255, null=True, blank=True)
+    company = models.ForeignKey(
+        "Company",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="job_posts",
+    )
+    posted_date = models.DateField(null=True, blank=True)
+    extraction_date = models.DateField(null=True, blank=True)
+    link = models.CharField(max_length=1000, null=True, blank=True)
+
+    class Meta:
+        db_table = "job_post"
+
+    @classmethod
+    def from_json(cls, job_dict, **kwargs):
+        """Create or retrieve a JobPost from a parsed job dict."""
+        from job_hunting.models.company import Company
+        company_data = job_dict.get("company") or {}
+        company_name = (
+            company_data.get("name") if isinstance(company_data, dict) else company_data
+        )
+        company = None
+        if company_name:
+            company, _ = Company.objects.get_or_create(name=company_name)
+        job_post, _ = cls.objects.get_or_create(
+            title=job_dict.get("title"),
+            company=company,
+            defaults={
+                "description": job_dict.get("description"),
+                "link": job_dict.get("link"),
+            },
+        )
+        return job_post

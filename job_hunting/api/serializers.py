@@ -11,9 +11,7 @@ from job_hunting.lib.models import (
     Experience,
     ExperienceDescription,
     JobApplicationStatus,
-    JobPost,
     Answer,
-    Question,
     Resume,
     ResumeSkill,
     ResumeSummaries,
@@ -21,7 +19,7 @@ from job_hunting.lib.models import (
     Scrape,
 )
 from job_hunting.lib.models.base import BaseModel
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey, Question, JobPost
 
 
 def _to_primitive(val):
@@ -1004,7 +1002,12 @@ class QuestionSerializer(BaseSASerializer):
         # Backward-compatible: expose latest answer content as an attribute
         try:
             latest_content = None
-            answers = list(getattr(obj, "answers", []) or [])
+            # Query SA Answer model for answers since Answer is still SA
+            try:
+                session = BaseModel.get_session()
+                answers = session.query(Answer).filter_by(question_id=obj.id).order_by(Answer.created_at).all()
+            except Exception:
+                answers = []
             if answers:
                 try:
                     latest = max(

@@ -15,7 +15,7 @@ class Scrape(BaseModel):
     id = Column(Integer, primary_key=True, autoincrement=True)
     url = Column(String, nullable=False)
     company_id = Column(Integer)
-    job_post_id = Column(Integer, ForeignKey("job_post.id"))
+    job_post_id = Column(Integer)
     css_selectors = Column(Text)
     job_content = Column(Text)
     external_link = Column(String)
@@ -25,8 +25,6 @@ class Scrape(BaseModel):
     source_scrape_id = Column(Integer, ForeignKey("scrape.id"))
     html = Column(Text)
 
-    # Relationships
-    job_post = relationship("JobPost", back_populates="scrapes")
     @property
     def host(self):
         return urlparse(self.url).netloc

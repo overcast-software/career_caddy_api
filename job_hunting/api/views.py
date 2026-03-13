@@ -29,7 +29,6 @@ from job_hunting.lib.models import (
     Resume,
     Score,
     Scrape,
-    JobPost,
     CoverLetter,
     Application,
     Experience,
@@ -40,11 +39,10 @@ from job_hunting.lib.models import (
     ResumeExperience,
     ResumeSkill,
     JobApplicationStatus,
-    Question,
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey, Question, JobPost
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -853,7 +851,7 @@ class SummaryViewSet(BaseSAViewSet):
         job_post = None
         if job_post_id is not None:
             try:
-                job_post = JobPost.get(int(job_post_id))
+                job_post = JobPost.objects.filter(pk=int(job_post_id)).first()
             except (TypeError, ValueError):
                 job_post = None
             if not job_post:
@@ -2431,7 +2429,7 @@ class ResumeViewSet(BaseSAViewSet):
             job_post = None
             if job_post_id is not None:
                 try:
-                    job_post = JobPost.get(int(job_post_id))
+                    job_post = JobPost.objects.filter(pk=int(job_post_id)).first()
                 except (TypeError, ValueError):
                     job_post = None
                 if not job_post:
@@ -2899,7 +2897,7 @@ class ScoreViewSet(BaseSAViewSet):
         user_id = int(user_id)
         resume_id = int(resume_id)
 
-        jp = JobPost.get(job_post_id)
+        jp = JobPost.objects.filter(pk=job_post_id).first()
         resume = Resume.get(resume_id)
 
         # Export resume to markdown for improved scoring context
@@ -3439,8 +3437,7 @@ class CompanyViewSet(BaseSAViewSet):
     def job_posts(self, request, pk=None):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        session = self.get_session()
-        posts = session.query(JobPost).filter_by(company_id=int(pk)).all()
+        posts = list(JobPost.objects.filter(company_id=int(pk)))
         data = [JobPostSerializer().to_resource(j) for j in posts]
         return Response({"data": data})
 
@@ -3644,7 +3641,7 @@ class CoverLetterViewSet(BaseSAViewSet):
             )
 
         resume = Resume.get(resume_id) if resume_id is not None else None
-        job_post = JobPost.get(job_post_id) if job_post_id is not None else None
+        job_post = JobPost.objects.filter(pk=job_post_id).first() if job_post_id is not None else None
         company = Company.get(company_id) if company_id is not None else None
 
         if job_post_id is not None and not job_post:
@@ -3855,7 +3852,7 @@ class ApplicationViewSet(BaseSAViewSet):
             # Set company_id from job_post if job_post_id is provided
             job_post_id = attrs.get("job_post_id")
             if job_post_id:
-                job_post = JobPost.get(job_post_id)
+                job_post = JobPost.objects.filter(pk=job_post_id).first()
                 if job_post and hasattr(job_post, "company_id") and job_post.company_id:
                     attrs["company_id"] = job_post.company_id
 
@@ -3937,15 +3934,16 @@ class QuestionViewSet(BaseSAViewSet):
     model = Question
     serializer_class = QuestionSerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
     @extend_schema(tags=["Questions"], summary="List questions (auto-includes company)", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
-        session = self.get_session()
-        items = session.query(self.model).all()
+        items = list(Question.objects.all())
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
-        # Default to include the related company for questions if not specified
         include_rels = self._parse_include(request) or ["company"]
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
@@ -3953,12 +3951,11 @@ class QuestionViewSet(BaseSAViewSet):
 
     @extend_schema(tags=["Questions"], summary="Retrieve a question (auto-includes company)", parameters=[_INCLUDE_PARAM], responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Question.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
-        # Default to include the related company for questions if not specified
         include_rels = self._parse_include(request) or ["company"]
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
@@ -3974,31 +3971,25 @@ class QuestionViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
         attrs = self.pre_save_payload(request, attrs, creating=True)
-        obj = self.model(**attrs)
-        session = self.get_session()
-        session.add(obj)
-        session.commit()
+        # Remove SA-incompatible attrs; keep only model field names
+        safe_attrs = {k: v for k, v in attrs.items() if k in (
+            "content", "favorite", "application_id", "company_id", "created_by_id"
+        )}
+        obj = Question.objects.create(**safe_attrs)
 
         # Back-compat write path: accept attributes.answer and create a child Answer
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
         attrs_node = node.get("attributes") or {}
         ans_val = attrs_node.get("answer")
-        if isinstance(ans_val, str):
-            ans_str = ans_val.strip()
-        else:
-            ans_str = None
+        ans_str = ans_val.strip() if isinstance(ans_val, str) else None
         if ans_str:
-            # Create child answer and mirror to legacy column if present
             try:
+                session = self.get_session()
                 session.add(Answer(question_id=obj.id, content=ans_str))
-                if hasattr(obj, "answer"):
-                    obj.answer = ans_str
-                    session.add(obj)
                 session.commit()
             except Exception:
-                # Best-effort; do not fail question creation due to child failure
-                session.rollback()
+                pass
 
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -4007,7 +3998,7 @@ class QuestionViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
-        obj = self.model.get(int(pk))
+        obj = Question.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -4017,29 +4008,23 @@ class QuestionViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": str(e)}]}, status=400)
         attrs = self.pre_save_payload(request, attrs, creating=False)
         for k, v in attrs.items():
-            setattr(obj, k, v)
-        session = self.get_session()
-        session.add(obj)
-        session.commit()
+            if k in ("content", "favorite", "application_id", "company_id", "created_by_id"):
+                setattr(obj, k, v)
+        obj.save()
 
         # Back-compat write path on update: append a new child Answer if provided
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
         attrs_node = node.get("attributes") or {}
         ans_val = attrs_node.get("answer")
-        if isinstance(ans_val, str):
-            ans_str = ans_val.strip()
-        else:
-            ans_str = None
+        ans_str = ans_val.strip() if isinstance(ans_val, str) else None
         if ans_str:
             try:
+                session = self.get_session()
                 session.add(Answer(question_id=obj.id, content=ans_str))
-                if hasattr(obj, "answer"):
-                    obj.answer = ans_str
-                    session.add(obj)
                 session.commit()
             except Exception:
-                session.rollback()
+                pass
 
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -4047,15 +4032,23 @@ class QuestionViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    def destroy(self, request, pk=None):
+        obj = Question.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @extend_schema(tags=["Questions"], summary="List answers for a question", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def answers(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Question.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
+        session = self.get_session()
+        items = session.query(Answer).filter_by(question_id=obj.id).all()
         ser = AnswerSerializer()
-        items = list(getattr(obj, "answers", []) or [])
         data = [ser.to_resource(i) for i in items]
 
         include_rels = self._parse_include(request)
@@ -4131,7 +4124,7 @@ class AnswerViewSet(BaseSAViewSet):
         except (TypeError, ValueError):
             return Response({"errors": [{"detail": "Invalid question ID"}]}, status=400)
 
-        question = Question.get(qid) if qid is not None else None
+        question = Question.objects.filter(pk=qid).first() if qid is not None else None
         if question is None:
             return Response(
                 {"errors": [{"detail": "Missing or invalid question relationship"}]},
@@ -5138,7 +5131,7 @@ def generate_prompt(request):
 
     try:
         question_id = int(question_id)
-        question = Question.get(question_id)
+        question = Question.objects.filter(pk=question_id).first()
         if not question:
             return Response(
                 {"errors": [{"detail": "Question not found"}]},
@@ -5167,7 +5160,7 @@ def generate_prompt(request):
     if job_post_id:
         try:
             job_post_id = int(job_post_id)
-            job_post = JobPost.get(job_post_id)
+            job_post = JobPost.objects.filter(pk=job_post_id).first()
             if job_post:
                 context["job_post"] = job_post
                 if hasattr(job_post, "company"):

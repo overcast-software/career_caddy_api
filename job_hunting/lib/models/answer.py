@@ -9,10 +9,7 @@ class Answer(BaseModel):
     __tablename__ = "answer"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    question_id = Column(Integer, ForeignKey("question.id", ondelete="CASCADE"), nullable=False)
+    question_id = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     favorite = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-    # Relationships
-    question = relationship("Question", backref="answers", lazy="select")

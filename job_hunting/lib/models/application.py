@@ -10,9 +10,7 @@ class Application(BaseModel):
     user_id = Column(
         Integer, ForeignKey("auth_user.id", ondelete="SET NULL"), nullable=True
     )
-    job_post_id = Column(
-        Integer, ForeignKey("job_post.id", ondelete="SET NULL"), nullable=True
-    )
+    job_post_id = Column(Integer, nullable=True)
     company_id = Column(Integer, nullable=True)
     resume_id = Column(Integer, ForeignKey("resume.id", ondelete="SET NULL"))
     cover_letter_id = Column(
@@ -25,7 +23,6 @@ class Application(BaseModel):
 
     # Relationships
     user = relationship("User", back_populates="applications")
-    job_post = relationship("JobPost", back_populates="applications")
     resume = relationship("Resume", back_populates="applications")
     cover_letter = relationship("CoverLetter", back_populates="application")
     application_statuses = relationship(
@@ -33,9 +30,4 @@ class Application(BaseModel):
         back_populates="application",
         cascade="all, delete-orphan",
         order_by="JobApplicationStatus.created_at",
-    )
-    questions = relationship(
-        "Question",
-        back_populates="application",
-        cascade="all, delete-orphan",
     )

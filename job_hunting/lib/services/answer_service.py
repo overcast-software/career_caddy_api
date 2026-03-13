@@ -10,11 +10,9 @@ from job_hunting.lib.models import (
     BaseModel,
     CoverLetter,
     JobPost,
-    Question,
     Resume,
-    User,
 )
-from job_hunting.models import Company
+from job_hunting.models import Company, Question
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -47,35 +45,39 @@ class AnswerService:
 
     def load_context_for_question(self, question):
         """Load context data for a given question. Can be used independently of AI generation."""
-        # Reload question with relationships
-        question = (
-            self.session.query(Question)
-            .options(
-                joinedload(Question.application).joinedload(Application.user),
-                joinedload(Question.application).joinedload(Application.job_post),
-                joinedload(Question.application).joinedload(Application.resume),
-                joinedload(Question.user),
-            )
-            .filter_by(id=question.id)
-            .first()
-        )
-
+        # Reload question via Django ORM (Question is now a Django model)
+        question = Question.objects.filter(pk=question.id).first()
         if not question:
             question = self.question
 
+        # Resolve application via SA session using application_id
+        application = None
+        if getattr(question, "application_id", None):
+            try:
+                application = (
+                    self.session.query(Application)
+                    .options(
+                        joinedload(Application.user),
+                        joinedload(Application.job_post),
+                        joinedload(Application.resume),
+                    )
+                    .filter_by(id=question.application_id)
+                    .first()
+                )
+            except Exception:
+                pass
+
         # Resolve user
         user = None
-        if hasattr(question, "user") and question.user:
-            user = question.user
-        elif (
-            hasattr(question, "application")
-            and question.application
-            and question.application.user
-        ):
-            user = question.application.user
-
-        # Resolve application
-        application = getattr(question, "application", None)
+        if getattr(question, "created_by_id", None):
+            try:
+                from django.contrib.auth import get_user_model
+                User_model = get_user_model()
+                user = User_model.objects.filter(pk=question.created_by_id).first()
+            except Exception:
+                pass
+        if not user and application and getattr(application, "user", None):
+            user = application.user
 
         # Resolve job_post
         job_post = None
@@ -150,30 +152,22 @@ class AnswerService:
             question_ids = set()
 
             # User-authored favorite questions (excluding current)
-            user_questions = (
-                self.session.query(Question)
-                .filter(
-                    Question.created_by_id == user.id,
-                    Question.id != question.id,
-                    Question.favorite,
-                )
-                .order_by(Question.created_at, Question.id)
-                .all()
+            user_questions = list(
+                Question.objects.filter(
+                    created_by_id=user.id,
+                    favorite=True,
+                ).exclude(id=question.id).order_by("created_at", "id")
             )
 
             question_ids.update(q.id for q in user_questions)
 
             # Application-linked favorite questions (excluding current)
             if application:
-                app_questions = (
-                    self.session.query(Question)
-                    .filter(
-                        Question.application_id == application.id,
-                        Question.id != question.id,
-                        Question.favorite == True,
-                    )
-                    .order_by(Question.created_at, Question.id)
-                    .all()
+                app_questions = list(
+                    Question.objects.filter(
+                        application_id=application.id,
+                        favorite=True,
+                    ).exclude(id=question.id).order_by("created_at", "id")
                 )
                 question_ids.update(q.id for q in app_questions)
 
@@ -256,15 +250,11 @@ class AnswerService:
             # 4) Build unified favorite questions list (user-authored + application-linked), de-duped
             all_questions = list(user_questions)
             if application:
-                app_questions = (
-                    self.session.query(Question)
-                    .filter(
-                        Question.application_id == application.id,
-                        Question.id != question.id,
-                        Question.favorite == True,
-                    )
-                    .order_by(Question.created_at, Question.id)
-                    .all()
+                app_questions = list(
+                    Question.objects.filter(
+                        application_id=application.id,
+                        favorite=True,
+                    ).exclude(id=question.id).order_by("created_at", "id")
                 )
                 # Add app questions that aren't already in the list
                 existing_ids = {q.id for q in all_questions}

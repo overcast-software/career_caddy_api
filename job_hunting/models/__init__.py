@@ -7,3 +7,5 @@ from .summary import Summary
 from .profile import Profile
 from .company import Company
 from .api_key import ApiKey
+from .question import Question
+from .job_post import JobPost
