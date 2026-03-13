@@ -30,7 +30,7 @@ from job_hunting.lib.models.resume_summary import ResumeSummaries
 from job_hunting.models import Skill
 from job_hunting.lib.models.profile import Profile
 from job_hunting.lib.models.company import Company
-from job_hunting.lib.models.description import Description
+from job_hunting.models import Description
 
 
 class SkillTag(Enum):
@@ -331,7 +331,7 @@ class IngestResume:
             # Create experience descriptions
             for bullet in exp_data.bullets:
                 print(bullet)
-                desc, _ = Description.first_or_create(content=bullet)
+                desc, _ = Description.objects.get_or_create(content=bullet)
                 # Link description to experience
                 # This assumes ExperienceDescription is the linking table
                 ExperienceDescription.first_or_create(
@@ -368,7 +368,7 @@ class IngestResume:
 
             # Create project descriptions
             for bullet in proj_data.bullets:
-                desc, _ = Description.first_or_create(content=bullet)
+                desc, _ = Description.objects.get_or_create(content=bullet)
                 # Link description to project
                 # This assumes ProjectDescription is the linking table
                 ProjectDescription.first_or_create(

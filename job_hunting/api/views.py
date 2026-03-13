@@ -38,7 +38,6 @@ from job_hunting.lib.models import (
     Experience,
     Education,
     Certification,
-    Description,
     ExperienceDescription,
     ResumeEducation,
     ResumeCertification,
@@ -50,7 +49,7 @@ from job_hunting.lib.models import (
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill
+from job_hunting.models import Status, Skill, Description
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -1583,7 +1582,7 @@ class ResumeViewSet(BaseSAViewSet):
                     did = _int_or_none((d or {}).get("id"))
                     if did is None:
                         continue
-                    if Description.get(did) is None:
+                    if not Description.objects.filter(pk=did).exists():
                         invalid_desc_ids.append(did)
                         continue
                     desired_desc_ids_ordered.append(did)
@@ -2051,7 +2050,7 @@ class ResumeViewSet(BaseSAViewSet):
                     if "content" in d and d["content"]:
                         incoming_lines.append(str(d["content"]).strip())
                     elif "id" in d and d["id"]:
-                        dd = Description.get(int(d["id"]))
+                        dd = Description.objects.filter(pk=int(d["id"])).first()
                         if dd and getattr(dd, "content", None):
                             incoming_lines.append(dd.content.strip())
 
@@ -2110,9 +2109,7 @@ class ResumeViewSet(BaseSAViewSet):
                     for idx, line in enumerate(incoming_lines or []):
                         if not line:
                             continue
-                        desc, _ = Description.first_or_create(
-                            session=session, content=line
-                        )
+                        desc, _ = Description.objects.get_or_create(content=line)
                         session.add(
                             ExperienceDescription(
                                 experience_id=exp.id,
@@ -2137,14 +2134,12 @@ class ResumeViewSet(BaseSAViewSet):
                 desc = None
                 did = _int_or_none(d.get("id"))
                 if did:
-                    desc = Description.get(did)
+                    desc = Description.objects.filter(pk=did).first()
                 if desc is None:
                     content = d.get("content")
                     if not content:
                         continue
-                    desc, _ = Description.first_or_create(
-                        session=session, content=content
-                    )
+                    desc, _ = Description.objects.get_or_create(content=content)
                 # Link with optional order
                 order = d.get("order")
                 if order is None and isinstance(d.get("meta"), dict):
@@ -4579,6 +4574,35 @@ class DescriptionViewSet(BaseSAViewSet):
     model = Description
     serializer_class = DescriptionSerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
+    def list(self, request):
+        items = list(Description.objects.all())
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = Description.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def destroy(self, request, pk=None):
+        deleted, _ = Description.objects.filter(pk=int(pk)).delete()
+        return Response(status=204)
+
     @extend_schema(
         tags=["Descriptions"],
         summary="Create a description (optionally link to experiences via relationships.experiences; support per-link order via meta.order)",
@@ -4652,9 +4676,7 @@ class DescriptionViewSet(BaseSAViewSet):
         session = self.get_session()
 
         # Create description
-        desc = Description(**attrs)
-        session.add(desc)
-        session.commit()  # ensure desc.id is available
+        desc = Description.objects.create(**attrs)
 
         # Populate join table with optional per-link order
         for eid, order in exp_items:
@@ -4666,9 +4688,6 @@ class DescriptionViewSet(BaseSAViewSet):
             session.add(link)
         session.commit()
 
-        # Ensure relationships reflect the new joins
-        session.expire(desc, ["experiences"])
-
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
         if include_rels:
@@ -4677,7 +4696,7 @@ class DescriptionViewSet(BaseSAViewSet):
 
     def _upsert(self, request, pk, partial=False):
         session = self.get_session()
-        desc = self.model.get(int(pk))
+        desc = Description.objects.filter(pk=int(pk)).first()
         if not desc:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -4692,8 +4711,7 @@ class DescriptionViewSet(BaseSAViewSet):
         # Update scalar attributes
         for k, v in attrs.items():
             setattr(desc, k, v)
-        session.add(desc)
-        session.commit()
+        desc.save()
 
         # Handle experiences relationship and per-link 'order'
         data = request.data if isinstance(request.data, dict) else {}
@@ -4760,11 +4778,6 @@ class DescriptionViewSet(BaseSAViewSet):
                     session.add(link)
             session.commit()
 
-        try:
-            session.expire(desc, ["experiences"])
-        except Exception:
-            pass
-
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
         if include_rels:
@@ -4774,10 +4787,14 @@ class DescriptionViewSet(BaseSAViewSet):
     @extend_schema(tags=["Descriptions"], summary="List experiences linked to a description", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Description.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ExperienceSerializer().to_resource(e) for e in (obj.experiences or [])]
+        session = self.get_session()
+        links = session.query(ExperienceDescription).filter_by(description_id=obj.id).all()
+        exp_ids = [link.experience_id for link in links]
+        experiences = session.query(Experience).filter(Experience.id.in_(exp_ids)).all()
+        data = [ExperienceSerializer().to_resource(e) for e in experiences]
         return Response({"data": data})
 
 

@@ -11,7 +11,6 @@ from job_hunting.lib.models import (
     Certification,
     Company,
     CoverLetter,
-    Description,
     Education,
     Experience,
     ExperienceDescription,
@@ -26,7 +25,7 @@ from job_hunting.lib.models import (
     Scrape,
     Summary,
 )
-from job_hunting.models import Status, Skill
+from job_hunting.models import Status, Skill, Description
 
 
 def _to_primitive(val):
@@ -849,9 +848,6 @@ class DescriptionSerializer(BaseSASerializer):
     type = "description"
     model = Description
     attributes = ["content"]
-    relationships = {
-        "experiences": {"attr": "experiences", "type": "experience", "uselist": True},
-    }
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
@@ -861,7 +857,8 @@ class DescriptionSerializer(BaseSASerializer):
             if ctx and ctx.get("parent_type") == "experience":
                 experience_id = ctx.get("parent_id")
                 if experience_id:
-                    session = self.model.get_session()
+                    from job_hunting.lib.models.base import BaseModel
+                    session = BaseModel.get_session()
                     link = (
                         session.query(ExperienceDescription)
                         .filter_by(

@@ -9,7 +9,7 @@ class ExperienceDescription(BaseModel):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     experience_id = Column(Integer, ForeignKey("experience.id", ondelete="CASCADE"), nullable=False)
-    description_id = Column(Integer, ForeignKey("description.id", ondelete="CASCADE"), nullable=False)
+    description_id = Column(Integer, nullable=False)
     order = Column(Integer, nullable=False, default=0)
 
     __table_args__ = (
