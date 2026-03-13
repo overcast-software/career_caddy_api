@@ -4,7 +4,7 @@ from rest_framework.test import APITestCase
 from rest_framework import status
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
-from job_hunting.lib.models.profile import Profile
+from job_hunting.models import Profile
 from job_hunting.lib.models.project import Project
 
 
@@ -28,11 +28,8 @@ class ProfileAPITests(APITestCase):
             last_name="User",
         )
 
-        # Stub SA Profile data directly
-        session = Profile.get_session()
-        cls.profile = Profile(user_id=cls.user.id, phone="555-123-4567")
-        session.add(cls.profile)
-        session.commit()
+        # Create Django Profile
+        cls.profile = Profile.objects.create(user_id=cls.user.id, phone="555-123-4567")
 
     def get_jwt_token(self):
         """Helper to obtain JWT token for authenticated requests"""

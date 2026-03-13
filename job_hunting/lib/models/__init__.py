@@ -1,6 +1,5 @@
 from .base import BaseModel
 from .user import User
-from .profile import Profile
 from .project import Project
 from .project_description import ProjectDescription
 from .resume import Resume

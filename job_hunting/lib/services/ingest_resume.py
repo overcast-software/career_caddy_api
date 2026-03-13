@@ -27,7 +27,6 @@ from job_hunting.lib.models.resume_project import ResumeProject
 from job_hunting.lib.models.resume_skill import ResumeSkill
 from job_hunting.lib.models.resume_summary import ResumeSummaries
 from job_hunting.models import Skill
-from job_hunting.lib.models.profile import Profile
 from job_hunting.lib.models.company import Company
 from job_hunting.models import Description, Summary
 
@@ -259,7 +258,11 @@ class IngestResume:
         resume = Resume(name=self.resume_name, title=parsed_resume.title)
         self.db_resume = resume
 
-        Profile.first_or_create(phone=parsed_resume.phone, user_id=self.user.id)
+        from job_hunting.models import Profile as DjangoProfile
+        prof, _ = DjangoProfile.objects.get_or_create(user_id=self.user.id)
+        if parsed_resume.phone:
+            prof.phone = parsed_resume.phone
+            prof.save()
 
         # Set user_id instead of user relationship to avoid cross-ORM issues
         user_id = self._resolve_user_id(self.user)

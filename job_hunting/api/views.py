@@ -1209,11 +1209,12 @@ class DjangoUserViewSet(viewsets.ViewSet):
         user.set_password(password)
         user.save()
 
-        # Handle phone via SQLAlchemy Profile if provided
+        # Handle phone via Django Profile if provided
         if phone_present:
-            from job_hunting.lib.models import Profile
-
-            Profile.first_or_create(user_id=user.id, phone=phone_val)
+            from job_hunting.models import Profile
+            prof, _ = Profile.objects.get_or_create(user_id=user.id)
+            prof.phone = (phone_val[:50] or None) if phone_val else None
+            prof.save()
 
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 
@@ -1258,21 +1259,12 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         user.save()
 
-        # Handle phone via SQLAlchemy Profile if provided
+        # Handle phone via Django Profile if provided
         if phone_present:
-            from job_hunting.lib.models.profile import Profile
-
-            session = Profile.get_session()
-            prof = session.query(Profile).filter_by(user_id=user.id).first()
-            if not prof:
-                prof = Profile(
-                    user_id=user.id,
-                    phone=(phone_val[:50] or None) if phone_val else None,
-                )
-            else:
-                prof.phone = (phone_val[:50] or None) if phone_val else None
-            session.add(prof)
-            session.commit()
+            from job_hunting.models import Profile
+            prof, _ = Profile.objects.get_or_create(user_id=user.id)
+            prof.phone = (phone_val[:50] or None) if phone_val else None
+            prof.save()
 
         return Response({"data": ser.to_resource(user)})
 

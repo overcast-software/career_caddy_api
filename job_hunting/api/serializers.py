@@ -205,13 +205,11 @@ class DjangoUserSerializer:
         return {self.type, _pluralize_type(self.type)}
 
     def to_resource(self, obj) -> Dict[str, Any]:
-        # Fetch phone from SQLAlchemy Profile by user_id
+        # Fetch phone from Django Profile
         phone = ""
         try:
-            from job_hunting.lib.models.profile import Profile
-
-            session = Profile.get_session()
-            prof = session.query(Profile).filter_by(user_id=obj.id).first()
+            from job_hunting.models import Profile
+            prof = Profile.objects.filter(user_id=obj.id).first()
             if prof and getattr(prof, "phone", None):
                 phone = prof.phone or ""
         except Exception:
