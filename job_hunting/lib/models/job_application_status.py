@@ -10,12 +10,9 @@ class JobApplicationStatus(BaseModel):
     application_id = Column(
         Integer, ForeignKey("application.id", ondelete="CASCADE"), nullable=False
     )
-    status_id = Column(
-        Integer, ForeignKey("status.id", ondelete="SET NULL"), nullable=True
-    )
+    status_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     note = Column(Text, nullable=True)
 
     # Relationships
     application = relationship("Application", back_populates="application_statuses")
-    status = relationship("Status", back_populates="application_statuses")

@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 import dateparser
 from django.contrib.auth import get_user_model
+from rest_framework import serializers
 
 from job_hunting.lib.models import (
     ApiKey,
@@ -24,9 +25,9 @@ from job_hunting.lib.models import (
     Score,
     Scrape,
     Skill,
-    Status,
     Summary,
 )
+from job_hunting.models import Status
 
 
 def _to_primitive(val):
@@ -906,10 +907,10 @@ class SkillSerializer(BaseSASerializer):
         return res
 
 
-class StatusSerializer(BaseSASerializer):
-    type = "status"
-    model = Status
-    attributes = ["status", "status_type"]
+class StatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Status
+        fields = ["id", "status", "status_type", "created_at"]
 
 
 class JobApplicationStatusSerializer(BaseSASerializer):

@@ -46,12 +46,12 @@ from job_hunting.lib.models import (
     ResumeExperience,
     Skill,
     ResumeSkill,
-    Status,
     JobApplicationStatus,
     Question,
     Answer,
     CareerData,
 )
+from job_hunting.models import Status
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -3868,8 +3868,8 @@ class ApplicationViewSet(BaseSAViewSet):
     partial_update=extend_schema(tags=["Statuses"], summary="Partially update a status"),
     destroy=extend_schema(tags=["Statuses"], summary="Delete a status"),
 )
-class StatusViewSet(BaseSAViewSet):
-    model = Status
+class StatusViewSet(viewsets.ModelViewSet):
+    queryset = Status.objects.all()
     serializer_class = StatusSerializer
 
 
