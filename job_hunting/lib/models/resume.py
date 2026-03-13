@@ -1,10 +1,7 @@
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 from sqlalchemy import Column, Integer, Text, ForeignKey, String, Boolean
 from sqlalchemy.orm import relationship
 from .base import BaseModel, Base
-
-if TYPE_CHECKING:
-    from .summary import Summary
 
 
 class Resume(BaseModel):
@@ -21,14 +18,6 @@ class Resume(BaseModel):
     scores = relationship("Score", back_populates="resume")
     cover_letters = relationship("CoverLetter", back_populates="resume")
     applications = relationship("Application", back_populates="resume")
-    summaries = relationship(
-        "Summary",
-        secondary="resume_summaries",
-        back_populates="resumes",
-        overlaps="resume_summaries,summary",
-        passive_deletes=True,
-    )
-
     resume_summaries = relationship(
         "ResumeSummaries",
         back_populates="resume",
@@ -98,27 +87,18 @@ class Resume(BaseModel):
         return [s for s in self._get_django_skills() if s.skill_type == skill_type]
 
     @property
-    def active_summary(self) -> Optional["Summary"]:
-        """Return the linked Summary where ResumeSummaries.active == True if present;
+    def active_summary(self):
+        """Return the linked Django Summary where ResumeSummaries.active == True if present;
         otherwise the first linked summary; otherwise None."""
+        from job_hunting.models import Summary as DjangoSummary
         try:
-            # Find active summary
-            active_link = next(
-                (
-                    l
-                    for l in (getattr(self, "resume_summaries", []) or [])
-                    if getattr(l, "active", False)
-                ),
-                None,
-            )
-            if active_link and getattr(active_link, "summary", None):
-                return active_link.summary
-
-            # Fallback to first linked summary if no active one
-            if getattr(self, "resume_summaries", None):
-                first_link = next(iter(self.resume_summaries), None)
-                if first_link and getattr(first_link, "summary", None):
-                    return first_link.summary
+            links = getattr(self, "resume_summaries", []) or []
+            active_link = next((l for l in links if getattr(l, "active", False)), None)
+            if active_link and active_link.summary_id:
+                return DjangoSummary.objects.filter(pk=active_link.summary_id).first()
+            first_link = next(iter(links), None)
+            if first_link and first_link.summary_id:
+                return DjangoSummary.objects.filter(pk=first_link.summary_id).first()
         except Exception:
             pass
         return None

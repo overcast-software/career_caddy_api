@@ -34,7 +34,6 @@ from job_hunting.lib.models import (
     Company,
     CoverLetter,
     Application,
-    Summary,
     Experience,
     ExperienceDescription,
     ResumeEducation,
@@ -47,7 +46,7 @@ from job_hunting.lib.models import (
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description, Certification, Education
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -774,6 +773,28 @@ class SummaryViewSet(BaseSAViewSet):
     model = Summary
     serializer_class = SummarySerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
+    def list(self, request):
+        qs = Summary.objects.all()
+        ser = self.get_serializer()
+        return Response({"data": [ser.to_resource(obj) for obj in qs]})
+
+    def retrieve(self, request, pk=None):
+        obj = Summary.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    def destroy(self, request, pk=None):
+        obj = Summary.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @extend_schema(
         tags=["Summaries"],
         summary="Create a summary (or AI-generate if content omitted and job-post provided)",
@@ -854,12 +875,11 @@ class SummaryViewSet(BaseSAViewSet):
         content = attrs.get("content")
 
         if content:
-            summary = Summary(
+            summary = Summary.objects.create(
                 job_post_id=job_post.id if job_post else None,
                 user_id=user_id,
                 content=content,
             )
-            summary.save()
         else:
             if not job_post:
                 return Response(
@@ -1361,8 +1381,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = Summary.get_session()
-        summaries = session.query(Summary).filter_by(user_id=user.id).all()
+        summaries = list(Summary.objects.filter(user_id=user.id))
         data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
 
@@ -1480,11 +1499,10 @@ class ResumeViewSet(BaseSAViewSet):
                 .first()
             )
             if active_link:
-                sm = Summary.get(active_link.summary_id)
+                sm = Summary.objects.filter(pk=active_link.summary_id).first()
                 if sm and (sm.content or "") != new_content:
                     sm.content = new_content
-                    session.add(sm)
-                    session.commit()
+                    sm.save()
                 # Ensure only this one is active
                 session.query(ResumeSummaries).filter(
                     ResumeSummaries.resume_id == obj.id,
@@ -1495,12 +1513,11 @@ class ResumeViewSet(BaseSAViewSet):
                 session.commit()
             else:
                 # No active summary; create one and activate it
-                sm = Summary(
+                sm = Summary.objects.create(
                     job_post_id=None,
                     user_id=getattr(obj, "user_id", None),
                     content=new_content,
                 )
-                sm.save()
                 session.query(ResumeSummaries).filter_by(resume_id=obj.id).update(
                     {ResumeSummaries.active: False}, synchronize_session=False
                 )
@@ -1816,7 +1833,7 @@ class ResumeViewSet(BaseSAViewSet):
                 sid = _int_or_none(s_node.get("id"))
                 if sid is None:
                     continue
-                if Summary.get(sid) is None:
+                if not Summary.objects.filter(pk=sid).exists():
                     invalid.append(sid)
                 else:
                     desired_ids.add(sid)
@@ -2257,7 +2274,7 @@ class ResumeViewSet(BaseSAViewSet):
             sid = s_node.get("id")
             if sid is not None:
                 try:
-                    summary = Summary.get(int(sid))
+                    summary = Summary.objects.filter(pk=int(sid)).first()
                 except (TypeError, ValueError):
                     summary = None
                 if summary is None:
@@ -2325,8 +2342,7 @@ class ResumeViewSet(BaseSAViewSet):
                 except (TypeError, ValueError):
                     u_id = getattr(resume, "user_id", None)
 
-                summary = Summary(job_post_id=jp_id, user_id=u_id, content=content)
-                summary.save()
+                summary = Summary.objects.create(job_post_id=jp_id, user_id=u_id, content=content)
 
             # Link summary to resume; mark the first one as active
             session.add(

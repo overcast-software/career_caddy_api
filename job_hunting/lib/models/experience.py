@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Text, Date, ForeignKey
 from sqlalchemy.orm import relationship
-from .base import BaseModel, Base
+from .base import BaseModel
 
 
 class Experience(BaseModel):
@@ -22,12 +22,6 @@ class Experience(BaseModel):
         overlaps="experience,resume",
     )
     company = relationship("Company")
-    descriptions = relationship(
-        "Description",
-        secondary="experience_description",
-        back_populates="experiences",
-        order_by=lambda: Base.metadata.tables["experience_description"].c.order,
-    )
 
     def to_export_dict(self) -> dict:
         """Return a dict suitable for export templates."""
@@ -60,13 +54,21 @@ class Experience(BaseModel):
         else:
             exp_dict["date_range"] = ""
 
-        # Descriptions
+        # Descriptions (via Django ORM through SA join table)
         descriptions = []
         try:
-            for desc in getattr(self, "descriptions", []) or []:
-                content = getattr(desc, "content", None)
-                if content:
-                    descriptions.append(str(content).strip())
+            from job_hunting.models import Description as DjangoDescription
+            from .experience_description import ExperienceDescription
+            session = self.__class__.get_session()
+            ed_links = session.query(ExperienceDescription).filter_by(
+                experience_id=self.id
+            ).order_by(ExperienceDescription.order).all()
+            desc_ids = [ed.description_id for ed in ed_links]
+            desc_map = {d.id: d for d in DjangoDescription.objects.filter(pk__in=desc_ids)}
+            for desc_id in desc_ids:
+                desc = desc_map.get(desc_id)
+                if desc and desc.content:
+                    descriptions.append(str(desc.content).strip())
         except Exception:
             pass
         exp_dict["descriptions"] = descriptions

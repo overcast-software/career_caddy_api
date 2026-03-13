@@ -1,4 +1,5 @@
-from job_hunting.lib.models import JobPost, Resume, Summary
+from job_hunting.lib.models import JobPost, Resume
+from job_hunting.models import Summary
 from jinja2 import Environment, FileSystemLoader
 from .db_export_service import DbExportService
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
@@ -47,10 +48,8 @@ class SummaryService:
             # max_tokens=150 not supported with gpt-5
         )
         content = response.choices[0].message.content.strip()
-        new_summary = Summary(
+        return Summary.objects.create(
             job_post_id=self.job.id,
             user_id=self.resume.user_id,
             content=content,
         )
-        new_summary.save()
-        return new_summary

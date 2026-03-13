@@ -9,14 +9,11 @@ class ResumeSummaries(BaseModel):
     resume_id = Column(
         Integer, ForeignKey("resume.id", ondelete="CASCADE"), nullable=False
     )
-    summary_id = Column(
-        Integer, ForeignKey("summary.id", ondelete="CASCADE"), nullable=False
-    )
+    summary_id = Column(Integer, nullable=False)
     active = Column(Boolean)
 
     # Relationships
-    resume = relationship("Resume", back_populates="resume_summaries", overlaps="summaries")
-    summary = relationship("Summary", back_populates="resume_summaries", overlaps="resumes")
+    resume = relationship("Resume", back_populates="resume_summaries")
 
     __mapper_args__ = {"confirm_deleted_rows": False}
 

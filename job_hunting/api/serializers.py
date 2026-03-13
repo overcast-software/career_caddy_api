@@ -21,9 +21,9 @@ from job_hunting.lib.models import (
     ResumeSummaries,
     Score,
     Scrape,
-    Summary,
 )
-from job_hunting.models import Status, Skill, Description, Certification, Education
+from job_hunting.lib.models.base import BaseModel
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary
 
 
 def _to_primitive(val):
@@ -670,7 +670,7 @@ class SummarySerializer(BaseSASerializer):
     attributes = ["content"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
-        "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
+        "job-post": {"attr": "job_post_id", "type": "job-post", "uselist": False},
     }
     relationship_fks = {
         "user": "user_id",
@@ -678,15 +678,23 @@ class SummarySerializer(BaseSASerializer):
     }
 
     def to_resource(self, obj):
-        res = super().to_resource(obj)
-        # Ensure user relationship linkage points to Django user
+        d = {
+            "type": self.type,
+            "id": str(obj.id),
+            "attributes": {"content": getattr(obj, "content", None)},
+            "relationships": {},
+        }
         if hasattr(obj, "user_id") and obj.user_id:
-            res.setdefault("relationships", {})["user"] = {
+            d["relationships"]["user"] = {
                 "data": {"type": "user", "id": str(obj.user_id)},
                 "links": {
                     "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
                     "related": f"{_resource_base_path('user')}/{obj.user_id}",
                 },
+            }
+        if hasattr(obj, "job_post_id") and obj.job_post_id:
+            d["relationships"]["job-post"] = {
+                "data": {"type": "job-post", "id": str(obj.job_post_id)},
             }
         # If included under a resume, inject per-link 'active' from resume_summary
         try:
@@ -694,17 +702,17 @@ class SummarySerializer(BaseSASerializer):
             if ctx and ctx.get("parent_type") == "resume":
                 resume_id = ctx.get("parent_id")
                 if resume_id:
-                    session = self.model.get_session()
+                    session = BaseModel.get_session()
                     link = (
                         session.query(ResumeSummaries)
                         .filter_by(resume_id=int(resume_id), summary_id=obj.id)
                         .first()
                     )
                     if link and hasattr(link, "active"):
-                        res.setdefault("attributes", {})["active"] = bool(link.active)
+                        d["attributes"]["active"] = bool(link.active)
         except Exception:
             pass
-        return res
+        return d
 
     def get_related(self, obj, rel_name):
         if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:

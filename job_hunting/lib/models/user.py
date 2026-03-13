@@ -22,8 +22,6 @@ class User(BaseModel):
     scores = relationship("Score")
     cover_letters = relationship("CoverLetter", back_populates="user")
     applications = relationship("Application", back_populates="user")
-    summaries = relationship("Summary", back_populates="user")
-
     @property
     def name(self):
         """Return a display name for the user."""

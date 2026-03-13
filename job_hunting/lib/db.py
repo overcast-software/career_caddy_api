@@ -192,11 +192,12 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
 
     # Import SQLAlchemy model modules individually to be resilient to failures
     model_modules = [
-        "certification", "cover_letter", "description", "education", "experience",
+        "cover_letter", "experience",
         "experience_description", "profile", "project_description", "resume",
-        "resume_certification", "resume_education", "resume_experience", 
-        "resume_skill", "resume_summary", "scrape", "skill", "summary", "user",
-        "company", "job_post", "application", "score", "project", "resume_project"
+        "resume_certification", "resume_education", "resume_experience",
+        "resume_skill", "resume_summary", "scrape", "user",
+        "company", "job_post", "application", "score", "project", "resume_project",
+        "job_application_status", "question", "answer", "api_key", "career_data",
     ]
     
     successful_imports = []

@@ -25,12 +25,11 @@ from job_hunting.lib.models.resume_education import ResumeEducation
 from job_hunting.lib.models.resume_certification import ResumeCertification
 from job_hunting.lib.models.resume_project import ResumeProject
 from job_hunting.lib.models.resume_skill import ResumeSkill
-from job_hunting.lib.models.summary import Summary
 from job_hunting.lib.models.resume_summary import ResumeSummaries
 from job_hunting.models import Skill
 from job_hunting.lib.models.profile import Profile
 from job_hunting.lib.models.company import Company
-from job_hunting.models import Description
+from job_hunting.models import Description, Summary
 
 
 class SkillTag(Enum):
@@ -277,8 +276,7 @@ class IngestResume:
             else:
                 content = getattr(parsed_resume.summary, "content", None)
             if content:
-                summary, _ = Summary.first_or_create(content=content)
-                summary.save()
+                summary, _ = Summary.objects.get_or_create(content=content)
                 # Create join record linking resume and summary and mark as active
                 rs = ResumeSummaries(
                     resume_id=self.db_resume.id, summary_id=summary.id, active=True

@@ -24,7 +24,6 @@ class JobPost(BaseModel):
     company = relationship("Company", back_populates="job_posts")
     scores = relationship("Score", back_populates="job_post")
     scrapes = relationship("Scrape", back_populates="job_post")
-    summaries = relationship("Summary", back_populates="job_post")
     cover_letters = relationship("CoverLetter", back_populates="job_post")
     applications = relationship("Application", back_populates="job_post")
     questions = relationship(
