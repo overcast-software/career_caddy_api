@@ -8,13 +8,13 @@ from job_hunting.lib.models import (
     Answer,
     Application,
     BaseModel,
-    Company,
     CoverLetter,
     JobPost,
     Question,
     Resume,
     User,
 )
+from job_hunting.models import Company
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -52,12 +52,9 @@ class AnswerService:
             self.session.query(Question)
             .options(
                 joinedload(Question.application).joinedload(Application.user),
-                joinedload(Question.application)
-                .joinedload(Application.job_post)
-                .joinedload(JobPost.company),
+                joinedload(Question.application).joinedload(Application.job_post),
                 joinedload(Question.application).joinedload(Application.resume),
                 joinedload(Question.user),
-                joinedload(Question.company),
             )
             .filter_by(id=question.id)
             .first()
@@ -85,12 +82,12 @@ class AnswerService:
         if application and hasattr(application, "job_post"):
             job_post = application.job_post
 
-        # Resolve company
+        # Resolve company (via Django ORM using company_id fields)
         company = None
-        if hasattr(question, "company") and question.company:
-            company = question.company
-        elif job_post and hasattr(job_post, "company"):
-            company = job_post.company
+        if getattr(question, "company_id", None):
+            company = Company.objects.filter(pk=question.company_id).first()
+        elif job_post and getattr(job_post, "company_id", None):
+            company = Company.objects.filter(pk=job_post.company_id).first()
 
         # Resolve resume(s) (favorites only)
         resumes = []
@@ -120,7 +117,7 @@ class AnswerService:
             cover_letters_query = (
                 self.session.query(CoverLetter)
                 .options(
-                    joinedload(CoverLetter.job_post).joinedload(JobPost.company),
+                    joinedload(CoverLetter.job_post),
                     joinedload(CoverLetter.resume),
                 )
                 .filter(

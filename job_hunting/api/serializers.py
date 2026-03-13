@@ -8,7 +8,6 @@ from rest_framework import serializers
 from job_hunting.lib.models import (
     ApiKey,
     Application,
-    Company,
     CoverLetter,
     Experience,
     ExperienceDescription,
@@ -23,7 +22,7 @@ from job_hunting.lib.models import (
     Scrape,
 )
 from job_hunting.lib.models.base import BaseModel
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company
 
 
 def _to_primitive(val):
@@ -509,15 +508,18 @@ class CompanySerializer(BaseSASerializer):
     type = "company"
     model = Company
     attributes = ["name", "display_name"]
-    relationships = {
-        "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
-        "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
-        "job-applications": {
-            "attr": "applications",
-            "type": "job-application",
-            "uselist": True,
-        },
-    }
+    relationships = {}
+
+    def to_resource(self, obj):
+        return {
+            "type": self.type,
+            "id": str(obj.id),
+            "attributes": {
+                "name": getattr(obj, "name", None),
+                "display_name": getattr(obj, "display_name", None),
+            },
+            "relationships": {},
+        }
 
 
 class CoverLetterSerializer(BaseSASerializer):

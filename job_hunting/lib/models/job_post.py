@@ -12,7 +12,7 @@ class JobPost(BaseModel):
     created_by = Column(Integer, ForeignKey("auth_user.id"))
     description = Column(Text)
     title = Column(String)
-    company_id = Column(Integer, ForeignKey("company.id"))
+    company_id = Column(Integer)
     posted_date = Column(DateTime, default=datetime.utcnow)
     extraction_date = Column(DateTime)  # created_at is sufficient
     # link for job post.
@@ -21,7 +21,6 @@ class JobPost(BaseModel):
     link = Column(String)
 
     # Relationships
-    company = relationship("Company", back_populates="job_posts")
     scores = relationship("Score", back_populates="job_post")
     scrapes = relationship("Scrape", back_populates="job_post")
     cover_letters = relationship("CoverLetter", back_populates="job_post")

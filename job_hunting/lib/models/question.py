@@ -10,9 +10,7 @@ class Question(BaseModel):
     application_id = Column(
         Integer, ForeignKey("application.id", ondelete="SET NULL"), nullable=True
     )
-    company_id = Column(
-        Integer, ForeignKey("company.id", ondelete="SET NULL"), nullable=True
-    )
+    company_id = Column(Integer, nullable=True)
     created_by_id = Column(
         Integer, ForeignKey("auth_user.id", ondelete="SET NULL"), nullable=True
     )
@@ -22,7 +20,6 @@ class Question(BaseModel):
 
     # Relationships
     application = relationship("Application", back_populates="questions")
-    company = relationship("Company")
     user = relationship("User", foreign_keys=[created_by_id])
     @property
     def job_post(self):

@@ -196,7 +196,7 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         "experience_description", "project_description", "resume",
         "resume_certification", "resume_education", "resume_experience",
         "resume_skill", "resume_summary", "scrape", "user",
-        "company", "job_post", "application", "score", "project", "resume_project",
+        "job_post", "application", "score", "project", "resume_project",
         "job_application_status", "question", "answer", "api_key", "career_data",
     ]
     

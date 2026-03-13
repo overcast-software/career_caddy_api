@@ -13,7 +13,7 @@ class Experience(BaseModel):
     content = Column(Text, nullable=True)
     location = Column(String, nullable=True)
     summary = Column(String, nullable=True)
-    company_id = Column(Integer, ForeignKey("company.id"), nullable=False)
+    company_id = Column(Integer, nullable=False)
     # Many-to-many with Resume via resume_experience
     resumes = relationship(
         "Resume",
@@ -21,17 +21,19 @@ class Experience(BaseModel):
         back_populates="experiences",
         overlaps="experience,resume",
     )
-    company = relationship("Company")
 
     def to_export_dict(self) -> dict:
         """Return a dict suitable for export templates."""
         exp_dict = {}
 
-        # Company name
+        # Company name (via Django ORM)
         try:
-            exp_dict["company"] = (
-                getattr(getattr(self, "company", None), "name", "") or ""
-            )
+            from job_hunting.models import Company as DjangoCompany
+            if self.company_id:
+                co = DjangoCompany.objects.filter(pk=self.company_id).first()
+                exp_dict["company"] = (co.name if co else "") or ""
+            else:
+                exp_dict["company"] = ""
         except Exception:
             exp_dict["company"] = ""
 

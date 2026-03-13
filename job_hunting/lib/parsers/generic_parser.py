@@ -1,4 +1,5 @@
-from job_hunting.lib.models import Scrape, JobPost, Company
+from job_hunting.lib.models import Scrape, JobPost
+from job_hunting.models import Company
 import sys
 import os
 from datetime import datetime, date
@@ -92,9 +93,9 @@ class GenericParser:
             print("*" * 88)
 
             # Create or find company using validated data
-            company, _ = Company.first_or_create(
+            company, _ = Company.objects.get_or_create(
                 name=validated_data.company_name,
-                display_name=validated_data.company_display_name,
+                defaults={"display_name": validated_data.company_display_name},
             )
             print(f"company id: {company.id}")
 

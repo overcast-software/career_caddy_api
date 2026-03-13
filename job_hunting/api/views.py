@@ -31,7 +31,6 @@ from job_hunting.lib.models import (
     Score,
     Scrape,
     JobPost,
-    Company,
     CoverLetter,
     Application,
     Experience,
@@ -46,7 +45,7 @@ from job_hunting.lib.models import (
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -3388,22 +3387,73 @@ class CompanyViewSet(BaseSAViewSet):
     model = Company
     serializer_class = CompanySerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
+    def list(self, request):
+        qs = Company.objects.all()
+        ser = self.get_serializer()
+        return Response({"data": [ser.to_resource(obj) for obj in qs]})
+
+    def retrieve(self, request, pk=None):
+        obj = Company.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    def create(self, request):
+        data = request.data.get("data", {})
+        attrs = data.get("attributes", {})
+        obj = Company.objects.create(
+            name=attrs.get("name", ""),
+            display_name=attrs.get("display_name"),
+            notes=attrs.get("notes"),
+        )
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
+
+    def update(self, request, pk=None):
+        obj = Company.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        data = request.data.get("data", {})
+        attrs = data.get("attributes", {})
+        for field in ("name", "display_name", "notes"):
+            if field in attrs:
+                setattr(obj, field, attrs[field])
+        obj.save()
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    def partial_update(self, request, pk=None):
+        return self.update(request, pk=pk)
+
+    def destroy(self, request, pk=None):
+        obj = Company.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @extend_schema(tags=["Companies"], summary="List job posts for a company", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"], url_path="job-posts")
     def job_posts(self, request, pk=None):
-        company = self.model.get(int(pk))
-        if not company:
+        if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [JobPostSerializer().to_resource(j) for j in (company.job_posts or [])]
+        session = self.get_session()
+        posts = session.query(JobPost).filter_by(company_id=int(pk)).all()
+        data = [JobPostSerializer().to_resource(j) for j in posts]
         return Response({"data": data})
 
     @extend_schema(tags=["Companies"], summary="List scrapes for a company", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def scrapes(self, request, pk=None):
-        company = self.model.get(int(pk))
-        if not company:
+        if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ScrapeSerializer().to_resource(s) for s in (company.scrapes or [])]
+        session = self.get_session()
+        scrapes_list = session.query(Scrape).filter_by(company_id=int(pk)).all()
+        data = [ScrapeSerializer().to_resource(s) for s in scrapes_list]
         return Response({"data": data})
 
 

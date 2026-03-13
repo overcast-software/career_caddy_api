@@ -7,7 +7,6 @@ from .resume_project import ResumeProject
 from .score import Score
 from .job_post import JobPost
 from .scrape import Scrape
-from .company import Company
 from .cover_letter import CoverLetter
 from .application import Application
 from .resume_summary import ResumeSummaries

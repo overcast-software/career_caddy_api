@@ -27,8 +27,7 @@ from job_hunting.lib.models.resume_project import ResumeProject
 from job_hunting.lib.models.resume_skill import ResumeSkill
 from job_hunting.lib.models.resume_summary import ResumeSummaries
 from job_hunting.models import Skill
-from job_hunting.lib.models.company import Company
-from job_hunting.models import Description, Summary
+from job_hunting.models import Description, Summary, Company
 
 
 class SkillTag(Enum):
@@ -306,7 +305,7 @@ class IngestResume:
                     company_display = getattr(comp, "display_name", None)
 
             # Ensure a Company record exists (Company.name is non-nullable).
-            company, _ = Company.first_or_create(
+            company, _ = Company.objects.get_or_create(
                 name=company_name, defaults={"display_name": company_display}
             )
 
@@ -320,7 +319,7 @@ class IngestResume:
             )
 
             # Ensure company_id is set (experience.company_id is non-nullable in the model)
-            experience.company = company
+            experience.company_id = company.id
             experience.resume = self.db_resume
             print("*" * 88)
             ResumeExperience.first_or_create(

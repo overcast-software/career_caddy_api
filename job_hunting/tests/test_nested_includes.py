@@ -3,7 +3,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
-from job_hunting.lib.models import Company, JobPost, Resume, CoverLetter
+from job_hunting.lib.models import JobPost, Resume, CoverLetter
+from job_hunting.models import Company
 
 
 class TestNestedIncludes(TestCase):
@@ -16,8 +17,7 @@ class TestNestedIncludes(TestCase):
         self.user2 = User.objects.create_user(username="user2", password="pass")
         
         # Create company
-        self.company = Company(name="Test Company")
-        self.company.save()
+        self.company = Company.objects.create(name="Test Company")
         
         # Create job post
         self.job_post = JobPost(
