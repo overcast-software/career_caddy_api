@@ -10,7 +10,6 @@ from job_hunting.lib.models import (
     Application,
     Company,
     CoverLetter,
-    Education,
     Experience,
     ExperienceDescription,
     JobApplicationStatus,
@@ -24,7 +23,7 @@ from job_hunting.lib.models import (
     Scrape,
     Summary,
 )
-from job_hunting.models import Status, Skill, Description, Certification
+from job_hunting.models import Status, Skill, Description, Certification, Education
 
 
 def _to_primitive(val):
@@ -794,9 +793,6 @@ class EducationSerializer(BaseSASerializer):
     type = "education"
     model = Education
     attributes = ["degree", "issue_date", "institution", "major", "minor"]
-    relationships = {
-        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
-    }
 
     def to_resource(self, obj):
         res = super().to_resource(obj)

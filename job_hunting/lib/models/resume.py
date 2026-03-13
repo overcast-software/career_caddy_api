@@ -52,12 +52,6 @@ class Resume(BaseModel):
         order_by=lambda: Base.metadata.tables["resume_project"].c.order,
     )
 
-    educations = relationship(
-        "Education",
-        secondary="resume_education",
-        back_populates="resumes",
-    )
-
     resume_skills = relationship(
         "ResumeSkill",
         back_populates="resume",
@@ -167,7 +161,12 @@ class Resume(BaseModel):
         # Educations
         educations = []
         try:
-            for edu in getattr(self, "educations", []) or []:
+            from job_hunting.models import Education as DjangoEdu
+            from .resume_education import ResumeEducation
+            session = self.__class__.get_session()
+            re_links = session.query(ResumeEducation).filter_by(resume_id=self.id).all()
+            edu_ids = [re.education_id for re in re_links]
+            for edu in DjangoEdu.objects.filter(pk__in=edu_ids):
                 educations.append(edu.to_export_dict())
         except Exception:
             pass

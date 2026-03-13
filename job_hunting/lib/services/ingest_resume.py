@@ -15,7 +15,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.models.openai import OpenAIResponsesModel
 from job_hunting.lib.models.experience import Experience
 from job_hunting.lib.models.experience_description import ExperienceDescription
-from job_hunting.lib.models.education import Education
+from job_hunting.models import Education
 from job_hunting.lib.models.project import Project
 from job_hunting.lib.models.project_description import ProjectDescription
 from job_hunting.models import Certification
@@ -340,14 +340,13 @@ class IngestResume:
 
         print("Creating education...")
         for edu_data in parsed_resume.education:
-            education = Education(
+            education = Education.objects.create(
                 institution=edu_data.institution,
                 degree=edu_data.degree,
                 major=edu_data.major,
                 issue_date=self.parse_date(edu_data.issue_date),
             )
-            education.save()
-            ResumeEducation.first_or_create(resume=self.db_resume, education=education)
+            ResumeEducation.first_or_create(resume_id=self.db_resume.id, education_id=education.id)
 
         print("Creating projects...")
         for idx, proj_data in enumerate(parsed_resume.projects):

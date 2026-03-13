@@ -9,14 +9,11 @@ class ResumeEducation(BaseModel):
     resume_id = Column(
         Integer, ForeignKey("resume.id", ondelete="CASCADE"), nullable=False
     )
-    education_id = Column(
-        Integer, ForeignKey("education.id", ondelete="CASCADE"), nullable=False
-    )
+    education_id = Column(Integer, nullable=False)
     institution = Column(String, nullable=True)
     degree = Column(String, nullable=True)
     issue_date = Column(Date, nullable=True)
     content = Column(Text, nullable=True)
 
     # Relationships
-    resume = relationship("Resume", foreign_keys=[resume_id], overlaps="educations")
-    education = relationship("Education", foreign_keys=[education_id], overlaps="educations")
+    resume = relationship("Resume", foreign_keys=[resume_id])

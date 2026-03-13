@@ -36,7 +36,6 @@ from job_hunting.lib.models import (
     Application,
     Summary,
     Experience,
-    Education,
     ExperienceDescription,
     ResumeEducation,
     ResumeCertification,
@@ -48,7 +47,7 @@ from job_hunting.lib.models import (
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description, Certification
+from job_hunting.models import Status, Skill, Description, Certification, Education
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -1661,7 +1660,7 @@ class ResumeViewSet(BaseSAViewSet):
                 eid = _int_or_none(ed_node.get("id"))
                 if eid is None:
                     continue
-                if Education.get(eid) is None:
+                if not Education.objects.filter(pk=eid).exists():
                     invalid.append(eid)
                 else:
                     desired_ids.add(eid)
@@ -2162,7 +2161,7 @@ class ResumeViewSet(BaseSAViewSet):
             edu = None
             eid = _int_or_none(item.get("id"))
             if eid:
-                edu = Education.get(eid)
+                edu = Education.objects.filter(pk=eid).first()
             if edu is None:
                 lookup = {
                     "institution": item.get("institution"),
@@ -2171,9 +2170,8 @@ class ResumeViewSet(BaseSAViewSet):
                     "minor": item.get("minor"),
                     "issue_date": _parse_date(item.get("issue_date")),
                 }
-                # For lookup, None values ignored; but include issue_date only if parsed
                 lookup = {k: v for k, v in lookup.items() if v is not None}
-                edu = session.query(Education).filter_by(**lookup).first()
+                edu = Education.objects.filter(**lookup).first()
                 if not edu:
                     create_attrs = {
                         "institution": item.get("institution"),
@@ -2185,9 +2183,7 @@ class ResumeViewSet(BaseSAViewSet):
                     create_attrs = {
                         k: v for k, v in create_attrs.items() if v is not None
                     }
-                    edu = Education(**create_attrs)
-                    session.add(edu)
-                    session.commit()
+                    edu = Education.objects.create(**create_attrs)
             session.add(ResumeEducation(resume_id=resume.id, education_id=edu.id))
             session.commit()
 
@@ -4407,6 +4403,35 @@ class EducationViewSet(BaseSAViewSet):
     model = Education
     serializer_class = EducationSerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
+    def list(self, request):
+        items = list(Education.objects.all())
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = Education.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def destroy(self, request, pk=None):
+        Education.objects.filter(pk=int(pk)).delete()
+        return Response(status=204)
+
     @extend_schema(tags=["Educations"], summary="Create an education (optionally link to resumes via relationships.resumes)", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Invalid resume IDs")})
     def create(self, request):
         ser = self.get_serializer()
@@ -4421,7 +4446,6 @@ class EducationViewSet(BaseSAViewSet):
         node = data.get("data") or {}
         relationships = node.get("relationships") or {}
 
-        # Accept both "resumes" (list) and "resume" (single) relationship keys
         res_rel = relationships.get("resumes") or relationships.get("resume") or {}
         resume_ids = []
         if isinstance(res_rel, dict):
@@ -4441,35 +4465,20 @@ class EducationViewSet(BaseSAViewSet):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-        # Validate referenced resumes (if provided)
         invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
         if invalid:
             return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"
-                        }
-                    ]
-                },
+                {"errors": [{"detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         session = self.get_session()
+        edu = Education.objects.create(**attrs)
 
-        # Create Education
-        edu = Education(**attrs)
-        session.add(edu)
-        session.commit()  # ensure edu.id is available
-
-        # Populate join table for each provided resume
         for rid in resume_ids:
             link = ResumeEducation(resume_id=rid, education_id=edu.id)
             session.add(link)
         session.commit()
-
-        # Ensure relationships reflect the new joins
-        session.expire(edu, ["resumes"])
 
         payload = {"data": ser.to_resource(edu)}
         include_rels = self._parse_include(request)
