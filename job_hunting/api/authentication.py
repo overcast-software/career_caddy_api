@@ -2,7 +2,7 @@ from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth import get_user_model
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
-from job_hunting.lib.models.api_key import ApiKey
+from job_hunting.models import ApiKey
 
 
 class ApiKeyAuthenticationScheme(OpenApiAuthenticationExtension):

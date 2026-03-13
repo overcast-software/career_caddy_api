@@ -26,7 +26,6 @@ from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.lib.services.answer_service import AnswerService
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import (
-    ApiKey,
     Resume,
     Score,
     Scrape,
@@ -45,7 +44,7 @@ from job_hunting.lib.models import (
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -1392,8 +1391,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         if not request.user.is_staff and user.id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
 
-        session = ApiKey.get_session()
-        api_keys = session.query(ApiKey).filter_by(user_id=user.id).all()
+        api_keys = ApiKey.objects.filter(user_id=user.id)
         data = [ApiKeySerializer().to_resource(k) for k in api_keys]
         return Response({"data": data})
 
@@ -4894,14 +4892,10 @@ class ApiKeyViewSet(BaseSAViewSet):
     @extend_schema(tags=["API Keys"], summary="List API keys (staff sees all; others see only their own)", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
         """List API keys - all keys for admins, user's own keys for regular users"""
-        session = self.get_session()
-
         if request.user.is_staff:
-            # Admin can see all API keys
-            items = session.query(self.model).all()
+            items = list(ApiKey.objects.all())
         else:
-            # Regular users can only see their own keys
-            items = session.query(self.model).filter_by(user_id=request.user.id).all()
+            items = list(ApiKey.objects.filter(user_id=request.user.id))
 
         items = self.paginate(items)
         ser = self.get_serializer()
@@ -4915,7 +4909,7 @@ class ApiKeyViewSet(BaseSAViewSet):
     @extend_schema(tags=["API Keys"], summary="Retrieve an API key (own key, or any if staff)", responses={200: _JSONAPI_ITEM, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         """Get a specific API key"""
-        obj = self.model.get(int(pk))
+        obj = ApiKey.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -5020,7 +5014,7 @@ class ApiKeyViewSet(BaseSAViewSet):
     @extend_schema(tags=["API Keys"], summary="Revoke (delete) an API key", responses={204: OpenApiResponse(description="Revoked"), 403: OpenApiResponse(description="Forbidden")})
     def destroy(self, request, pk=None):
         """Revoke an API key"""
-        obj = self.model.get(int(pk))
+        obj = ApiKey.objects.filter(pk=pk).first()
         if not obj:
             return Response(status=204)
 
@@ -5035,7 +5029,7 @@ class ApiKeyViewSet(BaseSAViewSet):
     @action(detail=True, methods=["post"])
     def revoke(self, request, pk=None):
         """Revoke an API key (alternative to DELETE)"""
-        obj = self.model.get(int(pk))
+        obj = ApiKey.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 

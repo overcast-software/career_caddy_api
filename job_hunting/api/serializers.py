@@ -6,7 +6,6 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
 from job_hunting.lib.models import (
-    ApiKey,
     Application,
     CoverLetter,
     Experience,
@@ -22,7 +21,7 @@ from job_hunting.lib.models import (
     Scrape,
 )
 from job_hunting.lib.models.base import BaseModel
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company
+from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey
 
 
 def _to_primitive(val):
