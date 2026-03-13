@@ -24,10 +24,9 @@ from job_hunting.lib.models import (
     ResumeSummaries,
     Score,
     Scrape,
-    Skill,
     Summary,
 )
-from job_hunting.models import Status
+from job_hunting.models import Status, Skill
 
 
 def _to_primitive(val):
@@ -882,9 +881,6 @@ class SkillSerializer(BaseSASerializer):
     type = "skill"
     model = Skill
     attributes = ["text", "skill_type"]
-    relationships = {
-        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
-    }
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
@@ -894,7 +890,8 @@ class SkillSerializer(BaseSASerializer):
             if ctx and ctx.get("parent_type") == "resume":
                 resume_id = ctx.get("parent_id")
                 if resume_id:
-                    session = self.model.get_session()
+                    from job_hunting.lib.models.base import BaseModel
+                    session = BaseModel.get_session()
                     link = (
                         session.query(ResumeSkill)
                         .filter_by(resume_id=int(resume_id), skill_id=obj.id)

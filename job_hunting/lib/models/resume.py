@@ -64,13 +64,6 @@ class Resume(BaseModel):
         back_populates="resumes",
     )
 
-    skills = relationship(
-        "Skill",
-        secondary="resume_skill",
-        back_populates="resumes",
-        overlaps="resume_skills,skill",
-    )
-
     resume_skills = relationship(
         "ResumeSkill",
         back_populates="resume",
@@ -84,6 +77,14 @@ class Resume(BaseModel):
             body = file.read()
             resume, _ = cls.first_or_create(file_path=path, user_id=user_id)
         return resume
+
+    def _get_django_skills(self):
+        from job_hunting.models import Skill as DjangoSkill
+        from .resume_skill import ResumeSkill
+        session = self.__class__.get_session()
+        rs_links = session.query(ResumeSkill).filter_by(resume_id=self.id).all()
+        skill_ids = [rs.skill_id for rs in rs_links]
+        return list(DjangoSkill.objects.filter(pk__in=skill_ids))
 
     @property
     def language_skills(self):
@@ -106,7 +107,7 @@ class Resume(BaseModel):
         return self.skills_by_type("Security")
 
     def skills_by_type(self, skill_type):
-        return [skill for skill in self.skills if skill.skill_type == skill_type]
+        return [s for s in self._get_django_skills() if s.skill_type == skill_type]
 
     @property
     def active_summary(self) -> Optional["Summary"]:
@@ -190,7 +191,7 @@ class Resume(BaseModel):
         # Skills
         skills = []
         try:
-            for skill in getattr(self, "skills", []) or []:
+            for skill in self._get_django_skills():
                 skill_value = skill.to_export_value()
                 if skill_value:
                     skills.append(skill_value)

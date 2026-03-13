@@ -10,9 +10,7 @@ class ResumeSkill(BaseModel):
     resume_id = Column(
         Integer, ForeignKey("resume.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    skill_id = Column(
-        Integer, ForeignKey("skill.id", ondelete="CASCADE"), index=True, nullable=False
-    )
+    skill_id = Column(Integer, index=True, nullable=False)
     active = Column(Boolean, nullable=False, default=True)
 
     __table_args__ = (
@@ -21,9 +19,4 @@ class ResumeSkill(BaseModel):
         ),
     )
 
-    resume = relationship(
-        "Resume", back_populates="resume_skills", overlaps="skills,resumes"
-    )
-    skill = relationship(
-        "Skill", back_populates="resume_skills", overlaps="skills,resumes"
-    )
+    resume = relationship("Resume", back_populates="resume_skills")

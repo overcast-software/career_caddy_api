@@ -27,7 +27,7 @@ from job_hunting.lib.models.resume_project import ResumeProject
 from job_hunting.lib.models.resume_skill import ResumeSkill
 from job_hunting.lib.models.summary import Summary
 from job_hunting.lib.models.resume_summary import ResumeSummaries
-from job_hunting.lib.models.skill import Skill
+from job_hunting.models import Skill
 from job_hunting.lib.models.profile import Profile
 from job_hunting.lib.models.company import Company
 from job_hunting.lib.models.description import Description
@@ -390,7 +390,7 @@ class IngestResume:
 
         print("Creating skills...")
         for skill_out in parsed_resume.skills:
-            skill_model, _ = Skill.first_or_create(
+            skill_model, _ = Skill.objects.get_or_create(
                 text=skill_out.text,
                 defaults={
                     "skill_type": (skill_out.tag.value if skill_out.tag else None)

@@ -44,14 +44,13 @@ from job_hunting.lib.models import (
     ResumeCertification,
     ResumeSummaries,
     ResumeExperience,
-    Skill,
     ResumeSkill,
     JobApplicationStatus,
     Question,
     Answer,
     CareerData,
 )
-from job_hunting.models import Status
+from job_hunting.models import Status, Skill
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -1744,7 +1743,7 @@ class ResumeViewSet(BaseSAViewSet):
                 sid = _int_or_none(s_node.get("id"))
                 skill = None
                 if sid is not None:
-                    skill = Skill.get(sid)
+                    skill = Skill.objects.filter(pk=sid).first()
                     if not skill:
                         invalid.append(sid)
                         continue
@@ -1754,9 +1753,7 @@ class ResumeViewSet(BaseSAViewSet):
                     if not text:
                         continue
                     # Create or find by text
-                    skill, _ = Skill.first_or_create(
-                        session=session, text=str(text).strip()
-                    )
+                    skill, _ = Skill.objects.get_or_create(text=str(text).strip())
 
                 # Determine desired active flag (default True)
                 active_val = (s_node.get("attributes") or {}).get("active")
@@ -2244,15 +2241,13 @@ class ResumeViewSet(BaseSAViewSet):
             skill = None
             sid = _int_or_none(s_node.get("id"))
             if sid:
-                skill = Skill.get(sid)
+                skill = Skill.objects.filter(pk=sid).first()
             if skill is None:
                 s_attrs = s_node.get("attributes") or {}
                 text = s_attrs.get("text") or s_node.get("text")
                 if not text:
                     continue  # ignore invalid entries
-                skill, _ = Skill.first_or_create(
-                    session=session, text=str(text).strip()
-                )
+                skill, _ = Skill.objects.get_or_create(text=str(text).strip())
             # Determine 'active' (default True)
             active_val = (s_node.get("attributes") or {}).get("active")
             active_val = bool(active_val) if active_val is not None else True
@@ -2611,7 +2606,10 @@ class ResumeViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = SkillSerializer()
         ser.set_parent_context("resume", obj.id, "skills")
-        items = list(obj.skills or [])
+        _session = BaseModel.get_session()
+        rs_links = _session.query(ResumeSkill).filter_by(resume_id=obj.id).all()
+        skill_ids = [rs.skill_id for rs in rs_links]
+        items = list(Skill.objects.filter(pk__in=skill_ids))
         data = [ser.to_resource(s) for s in items]
 
         # Build included only when ?include=... is provided

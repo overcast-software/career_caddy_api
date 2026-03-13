@@ -21,7 +21,6 @@ from .education import Education
 from .certification import Certification
 from .description import Description
 from .experience_description import ExperienceDescription
-from .skill import Skill
 from .resume_skill import ResumeSkill
 from .job_application_status import JobApplicationStatus
 from .question import Question

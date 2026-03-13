@@ -1,5 +1,6 @@
 from jinja2 import Environment, FileSystemLoader
-from job_hunting.lib.models import Resume, Skill, ResumeSkill
+from job_hunting.lib.models import Resume, ResumeSkill
+from job_hunting.models import Skill
 
 
 class DbExportService:
@@ -31,9 +32,7 @@ class DbExportService:
             for link in links:
                 skill = None
                 try:
-                    skill = getattr(link, "skill", None)
-                    if skill is None:
-                        skill = Skill.get(link.skill_id)
+                    skill = Skill.objects.filter(pk=link.skill_id).first()
                 except Exception:
                     continue
 
@@ -58,9 +57,9 @@ class DbExportService:
                     skills.append(value)
 
         except Exception:
-            # Fallback to resume.skills if join query fails
+            # Fallback using django skill objects
             try:
-                resume_skills = getattr(resume, "skills", []) or []
+                resume_skills = resume._get_django_skills()
                 seen = set()
                 for skill in resume_skills:
                     try:
