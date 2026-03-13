@@ -18,7 +18,7 @@ from job_hunting.lib.models.experience_description import ExperienceDescription
 from job_hunting.lib.models.education import Education
 from job_hunting.lib.models.project import Project
 from job_hunting.lib.models.project_description import ProjectDescription
-from job_hunting.lib.models.certification import Certification
+from job_hunting.models import Certification
 from job_hunting.lib.models.resume import Resume
 from job_hunting.lib.models.resume_experience import ResumeExperience
 from job_hunting.lib.models.resume_education import ResumeEducation
@@ -377,15 +377,14 @@ class IngestResume:
 
         print("Creating certifications...")
         for cert_data in parsed_resume.certifications:
-            certification = Certification(
+            certification = Certification.objects.create(
                 title=cert_data.title,
                 issuer=cert_data.issuer,
                 issue_date=self.parse_date(cert_data.issue_date),
                 content=cert_data.content,
             )
-            certification.save()
             ResumeCertification.first_or_create(
-                certification=certification, resume=self.db_resume
+                certification_id=certification.id, resume_id=self.db_resume.id
             )
 
         print("Creating skills...")

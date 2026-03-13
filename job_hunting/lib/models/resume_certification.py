@@ -9,15 +9,12 @@ class ResumeCertification(BaseModel):
     resume_id = Column(
         Integer, ForeignKey("resume.id", ondelete="CASCADE"), nullable=False
     )
-    certification_id = Column(
-        Integer, ForeignKey("certification.id", ondelete="CASCADE"), nullable=False
-    )
+    certification_id = Column(Integer, nullable=False)
 
     issuer = Column(String, nullable=True)
     title = Column(String, nullable=True)
     issue_date = Column(Date, nullable=True)
     content = Column(Text, nullable=True)
 
-    # Relationships (view-only to avoid conflicting with the many-to-many)
-    resume = relationship("Resume", foreign_keys=[resume_id], overlaps="certifications")
-    certification = relationship("Certification", foreign_keys=[certification_id], overlaps="certifications")
+    # Relationships
+    resume = relationship("Resume", foreign_keys=[resume_id])

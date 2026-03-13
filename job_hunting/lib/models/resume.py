@@ -52,12 +52,6 @@ class Resume(BaseModel):
         order_by=lambda: Base.metadata.tables["resume_project"].c.order,
     )
 
-    certifications = relationship(
-        "Certification",
-        secondary="resume_certification",
-        back_populates="resumes",
-    )
-
     educations = relationship(
         "Education",
         secondary="resume_education",
@@ -182,7 +176,12 @@ class Resume(BaseModel):
         # Certifications
         certifications = []
         try:
-            for cert in getattr(self, "certifications", []) or []:
+            from job_hunting.models import Certification as DjangoCert
+            from .resume_certification import ResumeCertification
+            session = self.__class__.get_session()
+            rc_links = session.query(ResumeCertification).filter_by(resume_id=self.id).all()
+            cert_ids = [rc.certification_id for rc in rc_links]
+            for cert in DjangoCert.objects.filter(pk__in=cert_ids):
                 certifications.append(cert.to_export_dict())
         except Exception:
             pass

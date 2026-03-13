@@ -8,7 +8,6 @@ from rest_framework import serializers
 from job_hunting.lib.models import (
     ApiKey,
     Application,
-    Certification,
     Company,
     CoverLetter,
     Education,
@@ -25,7 +24,7 @@ from job_hunting.lib.models import (
     Scrape,
     Summary,
 )
-from job_hunting.models import Status, Skill, Description
+from job_hunting.models import Status, Skill, Description, Certification
 
 
 def _to_primitive(val):
@@ -817,24 +816,12 @@ class CertificationSerializer(BaseSASerializer):
     type = "certification"
     model = Certification
     attributes = ["issuer", "title", "issue_date", "content"]
-    relationships = {
-        "resumes": {"attr": "resumes", "type": "resume", "uselist": True},
-    }
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
         ctx = getattr(self, "_parent_context", None)
         if ctx and ctx.get("parent_type") == "resume":
             res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")
-        else:
-            rid = None
-            try:
-                if getattr(obj, "resumes", None):
-                    rid = obj.resumes[0].id
-            except Exception:
-                rid = None
-            if rid is not None:
-                res.setdefault("attributes", {})["resume_id"] = rid
         return res
 
     def parse_payload(self, payload):

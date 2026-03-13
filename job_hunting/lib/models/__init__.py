@@ -18,7 +18,6 @@ from .resume_certification import ResumeCertification
 from .resume_education import ResumeEducation
 from .experience import Experience
 from .education import Education
-from .certification import Certification
 from .experience_description import ExperienceDescription
 from .resume_skill import ResumeSkill
 from .job_application_status import JobApplicationStatus

@@ -37,7 +37,6 @@ from job_hunting.lib.models import (
     Summary,
     Experience,
     Education,
-    Certification,
     ExperienceDescription,
     ResumeEducation,
     ResumeCertification,
@@ -49,7 +48,7 @@ from job_hunting.lib.models import (
     Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description
+from job_hunting.models import Status, Skill, Description, Certification
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -1701,7 +1700,7 @@ class ResumeViewSet(BaseSAViewSet):
                 cid = _int_or_none(c_node.get("id"))
                 if cid is None:
                     continue
-                if Certification.get(cid) is None:
+                if not Certification.objects.filter(pk=cid).exists():
                     invalid.append(cid)
                 else:
                     desired_ids.add(cid)
@@ -2199,7 +2198,7 @@ class ResumeViewSet(BaseSAViewSet):
             cert = None
             cid = _int_or_none(item.get("id"))
             if cid:
-                cert = Certification.get(cid)
+                cert = Certification.objects.filter(pk=cid).first()
             if cert is None:
                 lookup = {
                     "issuer": item.get("issuer"),
@@ -2207,7 +2206,7 @@ class ResumeViewSet(BaseSAViewSet):
                     "issue_date": _parse_date(item.get("issue_date")),
                 }
                 lookup = {k: v for k, v in lookup.items() if v is not None}
-                cert = session.query(Certification).filter_by(**lookup).first()
+                cert = Certification.objects.filter(**lookup).first()
                 if not cert:
                     create_attrs = {
                         "issuer": item.get("issuer"),
@@ -2218,9 +2217,7 @@ class ResumeViewSet(BaseSAViewSet):
                     create_attrs = {
                         k: v for k, v in create_attrs.items() if v is not None
                     }
-                    cert = Certification(**create_attrs)
-                    session.add(cert)
-                    session.commit()
+                    cert = Certification.objects.create(**create_attrs)
             session.add(
                 ResumeCertification(resume_id=resume.id, certification_id=cert.id)
             )
@@ -4492,6 +4489,35 @@ class CertificationViewSet(BaseSAViewSet):
     model = Certification
     serializer_class = CertificationSerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
+    def list(self, request):
+        items = list(Certification.objects.all())
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = Certification.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def destroy(self, request, pk=None):
+        Certification.objects.filter(pk=int(pk)).delete()
+        return Response(status=204)
+
     @extend_schema(tags=["Certifications"], summary="Create a certification (optionally link to resumes via relationships.resumes)", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Invalid resume IDs")})
     def create(self, request):
         ser = self.get_serializer()
@@ -4543,18 +4569,13 @@ class CertificationViewSet(BaseSAViewSet):
         session = self.get_session()
 
         # Create Certification
-        cert = Certification(**attrs)
-        session.add(cert)
-        session.commit()  # ensure cert.id is available
+        cert = Certification.objects.create(**attrs)
 
         # Populate join table
         for rid in resume_ids:
             link = ResumeCertification(resume_id=rid, certification_id=cert.id)
             session.add(link)
         session.commit()
-
-        # Ensure relationships reflect the new joins
-        session.expire(cert, ["resumes"])
 
         payload = {"data": ser.to_resource(cert)}
         include_rels = self._parse_include(request)
