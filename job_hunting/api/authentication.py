@@ -1,7 +1,21 @@
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth import get_user_model
+from drf_spectacular.extensions import OpenApiAuthenticationExtension
 from job_hunting.lib.models.api_key import ApiKey
+
+
+class ApiKeyAuthenticationScheme(OpenApiAuthenticationExtension):
+    target_class = "job_hunting.api.authentication.ApiKeyAuthentication"
+    name = "apiKeyAuth"
+
+    def get_security_definition(self, auto_schema):
+        return {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Api-Key",
+            "description": "API key prefixed with 'jh_'. Can also be passed as Bearer token or ?api_key= query param.",
+        }
 
 
 class ApiKeyAuthentication(BaseAuthentication):

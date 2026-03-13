@@ -11,6 +11,9 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser, MultiPartParser
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiResponse, inline_serializer, OpenApiParameter
+from drf_spectacular.types import OpenApiTypes
+from rest_framework import serializers as drf_serializers
 from .parsers import VndApiJSONParser
 from job_hunting.lib.scoring.job_scorer import JobScorer
 from job_hunting.lib.ai_client import get_client, set_api_key
@@ -76,6 +79,19 @@ from .serializers import (
 )
 
 
+@extend_schema(
+    tags=["Auth"],
+    summary="Get current user profile",
+    responses={
+        200: OpenApiResponse(
+            description="JSON:API resource object for the authenticated user",
+            response=inline_serializer(
+                name="ProfileResponse",
+                fields={"data": drf_serializers.DictField()},
+            ),
+        )
+    },
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def profile(request):
@@ -85,6 +101,20 @@ def profile(request):
     return Response({"data": resource})
 
 
+@extend_schema(
+    tags=["System"],
+    summary="Health check",
+    auth=[],
+    responses={
+        200: OpenApiResponse(
+            description="Service is healthy",
+            response=inline_serializer(
+                name="HealthcheckResponse",
+                fields={"healthy": drf_serializers.BooleanField()},
+            ),
+        )
+    },
+)
 @csrf_exempt
 def healthcheck(request):
     """Simple health check endpoint that only reports system health."""
@@ -94,6 +124,55 @@ def healthcheck(request):
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
+@extend_schema(
+    tags=["System"],
+    summary="Check or perform first-time initialization",
+    auth=[],
+    methods=["GET"],
+    responses={
+        200: OpenApiResponse(
+            description="Initialization status",
+            response=inline_serializer(
+                name="InitializeStatusResponse",
+                fields={
+                    "initialization_needed": drf_serializers.BooleanField(),
+                    "status": drf_serializers.CharField(),
+                },
+            ),
+        )
+    },
+)
+@extend_schema(
+    tags=["System"],
+    summary="Create first superuser and configure the application",
+    auth=[],
+    methods=["POST"],
+    request=inline_serializer(
+        name="InitializeRequest",
+        fields={
+            "username": drf_serializers.CharField(required=False),
+            "email": drf_serializers.EmailField(required=False),
+            "password": drf_serializers.CharField(required=False),
+            "first_name": drf_serializers.CharField(required=False),
+            "last_name": drf_serializers.CharField(required=False),
+            "openai_api_key": drf_serializers.CharField(required=False),
+        },
+    ),
+    responses={
+        201: OpenApiResponse(
+            description="Initialized successfully",
+            response=inline_serializer(
+                name="InitializeResponse",
+                fields={
+                    "initialized": drf_serializers.BooleanField(),
+                    "user": drf_serializers.DictField(),
+                },
+            ),
+        ),
+        400: OpenApiResponse(description="Bad request / user creation failed"),
+        403: OpenApiResponse(description="Already initialized"),
+    },
+)
 @csrf_exempt
 def initialize(request):
     """Initialize the application with first-time setup."""
@@ -211,6 +290,22 @@ def initialize(request):
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
+_INCLUDE_PARAM = OpenApiParameter(
+    "include", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False,
+    description="Comma-separated relationships to sideload (e.g. resumes,api-keys).",
+)
+
+_PAGE_PARAMS = [
+    OpenApiParameter("page[number]", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False, description="Page number (1-based). Default: 1."),
+    OpenApiParameter("page[size]", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False, description="Items per page. Default: 50."),
+    _INCLUDE_PARAM,
+]
+
+_JSONAPI_LIST = OpenApiResponse(description="JSON:API list", response=inline_serializer(name="JsonApiList", fields={"data": drf_serializers.ListField(child=drf_serializers.DictField()), "included": drf_serializers.ListField(child=drf_serializers.DictField(), required=False)}))
+_JSONAPI_ITEM = OpenApiResponse(description="JSON:API resource", response=inline_serializer(name="JsonApiItem", fields={"data": drf_serializers.DictField(), "included": drf_serializers.ListField(child=drf_serializers.DictField(), required=False)}))
+_JSONAPI_WRITE = inline_serializer(name="JsonApiWrite", fields={"data": drf_serializers.DictField(help_text="JSON:API resource object with 'type', 'attributes', and optional 'relationships'.")})
+
+
 class BaseSAViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, VndApiJSONParser, JSONParser]
@@ -290,7 +385,7 @@ class BaseSAViewSet(viewsets.ViewSet):
     def get_session(self):
         return self.model.get_session()
 
-    def get_serializer(self):
+    def get_serializer(self, *args, **kwargs):
         return self.serializer_class()
 
     def pre_save_payload(self, request, attrs: dict, creating: bool) -> dict:
@@ -504,6 +599,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         end = start + page_size
         return items[start:end]
 
+    @extend_schema(tags=["API"], summary="List resources", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
         session = self.get_session()
         items = session.query(self.model).all()
@@ -516,6 +612,7 @@ class BaseSAViewSet(viewsets.ViewSet):
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["API"], summary="Retrieve a resource", parameters=[_INCLUDE_PARAM], responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
@@ -527,6 +624,7 @@ class BaseSAViewSet(viewsets.ViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["API"], summary="Create a resource", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Validation error")})
     def create(self, request):
         # Handle both JSON:API and plain JSON payloads
         data = request.data if isinstance(request.data, dict) else {}
@@ -572,9 +670,11 @@ class BaseSAViewSet(viewsets.ViewSet):
         session.commit()
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
+    @extend_schema(tags=["API"], summary="Replace a resource (full update)", request=_JSONAPI_WRITE, responses={200: _JSONAPI_ITEM, 400: OpenApiResponse(description="Validation error"), 404: OpenApiResponse(description="Not found")})
     def update(self, request, pk=None):
         return self._upsert(request, pk, partial=False)
 
+    @extend_schema(tags=["API"], summary="Partially update a resource", request=_JSONAPI_WRITE, responses={200: _JSONAPI_ITEM, 400: OpenApiResponse(description="Validation error"), 404: OpenApiResponse(description="Not found")})
     def partial_update(self, request, pk=None):
         return self._upsert(request, pk, partial=True)
 
@@ -597,6 +697,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         session.commit()
         return Response({"data": ser.to_resource(obj)})
 
+    @extend_schema(tags=["API"], summary="Delete a resource", responses={204: OpenApiResponse(description="Deleted")})
     def destroy(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
@@ -608,6 +709,7 @@ class BaseSAViewSet(viewsets.ViewSet):
 
     # JSON:API relationships linkage endpoint:
     # GET /<type>/{id}/relationships/<rel-name>
+    @extend_schema(tags=["API"], summary="Get JSON:API relationship linkage data", responses={200: OpenApiResponse(description="Relationship linkage"), 404: OpenApiResponse(description="Not found or relationship not found")})
     @action(detail=True, methods=["get"], url_path=r"relationships/(?P<rel>[^/]+)")
     def relationships(self, request, pk=None, rel=None):
         obj = self.model.get(int(pk))
@@ -665,10 +767,23 @@ class BaseSAViewSet(viewsets.ViewSet):
         return Response({"data": data, "links": links})
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Summaries"], summary="List summaries"),
+    retrieve=extend_schema(tags=["Summaries"], summary="Retrieve a summary"),
+    update=extend_schema(tags=["Summaries"], summary="Update a summary"),
+    partial_update=extend_schema(tags=["Summaries"], summary="Partially update a summary"),
+    destroy=extend_schema(tags=["Summaries"], summary="Delete a summary"),
+)
 class SummaryViewSet(BaseSAViewSet):
     model = Summary
     serializer_class = SummarySerializer
 
+    @extend_schema(
+        tags=["Summaries"],
+        summary="Create a summary (or AI-generate if content omitted and job-post provided)",
+        request=_JSONAPI_WRITE,
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Missing resume or invalid IDs"), 503: OpenApiResponse(description="AI client not configured")},
+    )
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
@@ -796,6 +911,37 @@ class SummaryViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+_USER_RESOURCE_RESPONSE = OpenApiResponse(
+    description="JSON:API user resource",
+    response=inline_serializer(
+        name="UserResource",
+        fields={"data": drf_serializers.DictField()},
+    ),
+)
+
+_USER_LIST_RESPONSE = OpenApiResponse(
+    description="JSON:API list of user resources",
+    response=inline_serializer(
+        name="UserListResource",
+        fields={
+            "data": drf_serializers.ListField(child=drf_serializers.DictField()),
+            "included": drf_serializers.ListField(child=drf_serializers.DictField(), required=False),
+        },
+    ),
+)
+
+_USER_WRITE_REQUEST = inline_serializer(
+    name="UserWriteRequest",
+    fields={
+        "username": drf_serializers.CharField(required=False),
+        "email": drf_serializers.EmailField(required=False),
+        "password": drf_serializers.CharField(required=False),
+        "first_name": drf_serializers.CharField(required=False),
+        "last_name": drf_serializers.CharField(required=False),
+        "phone": drf_serializers.CharField(required=False),
+    },
+)
+
 class DjangoUserViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [VndApiJSONParser, JSONParser]
@@ -852,7 +998,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
             return []
         return super().get_throttles()
 
-    def get_serializer(self):
+    def get_serializer(self, *args, **kwargs):
         return DjangoUserSerializer()
 
     def _parse_include(self, request):
@@ -899,6 +1045,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
                     included.append(rel_ser.to_resource(t))
         return included
 
+    @extend_schema(tags=["Users"], summary="List users (staff sees all; others see only themselves)",
+                   parameters=[_INCLUDE_PARAM], responses={200: _USER_LIST_RESPONSE})
     def list(self, request):
         User = get_user_model()
 
@@ -916,6 +1064,9 @@ class DjangoUserViewSet(viewsets.ViewSet):
             payload["included"] = self._build_included(users, include_rels)
         return Response(payload)
 
+    @extend_schema(tags=["Users"], summary="Retrieve a user by ID",
+                   parameters=[_INCLUDE_PARAM],
+                   responses={200: _USER_RESOURCE_RESPONSE, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         User = get_user_model()
         try:
@@ -934,6 +1085,21 @@ class DjangoUserViewSet(viewsets.ViewSet):
             payload["included"] = self._build_included([user], include_rels)
         return Response(payload)
 
+    @extend_schema(
+        tags=["Users"], summary="Store the OpenAI API key (superuser only)",
+        request=inline_serializer(
+            name="SetOpenAIKeyRequest",
+            fields={"openai_api_key": drf_serializers.CharField()},
+        ),
+        responses={
+            201: OpenApiResponse(description="Key saved", response=inline_serializer(
+                name="SetOpenAIKeyResponse",
+                fields={"meta": drf_serializers.DictField()},
+            )),
+            400: OpenApiResponse(description="Missing or invalid key"),
+            403: OpenApiResponse(description="Forbidden — superuser only"),
+        },
+    )
     @action(
         detail=False,
         methods=["post"],
@@ -974,6 +1140,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         return Response({"meta": {"openai_api_key_saved": True}}, status=201)
 
+    @extend_schema(
+        tags=["Auth"], summary="Register a new user",
+        auth=[],
+        request=_USER_WRITE_REQUEST,
+        responses={
+            201: _USER_RESOURCE_RESPONSE,
+            400: OpenApiResponse(description="Validation error (missing fields, duplicate username/email)"),
+        },
+    )
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -1026,9 +1201,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 
+    @extend_schema(tags=["Users"], summary="Replace a user (full update)",
+                   request=_USER_WRITE_REQUEST,
+                   responses={200: _USER_RESOURCE_RESPONSE, 400: OpenApiResponse(description="Validation error"), 404: OpenApiResponse(description="Not found")})
     def update(self, request, pk=None):
         return self._upsert(request, pk, partial=False)
 
+    @extend_schema(tags=["Users"], summary="Partially update a user",
+                   request=_USER_WRITE_REQUEST,
+                   responses={200: _USER_RESOURCE_RESPONSE, 400: OpenApiResponse(description="Validation error"), 404: OpenApiResponse(description="Not found")})
     def partial_update(self, request, pk=None):
         return self._upsert(request, pk, partial=True)
 
@@ -1079,6 +1260,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         return Response({"data": ser.to_resource(user)})
 
+    @extend_schema(tags=["Users"], summary="Delete a user",
+                   responses={204: OpenApiResponse(description="Deleted")})
     def destroy(self, request, pk=None):
         User = get_user_model()
         try:
@@ -1088,6 +1271,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
             pass
         return Response(status=204)
 
+    @extend_schema(
+        tags=["Auth"], summary="[Deprecated] Bootstrap superuser — use /api/v1/initialize/ instead",
+        auth=[], deprecated=True,
+        responses={410: OpenApiResponse(description="Gone — endpoint removed")},
+    )
     @action(
         detail=False,
         methods=["post"],
@@ -1107,6 +1295,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
             status=410,  # Gone
         )
 
+    @extend_schema(tags=["Users"], summary="List resumes for a user",
+                   responses={200: OpenApiResponse(description="JSON:API list of resume resources")})
     @action(detail=True, methods=["get"])
     def resumes(self, request, pk=None):
         User = get_user_model()
@@ -1120,6 +1310,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [ResumeSerializer().to_resource(r) for r in resumes]
         return Response({"data": data})
 
+    @extend_schema(tags=["Users"], summary="List scores for a user",
+                   responses={200: OpenApiResponse(description="JSON:API list of score resources")})
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
         User = get_user_model()
@@ -1133,6 +1325,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
+    @extend_schema(tags=["Users"], summary="List cover letters for a user",
+                   responses={200: OpenApiResponse(description="JSON:API list of cover-letter resources")})
     @action(detail=True, methods=["get"], url_path="cover-letters")
     def cover_letters(self, request, pk=None):
         User = get_user_model()
@@ -1146,6 +1340,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
+    @extend_schema(tags=["Users"], summary="List job applications for a user",
+                   responses={200: OpenApiResponse(description="JSON:API list of application resources")})
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
         User = get_user_model()
@@ -1159,6 +1355,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [ApplicationSerializer().to_resource(a) for a in applications]
         return Response({"data": data})
 
+    @extend_schema(tags=["Users"], summary="List summaries for a user",
+                   responses={200: OpenApiResponse(description="JSON:API list of summary resources")})
     @action(detail=True, methods=["get"])
     def summaries(self, request, pk=None):
         User = get_user_model()
@@ -1172,6 +1370,9 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
 
+    @extend_schema(tags=["Users"], summary="List API keys for a user (own keys, or any if staff)",
+                   responses={200: OpenApiResponse(description="JSON:API list of api-key resources"),
+                               403: OpenApiResponse(description="Forbidden")})
     @action(detail=True, methods=["get"], url_path="api-keys")
     def api_keys(self, request, pk=None):
         """Get API keys for a user"""
@@ -1190,6 +1391,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
         data = [ApiKeySerializer().to_resource(k) for k in api_keys]
         return Response({"data": data})
 
+    @extend_schema(
+        tags=["Auth"], summary="Get the authenticated user's own record",
+        parameters=[_INCLUDE_PARAM],
+        responses={200: _USER_RESOURCE_RESPONSE},
+    )
     @action(
         detail=False,
         methods=["get"],
@@ -1206,10 +1412,17 @@ class DjangoUserViewSet(viewsets.ViewSet):
         return Response(payload)
 
 
+@extend_schema_view(
+    create=extend_schema(tags=["Resumes"], summary="Create a resume"),
+    update=extend_schema(tags=["Resumes"], summary="Update a resume (supports nested experiences/educations/skills reconciliation)"),
+    partial_update=extend_schema(tags=["Resumes"], summary="Partially update a resume (supports nested experiences/educations/skills reconciliation)"),
+    destroy=extend_schema(tags=["Resumes"], summary="Delete a resume"),
+)
 class ResumeViewSet(BaseSAViewSet):
     model = Resume
     serializer_class = ResumeSerializer
 
+    @extend_schema(tags=["Resumes"], summary="List resumes (auto-includes all relationships)", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
         session = self.get_session()
         items = session.query(self.model).all()
@@ -1224,6 +1437,7 @@ class ResumeViewSet(BaseSAViewSet):
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["Resumes"], summary="Retrieve a resume (auto-includes all relationships)", parameters=[_INCLUDE_PARAM], responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
@@ -2197,6 +2411,8 @@ class ResumeViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
+    @extend_schema(methods=["GET"], tags=["Resumes"], summary="List summaries for a resume", responses={200: _JSONAPI_LIST})
+    @extend_schema(methods=["POST"], tags=["Resumes"], summary="Create/AI-generate a summary for a resume", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Missing job-post or invalid IDs"), 503: OpenApiResponse(description="AI client not configured")})
     @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
         if request.method.lower() == "post":
@@ -2315,6 +2531,7 @@ class ResumeViewSet(BaseSAViewSet):
             )
         return Response(payload)
 
+    @extend_schema(tags=["Resumes"], summary="Retrieve a specific summary linked to a resume", responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     @action(detail=True, methods=["get"], url_path=r"summaries/(?P<summary_id>\d+)")
     def summary(self, request, pk=None, summary_id=None):
         session = self.get_session()
@@ -2354,6 +2571,7 @@ class ResumeViewSet(BaseSAViewSet):
             )
         return Response(payload)
 
+    @extend_schema(tags=["Resumes"], summary="List experiences for a resume", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2374,6 +2592,7 @@ class ResumeViewSet(BaseSAViewSet):
             )
         return Response(payload)
 
+    @extend_schema(tags=["Resumes"], summary="List educations for a resume", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def educations(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2384,6 +2603,7 @@ class ResumeViewSet(BaseSAViewSet):
         data = [ser.to_resource(e) for e in (obj.educations or [])]
         return Response({"data": data})
 
+    @extend_schema(tags=["Resumes"], summary="List skills for a resume", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def skills(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2404,6 +2624,13 @@ class ResumeViewSet(BaseSAViewSet):
             )
         return Response(payload)
 
+    @extend_schema(
+        tags=["Resumes"],
+        summary="Export a resume as DOCX or Markdown",
+        parameters=[OpenApiParameter("format", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description="'docx' (default) or 'md'"),
+                    OpenApiParameter("template_path", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False, description="Path to a custom DOCX template (docx only)")],
+        responses={200: OpenApiResponse(description="File download (application/vnd.openxmlformats-officedocument.wordprocessingml.document or text/markdown)"), 404: OpenApiResponse(description="Not found")},
+    )
     @action(detail=True, methods=["get"], url_path="export")
     def export(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2490,6 +2717,12 @@ class ResumeViewSet(BaseSAViewSet):
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
 
+    @extend_schema(
+        tags=["Resumes"],
+        summary="Ingest a resume from an uploaded DOCX file",
+        request=inline_serializer(name="IngestResumeRequest", fields={"file": drf_serializers.FileField(help_text="DOCX resume file (multipart/form-data)")}),
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="No file provided or unsupported format")},
+    )
     @action(detail=False, methods=["post"], url_path="ingest")
     def ingest(self, request):
         """
@@ -2596,10 +2829,23 @@ class ResumeViewSet(BaseSAViewSet):
             )
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Scores"], summary="List scores"),
+    retrieve=extend_schema(tags=["Scores"], summary="Retrieve a score"),
+    update=extend_schema(tags=["Scores"], summary="Update a score"),
+    partial_update=extend_schema(tags=["Scores"], summary="Partially update a score"),
+    destroy=extend_schema(tags=["Scores"], summary="Delete a score"),
+)
 class ScoreViewSet(BaseSAViewSet):
     model = Score
     serializer_class = ScoreSerializer
 
+    @extend_schema(
+        tags=["Scores"],
+        summary="AI-score a job post against a resume (requires user, job-post, and resume relationships)",
+        request=_JSONAPI_WRITE,
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Missing required relationships"), 502: OpenApiResponse(description="AI scoring failed"), 503: OpenApiResponse(description="AI client not configured")},
+    )
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
 
@@ -2719,6 +2965,14 @@ class ScoreViewSet(BaseSAViewSet):
         return s_int, str(explanation or "").strip()
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Job Posts"], summary="List job posts"),
+    retrieve=extend_schema(tags=["Job Posts"], summary="Retrieve a job post"),
+    create=extend_schema(tags=["Job Posts"], summary="Create a job post (created_by set to authenticated user)"),
+    update=extend_schema(tags=["Job Posts"], summary="Update a job post"),
+    partial_update=extend_schema(tags=["Job Posts"], summary="Partially update a job post"),
+    destroy=extend_schema(tags=["Job Posts"], summary="Delete a job post"),
+)
 class JobPostViewSet(BaseSAViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
@@ -2757,6 +3011,7 @@ class JobPostViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["Job Posts"], summary="List scores for a job post", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2765,6 +3020,7 @@ class JobPostViewSet(BaseSAViewSet):
         data = [ScoreSerializer().to_resource(s) for s in (obj.scores or [])]
         return Response({"data": data})
 
+    @extend_schema(tags=["Job Posts"], summary="List scrapes for a job post", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def scrapes(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2773,6 +3029,7 @@ class JobPostViewSet(BaseSAViewSet):
         data = [ScrapeSerializer().to_resource(s) for s in (obj.scrapes or [])]
         return Response({"data": data})
 
+    @extend_schema(tags=["Job Posts"], summary="List cover letters for a job post (authenticated user's only)", responses={200: _JSONAPI_LIST})
     @action(
         detail=True,
         methods=["get"],
@@ -2793,6 +3050,7 @@ class JobPostViewSet(BaseSAViewSet):
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
+    @extend_schema(tags=["Job Posts"], summary="List job applications for a job post", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -2803,6 +3061,8 @@ class JobPostViewSet(BaseSAViewSet):
         ]
         return Response({"data": data})
 
+    @extend_schema(methods=["GET"], tags=["Job Posts"], summary="List summaries for a job post", responses={200: _JSONAPI_LIST})
+    @extend_schema(methods=["POST"], tags=["Job Posts"], summary="Create/AI-generate a summary for a job post", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Missing resume"), 503: OpenApiResponse(description="AI client not configured")})
     @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
         if request.method.lower() == "post":
@@ -2894,10 +3154,17 @@ class JobPostViewSet(BaseSAViewSet):
         return Response({"data": data})
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Scrapes"], summary="List scrapes"),
+    update=extend_schema(tags=["Scrapes"], summary="Update a scrape"),
+    partial_update=extend_schema(tags=["Scrapes"], summary="Partially update a scrape"),
+    destroy=extend_schema(tags=["Scrapes"], summary="Delete a scrape"),
+)
 class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
+    @extend_schema(tags=["Scrapes"], summary="Get the current status of a scrape", responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         """Get the current status of a scrape"""
         obj = self.model.get(int(pk))
@@ -2911,6 +3178,12 @@ class ScrapeViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    @extend_schema(
+        tags=["Scrapes"],
+        summary="Initiate a URL scrape (async — returns 202 Accepted). Returns existing scrape if URL already processed.",
+        request=inline_serializer(name="ScrapeCreateRequest", fields={"url": drf_serializers.URLField(help_text="URL to scrape")}),
+        responses={202: OpenApiResponse(description="Scrape started"), 200: OpenApiResponse(description="Existing scrape returned"), 400: OpenApiResponse(description="URL missing"), 501: OpenApiResponse(description="Scraping disabled")},
+    )
     def create(self, request):
 
         # Check if scraping is enabled
@@ -3023,6 +3296,7 @@ class ScrapeViewSet(BaseSAViewSet):
         scrape_resource = scr_ser.to_resource(scrape)
         return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
 
+    @extend_schema(tags=["Scrapes"], summary="Re-scrape a URL (async — resets to pending)", responses={202: OpenApiResponse(description="Scrape restarted"), 400: OpenApiResponse(description="Already pending/processing"), 501: OpenApiResponse(description="Scraping disabled")})
     @action(detail=True, methods=["post"])
     def redo(self, request, pk=None):
         """Redo a scrape - resets state to pending and starts a new scrape process"""
@@ -3108,10 +3382,19 @@ class ScrapeViewSet(BaseSAViewSet):
         )
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Companies"], summary="List companies"),
+    retrieve=extend_schema(tags=["Companies"], summary="Retrieve a company"),
+    create=extend_schema(tags=["Companies"], summary="Create a company"),
+    update=extend_schema(tags=["Companies"], summary="Update a company"),
+    partial_update=extend_schema(tags=["Companies"], summary="Partially update a company"),
+    destroy=extend_schema(tags=["Companies"], summary="Delete a company"),
+)
 class CompanyViewSet(BaseSAViewSet):
     model = Company
     serializer_class = CompanySerializer
 
+    @extend_schema(tags=["Companies"], summary="List job posts for a company", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"], url_path="job-posts")
     def job_posts(self, request, pk=None):
         company = self.model.get(int(pk))
@@ -3120,6 +3403,7 @@ class CompanyViewSet(BaseSAViewSet):
         data = [JobPostSerializer().to_resource(j) for j in (company.job_posts or [])]
         return Response({"data": data})
 
+    @extend_schema(tags=["Companies"], summary="List scrapes for a company", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def scrapes(self, request, pk=None):
         company = self.model.get(int(pk))
@@ -3129,6 +3413,13 @@ class CompanyViewSet(BaseSAViewSet):
         return Response({"data": data})
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Cover Letters"], summary="List cover letters (authenticated user's only)"),
+    retrieve=extend_schema(tags=["Cover Letters"], summary="Retrieve a cover letter (owner only)", responses={200: _JSONAPI_ITEM, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")}),
+    update=extend_schema(tags=["Cover Letters"], summary="Update a cover letter (owner only)"),
+    partial_update=extend_schema(tags=["Cover Letters"], summary="Partially update a cover letter (owner only)"),
+    destroy=extend_schema(tags=["Cover Letters"], summary="Delete a cover letter (owner only)"),
+)
 class CoverLetterViewSet(BaseSAViewSet):
     model = CoverLetter
     serializer_class = CoverLetterSerializer
@@ -3219,6 +3510,12 @@ class CoverLetterViewSet(BaseSAViewSet):
         session.commit()
         return Response(status=204)
 
+    @extend_schema(
+        tags=["Cover Letters"],
+        summary="Create a cover letter (or AI-generate if content omitted — requires resume + job-post relationships)",
+        request=_JSONAPI_WRITE,
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Missing/invalid resume or job-post"), 403: OpenApiResponse(description="Resume not owned by user"), 503: OpenApiResponse(description="AI client not configured")},
+    )
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
         ser = self.get_serializer()
@@ -3399,6 +3696,7 @@ class CoverLetterViewSet(BaseSAViewSet):
             )
         return Response(payload, status=status.HTTP_201_CREATED)
 
+    @extend_schema(tags=["Cover Letters"], summary="Export a cover letter as DOCX", responses={200: OpenApiResponse(description="DOCX file download"), 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")})
     @action(
         detail=True,
         methods=["get"],
@@ -3494,6 +3792,14 @@ class CoverLetterViewSet(BaseSAViewSet):
         return resp
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Job Applications"], summary="List job applications"),
+    retrieve=extend_schema(tags=["Job Applications"], summary="Retrieve a job application"),
+    create=extend_schema(tags=["Job Applications"], summary="Create a job application (user_id auto-set from authenticated user)"),
+    update=extend_schema(tags=["Job Applications"], summary="Update a job application"),
+    partial_update=extend_schema(tags=["Job Applications"], summary="Partially update a job application"),
+    destroy=extend_schema(tags=["Job Applications"], summary="Delete a job application"),
+)
 class ApplicationViewSet(BaseSAViewSet):
     model = Application
     serializer_class = ApplicationSerializer
@@ -3513,6 +3819,7 @@ class ApplicationViewSet(BaseSAViewSet):
 
         return attrs
 
+    @extend_schema(tags=["Job Applications"], summary="List application statuses for a job application", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -3532,6 +3839,7 @@ class ApplicationViewSet(BaseSAViewSet):
             )
         return Response(payload)
 
+    @extend_schema(tags=["Job Applications"], summary="List questions for a job application", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -3552,20 +3860,42 @@ class ApplicationViewSet(BaseSAViewSet):
         return Response(payload)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Statuses"], summary="List statuses"),
+    retrieve=extend_schema(tags=["Statuses"], summary="Retrieve a status"),
+    create=extend_schema(tags=["Statuses"], summary="Create a status"),
+    update=extend_schema(tags=["Statuses"], summary="Update a status"),
+    partial_update=extend_schema(tags=["Statuses"], summary="Partially update a status"),
+    destroy=extend_schema(tags=["Statuses"], summary="Delete a status"),
+)
 class StatusViewSet(BaseSAViewSet):
     model = Status
     serializer_class = StatusSerializer
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Job Application Statuses"], summary="List job application statuses"),
+    retrieve=extend_schema(tags=["Job Application Statuses"], summary="Retrieve a job application status"),
+    create=extend_schema(tags=["Job Application Statuses"], summary="Create a job application status"),
+    update=extend_schema(tags=["Job Application Statuses"], summary="Update a job application status"),
+    partial_update=extend_schema(tags=["Job Application Statuses"], summary="Partially update a job application status"),
+    destroy=extend_schema(tags=["Job Application Statuses"], summary="Delete a job application status"),
+)
 class JobApplicationStatusViewSet(BaseSAViewSet):
     model = JobApplicationStatus
     serializer_class = JobApplicationStatusSerializer
 
 
+@extend_schema_view(
+    update=extend_schema(tags=["Questions"], summary="Update a question"),
+    partial_update=extend_schema(tags=["Questions"], summary="Partially update a question (also appends an answer if attributes.answer provided)"),
+    destroy=extend_schema(tags=["Questions"], summary="Delete a question"),
+)
 class QuestionViewSet(BaseSAViewSet):
     model = Question
     serializer_class = QuestionSerializer
 
+    @extend_schema(tags=["Questions"], summary="List questions (auto-includes company)", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
         session = self.get_session()
         items = session.query(self.model).all()
@@ -3579,6 +3909,7 @@ class QuestionViewSet(BaseSAViewSet):
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["Questions"], summary="Retrieve a question (auto-includes company)", parameters=[_INCLUDE_PARAM], responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         obj = self.model.get(int(pk))
         if not obj:
@@ -3591,6 +3922,7 @@ class QuestionViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["Questions"], summary="Create a question (optionally include attributes.answer to auto-create an Answer child)", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Validation error")})
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -3673,6 +4005,7 @@ class QuestionViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["Questions"], summary="List answers for a question", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def answers(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -3692,10 +4025,28 @@ class QuestionViewSet(BaseSAViewSet):
         return Response(payload)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Answers"], summary="List answers"),
+    retrieve=extend_schema(tags=["Answers"], summary="Retrieve an answer"),
+    update=extend_schema(tags=["Answers"], summary="Update an answer"),
+    partial_update=extend_schema(tags=["Answers"], summary="Partially update an answer"),
+    destroy=extend_schema(tags=["Answers"], summary="Delete an answer"),
+)
 class AnswerViewSet(BaseSAViewSet):
     model = Answer
     serializer_class = AnswerSerializer
 
+    @extend_schema(
+        tags=["Answers"],
+        summary="Create an answer (set ai_assist=true to auto-generate content via AI)",
+        request=inline_serializer(name="AnswerCreateRequest", fields={
+            "question_id": drf_serializers.IntegerField(help_text="Required. ID of the parent Question."),
+            "content": drf_serializers.CharField(required=False, help_text="Answer text. Required unless ai_assist=true."),
+            "ai_assist": drf_serializers.BooleanField(required=False, help_text="If true and content is empty, AI generates the answer."),
+            "injected_prompt": drf_serializers.CharField(required=False, help_text="Optional custom prompt injected into AI generation."),
+        }),
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Missing content or invalid question"), 502: OpenApiResponse(description="AI generation failed"), 503: OpenApiResponse(description="AI client not configured")},
+    )
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -3872,10 +4223,18 @@ class AnswerViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Experiences"], summary="List experiences"),
+    retrieve=extend_schema(tags=["Experiences"], summary="Retrieve an experience"),
+    update=extend_schema(tags=["Experiences"], summary="Update an experience (also adds resume join links if relationships.resumes provided)"),
+    partial_update=extend_schema(tags=["Experiences"], summary="Partially update an experience (also adds resume join links if relationships.resumes provided)"),
+    destroy=extend_schema(tags=["Experiences"], summary="Delete an experience"),
+)
 class ExperienceViewSet(BaseSAViewSet):
     model = Experience
     serializer_class = ExperienceSerializer
 
+    @extend_schema(tags=["Experiences"], summary="List descriptions for an experience", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def descriptions(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -3886,6 +4245,12 @@ class ExperienceViewSet(BaseSAViewSet):
         data = [ser.to_resource(d) for d in (obj.descriptions or [])]
         return Response({"data": data})
 
+    @extend_schema(
+        tags=["Experiences"],
+        summary="Create an experience (optionally link to one or more resumes via relationships.resumes)",
+        request=_JSONAPI_WRITE,
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Invalid resume IDs")},
+    )
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -4041,10 +4406,18 @@ class ExperienceViewSet(BaseSAViewSet):
         return Response(payload)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Educations"], summary="List educations"),
+    retrieve=extend_schema(tags=["Educations"], summary="Retrieve an education"),
+    update=extend_schema(tags=["Educations"], summary="Update an education"),
+    partial_update=extend_schema(tags=["Educations"], summary="Partially update an education"),
+    destroy=extend_schema(tags=["Educations"], summary="Delete an education"),
+)
 class EducationViewSet(BaseSAViewSet):
     model = Education
     serializer_class = EducationSerializer
 
+    @extend_schema(tags=["Educations"], summary="Create an education (optionally link to resumes via relationships.resumes)", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Invalid resume IDs")})
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -4115,10 +4488,18 @@ class EducationViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Certifications"], summary="List certifications"),
+    retrieve=extend_schema(tags=["Certifications"], summary="Retrieve a certification"),
+    update=extend_schema(tags=["Certifications"], summary="Update a certification"),
+    partial_update=extend_schema(tags=["Certifications"], summary="Partially update a certification"),
+    destroy=extend_schema(tags=["Certifications"], summary="Delete a certification"),
+)
 class CertificationViewSet(BaseSAViewSet):
     model = Certification
     serializer_class = CertificationSerializer
 
+    @extend_schema(tags=["Certifications"], summary="Create a certification (optionally link to resumes via relationships.resumes)", request=_JSONAPI_WRITE, responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Invalid resume IDs")})
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -4189,10 +4570,23 @@ class CertificationViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["Descriptions"], summary="List descriptions"),
+    retrieve=extend_schema(tags=["Descriptions"], summary="Retrieve a description"),
+    update=extend_schema(tags=["Descriptions"], summary="Update a description (also upserts experience join links with ordering)"),
+    partial_update=extend_schema(tags=["Descriptions"], summary="Partially update a description (also upserts experience join links with ordering)"),
+    destroy=extend_schema(tags=["Descriptions"], summary="Delete a description"),
+)
 class DescriptionViewSet(BaseSAViewSet):
     model = Description
     serializer_class = DescriptionSerializer
 
+    @extend_schema(
+        tags=["Descriptions"],
+        summary="Create a description (optionally link to experiences via relationships.experiences; support per-link order via meta.order)",
+        request=_JSONAPI_WRITE,
+        responses={201: _JSONAPI_ITEM, 400: OpenApiResponse(description="Invalid experience IDs")},
+    )
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -4379,6 +4773,7 @@ class DescriptionViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([desc], include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["Descriptions"], summary="List experiences linked to a description", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
         obj = self.model.get(int(pk))
@@ -4393,6 +4788,7 @@ class ApiKeyViewSet(BaseSAViewSet):
     serializer_class = ApiKeySerializer
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(tags=["API Keys"], summary="List API keys (staff sees all; others see only their own)", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
         """List API keys - all keys for admins, user's own keys for regular users"""
         session = self.get_session()
@@ -4413,6 +4809,7 @@ class ApiKeyViewSet(BaseSAViewSet):
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
+    @extend_schema(tags=["API Keys"], summary="Retrieve an API key (own key, or any if staff)", responses={200: _JSONAPI_ITEM, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
         """Get a specific API key"""
         obj = self.model.get(int(pk))
@@ -4430,6 +4827,16 @@ class ApiKeyViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    @extend_schema(
+        tags=["API Keys"],
+        summary="Create an API key — plain key returned once in response attributes.key",
+        request=inline_serializer(name="ApiKeyCreateRequest", fields={
+            "name": drf_serializers.CharField(help_text="Human-readable name for this key"),
+            "expires_days": drf_serializers.IntegerField(required=False, help_text="Days until expiry (omit for no expiry)"),
+            "scopes": drf_serializers.ListField(child=drf_serializers.CharField(), required=False, help_text="Defaults to ['read', 'write']"),
+        }),
+        responses={201: OpenApiResponse(description="API key created — includes plain key in attributes.key (only shown once)"), 400: OpenApiResponse(description="Missing name or invalid user")},
+    )
     def create(self, request):
         """Create a new API key"""
         data = request.data if isinstance(request.data, dict) else {}
@@ -4507,6 +4914,7 @@ class ApiKeyViewSet(BaseSAViewSet):
 
         return Response(payload, status=status.HTTP_201_CREATED)
 
+    @extend_schema(tags=["API Keys"], summary="Revoke (delete) an API key", responses={204: OpenApiResponse(description="Revoked"), 403: OpenApiResponse(description="Forbidden")})
     def destroy(self, request, pk=None):
         """Revoke an API key"""
         obj = self.model.get(int(pk))
@@ -4520,6 +4928,7 @@ class ApiKeyViewSet(BaseSAViewSet):
         obj.revoke()
         return Response(status=204)
 
+    @extend_schema(tags=["API Keys"], summary="Revoke an API key (alternative to DELETE)", responses={200: _JSONAPI_ITEM, 403: OpenApiResponse(description="Forbidden"), 404: OpenApiResponse(description="Not found")})
     @action(detail=True, methods=["post"])
     def revoke(self, request, pk=None):
         """Revoke an API key (alternative to DELETE)"""
@@ -4538,6 +4947,23 @@ class ApiKeyViewSet(BaseSAViewSet):
         return Response(payload)
 
 
+@extend_schema(
+    tags=["Career Data"],
+    summary="Get aggregated career data as an AI-ready prompt string",
+    parameters=[
+        OpenApiParameter("user_id", OpenApiTypes.INT, OpenApiParameter.PATH, required=False,
+                         description="Target user ID (defaults to authenticated user)"),
+    ],
+    responses={
+        200: OpenApiResponse(
+            description="Career data formatted as a prompt string",
+            response=inline_serializer(
+                name="CareerDataResponse",
+                fields={"data": drf_serializers.CharField()},
+            ),
+        )
+    },
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def career_data(request, user_id=None):
@@ -4558,6 +4984,39 @@ def career_data(request, user_id=None):
     return Response({"data": career_data_prompt})
 
 
+@extend_schema(
+    tags=["Career Data"],
+    summary="Generate an AI prompt for answering a job application question",
+    request=inline_serializer(
+        name="GeneratePromptRequest",
+        fields={
+            "question_id": drf_serializers.IntegerField(help_text="Required. ID of the Question to answer."),
+            "job_post_id": drf_serializers.IntegerField(required=False, help_text="Optional job post context."),
+            "resume_id": drf_serializers.IntegerField(required=False, help_text="Optional resume to include."),
+            "instructions": drf_serializers.CharField(required=False, help_text="Custom instructions appended to the prompt."),
+        },
+    ),
+    responses={
+        200: OpenApiResponse(
+            description="Generated prompt and context metadata",
+            response=inline_serializer(
+                name="GeneratePromptResponse",
+                fields={
+                    "data": inline_serializer(
+                        name="GeneratePromptData",
+                        fields={
+                            "prompt": drf_serializers.CharField(),
+                            "context": drf_serializers.DictField(),
+                        },
+                    )
+                },
+            ),
+        ),
+        400: OpenApiResponse(description="Missing or invalid question_id / job_post_id / resume_id"),
+        403: OpenApiResponse(description="Resume not accessible"),
+        404: OpenApiResponse(description="Question not found"),
+    },
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def generate_prompt(request):
