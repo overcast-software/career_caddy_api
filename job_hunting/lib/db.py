@@ -1,5 +1,4 @@
 import os
-import sys
 import logging
 import importlib
 import importlib.util
@@ -60,7 +59,7 @@ def init_sqlalchemy():
                 f"Invalid DATABASE_URL (no dialect found): '{parsed_url.drivername}'. "
                 "Expected schemes like postgresql://, sqlite:///path.db, mysql+pymysql://..."
             )
-            raise ValueError(f"Invalid database URL - no dialect found")
+            raise ValueError("Invalid database URL - no dialect found")
         
         # Log parsed URL components (sanitized)
         sanitized_url = str(parsed_url).replace(parsed_url.password or "", "***") if parsed_url.password else str(parsed_url)
@@ -192,12 +191,8 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
 
     # Import SQLAlchemy model modules individually to be resilient to failures
     model_modules = [
-        "cover_letter", "experience",
-        "experience_description", "project_description", "resume",
-        "resume_certification", "resume_education", "resume_experience",
-        "resume_skill", "resume_summary", "scrape", "user",
-        "application", "score", "project", "resume_project",
-        "job_application_status", "answer", "career_data",
+        "user",
+        "career_data",
     ]
     
     successful_imports = []
@@ -240,7 +235,7 @@ def ensure_sqlalchemy_schema(with_advisory_lock=True):
         with _engine.begin() as conn:
             try:
                 # Acquire advisory lock
-                result = conn.execute(
+                conn.execute(
                     text("SELECT pg_advisory_lock(:k)"), {"k": SCHEMA_LOCK_KEY}
                 )
                 logger.info("Acquired PostgreSQL advisory lock for schema creation")

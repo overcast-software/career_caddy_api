@@ -1,7 +1,6 @@
 # user model
 # has username, email, salted password, id
 from sqlalchemy import Column, Integer, String, Boolean, DateTime
-from sqlalchemy.orm import relationship
 from .base import BaseModel
 
 
@@ -15,12 +14,6 @@ class User(BaseModel):
     is_superuser = Column(Boolean, nullable=False, default=False)
     last_login = Column(DateTime)  # created_at is sufficient
     is_staff = Column(Boolean, nullable=False, default=False)
-    # Relationships
-    projects = relationship("Project", back_populates="user")
-    resumes = relationship("Resume", back_populates="user")
-    scores = relationship("Score")
-    cover_letters = relationship("CoverLetter", back_populates="user")
-    applications = relationship("Application", back_populates="user")
     @property
     def name(self):
         """Return a display name for the user."""

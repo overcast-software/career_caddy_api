@@ -2,7 +2,7 @@
 # Standalone HTTP server for browser scraping
 import json
 import asyncio
-from aiohttp import web, ClientTimeout
+from aiohttp import web
 from playwright.async_api import async_playwright, TimeoutError
 
 

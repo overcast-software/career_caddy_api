@@ -1,5 +1,3 @@
-import tempfile
-import unittest
 from unittest.mock import patch, MagicMock
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -8,7 +6,7 @@ from rest_framework import status
 
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
-from job_hunting.lib.models import Resume
+from job_hunting.models import Resume
 
 
 class TestIngestEndpointBlob(APITestCase):
@@ -25,13 +23,19 @@ class TestIngestEndpointBlob(APITestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # Clean up tables after all tests in this class
-        Base.metadata.drop_all(bind=cls.engine)
+        # Close SA session only; Django handles DB teardown
+        try:
+            cls.session.close()
+            if hasattr(cls.session, "remove"):
+                cls.session.remove()
+        except Exception:
+            pass
         super().tearDownClass()
 
     def setUp(self):
-        # Hard reset SA tables for isolation between tests
-        Base.metadata.drop_all(bind=self.engine)
+        # Reset only non-Django SA tables (exclude auth_user which Django manages)
+        sa_tables = [t for t in Base.metadata.sorted_tables if t.name != "auth_user"]
+        Base.metadata.drop_all(bind=self.engine, tables=sa_tables)
         Base.metadata.create_all(bind=self.engine)
 
         # Create a Django user and authenticate with JWT for protected endpoints
@@ -45,8 +49,7 @@ class TestIngestEndpointBlob(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
         # Create a test resume
-        self.resume = Resume(user_id=self.user.id, file_path="/tmp/test.docx")
-        self.resume.save()
+        self.resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/test.docx")
 
     def _obtain_jwt(self, username, password):
         resp = self.client.post(
@@ -62,9 +65,7 @@ class TestIngestEndpointBlob(APITestCase):
         """Test successful blob upload to new ingest endpoint creates resume."""
         # Setup mock IngestResume
         mock_ingest_instance = MagicMock()
-        stub_resume = Resume()
-        stub_resume.user_id = self.user.id
-        stub_resume.save()
+        stub_resume = Resume.objects.create(user_id=self.user.id)
         mock_ingest_instance.process.return_value = stub_resume
         mock_ingest_class.return_value = mock_ingest_instance
 
@@ -90,7 +91,7 @@ class TestIngestEndpointBlob(APITestCase):
 
         # Verify a new resume was created with correct user_id
         created_resume_id = int(response.data["data"]["id"])
-        created_resume = Resume.get(created_resume_id)
+        created_resume = Resume.objects.filter(pk=created_resume_id).first()
         self.assertIsNotNone(created_resume)
         self.assertEqual(created_resume.user_id, self.user.id)
 
@@ -181,9 +182,7 @@ class TestIngestEndpointBlob(APITestCase):
 
         # Setup mock IngestResume
         mock_ingest_instance = MagicMock()
-        stub_resume = Resume()
-        stub_resume.user_id = self.user.id
-        stub_resume.save()
+        stub_resume = Resume.objects.create(user_id=self.user.id)
         mock_ingest_instance.process.return_value = stub_resume
         mock_ingest_class.return_value = mock_ingest_instance
 

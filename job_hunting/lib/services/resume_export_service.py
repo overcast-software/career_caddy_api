@@ -1,7 +1,7 @@
 import os
 from io import BytesIO
 from typing import Optional
-from job_hunting.lib.models import Resume
+from job_hunting.models import Resume
 
 
 class ResumeExportService:

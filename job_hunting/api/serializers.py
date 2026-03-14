@@ -5,21 +5,12 @@ import dateparser
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from job_hunting.lib.models import (
-    Application,
-    CoverLetter,
-    Experience,
-    ExperienceDescription,
-    JobApplicationStatus,
-    Answer,
-    Resume,
-    ResumeSkill,
-    ResumeSummaries,
-    Score,
-    Scrape,
+from job_hunting.models import (
+    Status, Skill, Description, Certification, Education, Summary,
+    Company, ApiKey, Question, JobPost,
+    Answer, Application, CoverLetter, Experience, Resume, Score, Scrape,
+    ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
 )
-from job_hunting.lib.models.base import BaseModel
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey, Question, JobPost
 
 
 def _to_primitive(val):
@@ -115,6 +106,9 @@ class BaseSASerializer:
                 uselist = cfg.get("uselist", True)
                 target = getattr(obj, rel_attr, None)
                 if uselist:
+                    # Handle Django Managers (reverse FK / M2M) by calling .all()
+                    if hasattr(target, "all"):
+                        target = target.all()
                     data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
                     # Map relationship name to URL segment for special cases
                     rel_segment = (
@@ -167,6 +161,9 @@ class BaseSASerializer:
         target = getattr(obj, attr, None)
         if target is None:
             return rel_type, []
+        # Handle Django Managers (reverse FK / M2M) by calling .all()
+        if hasattr(target, "all"):
+            target = target.all()
         items = list(target) if uselist else [target]
         return rel_type, items
 
@@ -260,32 +257,16 @@ class DjangoUserSerializer:
         return res
 
     def get_related(self, obj, rel_name):
-        # Import here to avoid circular imports
-        from job_hunting.lib.models import (
-            Application,
-            CoverLetter,
-            Resume,
-            Score,
-            Summary,
-        )
-
-        session = Resume.get_session()  # Get SA session
-
         if rel_name == "resumes":
-            items = session.query(Resume).filter_by(user_id=obj.id).all()
-            return "resume", items
+            return "resume", list(Resume.objects.filter(user_id=obj.id))
         elif rel_name == "scores":
-            items = session.query(Score).filter_by(user_id=obj.id).all()
-            return "score", items
+            return "score", list(Score.objects.filter(user_id=obj.id))
         elif rel_name == "cover-letters":
-            items = session.query(CoverLetter).filter_by(user_id=obj.id).all()
-            return "cover-letter", items
+            return "cover-letter", list(CoverLetter.objects.filter(user_id=obj.id))
         elif rel_name == "applications":
-            items = session.query(Application).filter_by(user_id=obj.id).all()
-            return "job-application", items
+            return "job-application", list(Application.objects.filter(user_id=obj.id))
         elif rel_name == "summaries":
-            items = session.query(Summary).filter_by(user_id=obj.id).all()
-            return "summary", items
+            return "summary", list(Summary.objects.filter(user_id=obj.id))
         else:
             return None, []
 
@@ -477,6 +458,7 @@ class JobPostSerializer(BaseSASerializer):
         },
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
         "questions": {"attr": "questions", "type": "question", "uselist": True},
+        "scores": {"attr": "scores", "type": "score", "uselist": True},
     }
     relationship_fks = {"company": "company_id"}
 
@@ -607,7 +589,6 @@ class ApplicationSerializer(BaseSASerializer):
             "type": "cover-letter",
             "uselist": False,
         },
-        "company": {"attr": "company", "type": "company", "uselist": False},
         "questions": {"attr": "questions", "type": "question", "uselist": True},
     }
     relationship_fks = {
@@ -699,12 +680,9 @@ class SummarySerializer(BaseSASerializer):
             if ctx and ctx.get("parent_type") == "resume":
                 resume_id = ctx.get("parent_id")
                 if resume_id:
-                    session = BaseModel.get_session()
-                    link = (
-                        session.query(ResumeSummaries)
-                        .filter_by(resume_id=int(resume_id), summary_id=obj.id)
-                        .first()
-                    )
+                    link = ResumeSummary.objects.filter(
+                        resume_id=int(resume_id), summary_id=obj.id
+                    ).first()
                     if link and hasattr(link, "active"):
                         d["attributes"]["active"] = bool(link.active)
         except Exception:
@@ -845,15 +823,9 @@ class DescriptionSerializer(BaseSASerializer):
             if ctx and ctx.get("parent_type") == "experience":
                 experience_id = ctx.get("parent_id")
                 if experience_id:
-                    from job_hunting.lib.models.base import BaseModel
-                    session = BaseModel.get_session()
-                    link = (
-                        session.query(ExperienceDescription)
-                        .filter_by(
-                            experience_id=int(experience_id), description_id=obj.id
-                        )
-                        .first()
-                    )
+                    link = ExperienceDescription.objects.filter(
+                        experience_id=int(experience_id), description_id=obj.id
+                    ).first()
                     if link and hasattr(link, "order"):
                         res.setdefault("attributes", {})["order"] = link.order
         except Exception:
@@ -875,13 +847,9 @@ class SkillSerializer(BaseSASerializer):
             if ctx and ctx.get("parent_type") == "resume":
                 resume_id = ctx.get("parent_id")
                 if resume_id:
-                    from job_hunting.lib.models.base import BaseModel
-                    session = BaseModel.get_session()
-                    link = (
-                        session.query(ResumeSkill)
-                        .filter_by(resume_id=int(resume_id), skill_id=obj.id)
-                        .first()
-                    )
+                    link = ResumeSkill.objects.filter(
+                        resume_id=int(resume_id), skill_id=obj.id
+                    ).first()
                     if link and hasattr(link, "active"):
                         res.setdefault("attributes", {})["active"] = bool(link.active)
         except Exception:
@@ -1002,10 +970,8 @@ class QuestionSerializer(BaseSASerializer):
         # Backward-compatible: expose latest answer content as an attribute
         try:
             latest_content = None
-            # Query SA Answer model for answers since Answer is still SA
             try:
-                session = BaseModel.get_session()
-                answers = session.query(Answer).filter_by(question_id=obj.id).order_by(Answer.created_at).all()
+                answers = list(Answer.objects.filter(question_id=obj.id).order_by("created_at"))
             except Exception:
                 answers = []
             if answers:
@@ -1057,11 +1023,6 @@ class QuestionSerializer(BaseSASerializer):
     def parse_payload(self, payload):
         out = super().parse_payload(payload)
         # Accept 'content' as an alias for 'question' in attributes
-        try:
-            data = payload.get("data") if isinstance(payload, dict) else None
-            attrs_in = (data.get("attributes") or {}) if isinstance(data, dict) else {}
-        except Exception:
-            pass
         return out
 
 

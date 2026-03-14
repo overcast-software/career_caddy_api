@@ -1,22 +1,13 @@
 from django.contrib.auth import get_user_model
-from rest_framework.test import APITestCase
+from rest_framework.test import APITransactionTestCase
 from rest_framework import status
 
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
-from job_hunting.lib.models import (
-    Resume,
-    Score,
-    JobPost,
-    Scrape,
-    Company,
-    CoverLetter,
-    Application,
-    Project,
-)
+from job_hunting.models import Company, JobPost, Resume, Score, CoverLetter, Application, Scrape
 
 
-class JSONAPITests(APITestCase):
+class JSONAPITests(APITransactionTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -28,14 +19,27 @@ class JSONAPITests(APITestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # Clean up tables after all tests in this class
-        Base.metadata.drop_all(bind=cls.engine)
+        # Release SA session without closing underlying connections Django may reuse
+        try:
+            if hasattr(cls.session, "remove"):
+                cls.session.remove()
+        except Exception:
+            pass
         super().tearDownClass()
 
     def setUp(self):
-        # Hard reset SA tables for isolation between tests
-        Base.metadata.drop_all(bind=self.engine)
+        # Release any open SA connections/transactions before DDL to avoid lock contention
+        self.session.close()
+        if hasattr(self.session, "remove"):
+            self.session.remove()
+
+        # Hard reset SA tables for isolation between tests (exclude auth_user — Django-owned)
+        sa_tables = [t for t in Base.metadata.sorted_tables if t.name != "auth_user"]
+        Base.metadata.drop_all(bind=self.engine, tables=sa_tables)
         Base.metadata.create_all(bind=self.engine)
+
+        # Reinitialize session after remove()
+        self.session = BaseModel.get_session()
 
         # Create a Django user and authenticate with JWT for protected endpoints
         User = get_user_model()
@@ -110,18 +114,13 @@ class JSONAPITests(APITestCase):
         self.assertIn(resume_id, ids)
 
     def test_company_job_posts_scoped_and_job_post_relationship_linkage(self):
-        session = self.session
 
-        # Seed company and job post
-        company = Company(name="ACME", display_name="ACME Corp")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(
-            title="Engineer", description="Build things", company_id=company.id
+        # Seed company and job post via Django ORM
+        company = Company.objects.create(name="ACME", display_name="ACME Corp")
+        job = JobPost.objects.create(
+            title="Engineer", description="Build things", company=company,
+            created_by=self.user,
         )
-        session.add(job)
-        session.commit()
 
         # Scoped route: /companies/{id}/job-posts
         resp = self.client.get(f"/api/v1/companies/{company.id}/job-posts/")
@@ -131,9 +130,7 @@ class JSONAPITests(APITestCase):
         self.assertEqual(resp.data["data"][0]["id"], str(job.id))
 
         # Add score to job post and check linkage endpoint
-        score = Score(score=88, explanation="Good fit", job_post_id=job.id)
-        session.add(score)
-        session.commit()
+        score = Score.objects.create(score=88, explanation="Good fit", job_post_id=job.id)
 
         # Relationship linkage: /job-posts/{id}/relationships/scores
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/relationships/scores/")
@@ -143,45 +140,32 @@ class JSONAPITests(APITestCase):
         self.assertEqual(resp.data["data"][0]["id"], str(score.id))
 
     def test_job_post_child_routes_scrapes_cover_letters_applications(self):
-        session = self.session
 
-        company = Company(name="Globex", display_name="Globex Inc")
-        session.add(company)
-        session.commit()
+        company = Company.objects.create(name="Globex", display_name="Globex Inc")
 
         # Resume owned by authenticated Django user
-        resume = Resume(user_id=self.user.id, file_path="/tmp/eve.txt")
-        session.add(resume)
-        session.commit()
+        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/eve.txt")
 
-        job = JobPost(title="Analyst", description="Analyze", company_id=company.id)
-        session.add(job)
-        session.commit()
+        job = JobPost.objects.create(title="Analyst", description="Analyze", company=company, created_by=self.user)
 
-        scrape = Scrape(
+        Scrape.objects.create(
             url="https://example.com/job", company_id=company.id, job_post_id=job.id
         )
-        session.add(scrape)
-        session.commit()
 
-        cover = CoverLetter(
+        cover = CoverLetter.objects.create(
             content="Dear HR",
             user_id=self.user.id,
             resume_id=resume.id,
             job_post_id=job.id,
         )
-        session.add(cover)
-        session.commit()
 
-        app = Application(
+        Application.objects.create(
             user_id=self.user.id,
             job_post_id=job.id,
             resume_id=resume.id,
             cover_letter_id=cover.id,
             status="submitted",
         )
-        session.add(app)
-        session.commit()
 
         # /job-posts/{id}/scrapes
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/scrapes/")
@@ -195,28 +179,21 @@ class JSONAPITests(APITestCase):
         self.assertEqual(len(resp.data["data"]), 1)
         self.assertEqual(resp.data["data"][0]["type"], "cover-letter")
 
-        # /job-posts/{id}/applications
-        resp = self.client.get(f"/api/v1/job-posts/{job.id}/applications/")
+        # /job-posts/{id}/job-applications
+        resp = self.client.get(f"/api/v1/job-posts/{job.id}/job-applications/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "application")
+        self.assertEqual(resp.data["data"][0]["type"], "job-application")
 
     def test_update_and_delete_application_via_jsonapi(self):
-        session = self.session
 
-        company = Company(name="Initech", display_name="Initech LLC")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(
-            title="TPS Consultant", description="TPS work", company_id=company.id
+        company = Company.objects.create(name="Initech", display_name="Initech LLC")
+        job = JobPost.objects.create(
+            title="TPS Consultant", description="TPS work", company=company,
+            created_by=self.user,
         )
-        session.add(job)
-        session.commit()
 
-        app = Application(user_id=self.user.id, job_post_id=job.id, status="submitted")
-        session.add(app)
-        session.commit()
+        app = Application.objects.create(user_id=self.user.id, job_post_id=job.id, status="submitted")
 
         # PATCH (partial update) JSON:API
         payload = {
@@ -227,52 +204,39 @@ class JSONAPITests(APITestCase):
             }
         }
         resp = self.client.patch(
-            f"/api/v1/applications/{app.id}/", data=payload, format="json"
+            f"/api/v1/job-applications/{app.id}/", data=payload, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["data"]["attributes"]["status"], "interview")
 
         # DELETE
-        resp = self.client.delete(f"/api/v1/applications/{app.id}/")
+        resp = self.client.delete(f"/api/v1/job-applications/{app.id}/")
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
 
         # Verify deletion
-        resp = self.client.get(f"/api/v1/applications/{app.id}/")
+        resp = self.client.get(f"/api/v1/job-applications/{app.id}/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_resume_scoped_cover_letters_and_applications(self):
-        session = self.session
+        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/dana.txt")
 
-        resume = Resume(user_id=self.user.id, file_path="/tmp/dana.txt")
-        session.add(resume)
-        session.commit()
+        company = Company.objects.create(name="Umbrella", display_name="Umbrella Corp")
+        job = JobPost.objects.create(title="Security", description="Keep safe", company=company, created_by=self.user)
 
-        company = Company(name="Umbrella", display_name="Umbrella Corp")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(title="Security", description="Keep safe", company_id=company.id)
-        session.add(job)
-        session.commit()
-
-        cover = CoverLetter(
+        cover = CoverLetter.objects.create(
             content="Cover Content",
             user_id=self.user.id,
             resume_id=resume.id,
             job_post_id=job.id,
         )
-        session.add(cover)
-        session.commit()
 
-        app = Application(
+        Application.objects.create(
             user_id=self.user.id,
             job_post_id=job.id,
             resume_id=resume.id,
             cover_letter_id=cover.id,
             status="submitted",
         )
-        session.add(app)
-        session.commit()
 
         # /resumes/{id}/cover-letters (owned by current user)
         resp = self.client.get(f"/api/v1/resumes/{resume.id}/cover-letters/")
@@ -280,36 +244,25 @@ class JSONAPITests(APITestCase):
         self.assertEqual(len(resp.data["data"]), 1)
         self.assertEqual(resp.data["data"][0]["type"], "cover-letter")
 
-        # /resumes/{id}/applications
-        resp = self.client.get(f"/api/v1/resumes/{resume.id}/applications/")
+        # /resumes/{id}/job-applications
+        resp = self.client.get(f"/api/v1/resumes/{resume.id}/job-applications/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["data"]), 1)
-        self.assertEqual(resp.data["data"][0]["type"], "application")
+        self.assertEqual(resp.data["data"][0]["type"], "job-application")
 
     def test_user_scoped_scores(self):
-        session = self.session
+        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/r.txt")
 
-        resume = Resume(user_id=self.user.id, file_path="/tmp/r.txt")
-        session.add(resume)
-        session.commit()
+        company = Company.objects.create(name="Hooli", display_name="Hooli Inc")
+        job = JobPost.objects.create(title="Dev", description="Code", company=company, created_by=self.user)
 
-        company = Company(name="Hooli", display_name="Hooli Inc")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(title="Dev", description="Code", company_id=company.id)
-        session.add(job)
-        session.commit()
-
-        score = Score(
+        Score.objects.create(
             score=99,
             explanation="Excellent",
             resume_id=resume.id,
             job_post_id=job.id,
             user_id=self.user.id,
         )
-        session.add(score)
-        session.commit()
 
         resp = self.client.get(f"/api/v1/users/{self.user.id}/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -317,18 +270,11 @@ class JSONAPITests(APITestCase):
         self.assertEqual(resp.data["data"][0]["type"], "score")
 
     def test_job_post_datetime_parsing_and_created_at_protection(self):
-        session = self.session
-
-        company = Company(name="TestCorp", display_name="Test Corp")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(
-            title="Engineer", description="Build things", company_id=company.id
+        company = Company.objects.create(name="TestCorp", display_name="Test Corp")
+        job = JobPost.objects.create(
+            title="Engineer", description="Build things", company=company,
+            created_by=self.user,
         )
-        session.add(job)
-        session.commit()
-
         original_created_at = job.created_at
 
         # Test valid ISO datetime with Z timezone
@@ -348,7 +294,7 @@ class JSONAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
         # Reload job from database
-        session.refresh(job)
+        job.refresh_from_db()
 
         # Verify posted_date was parsed and stored as datetime
         self.assertIsNotNone(job.posted_date)
@@ -360,17 +306,11 @@ class JSONAPITests(APITestCase):
         self.assertEqual(job.created_at, original_created_at)
 
     def test_job_post_invalid_datetime_returns_400(self):
-        session = self.session
-
-        company = Company(name="TestCorp", display_name="Test Corp")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(
-            title="Engineer", description="Build things", company_id=company.id
+        company = Company.objects.create(name="TestCorp", display_name="Test Corp")
+        job = JobPost.objects.create(
+            title="Engineer", description="Build things", company=company,
+            created_by=self.user,
         )
-        session.add(job)
-        session.commit()
 
         # Test invalid posted_date
         payload = {
@@ -401,17 +341,11 @@ class JSONAPITests(APITestCase):
         self.assertIn("Invalid extraction_date", str(resp.data))
 
     def test_job_post_null_datetime_allowed(self):
-        session = self.session
-
-        company = Company(name="TestCorp", display_name="Test Corp")
-        session.add(company)
-        session.commit()
-
-        job = JobPost(
-            title="Engineer", description="Build things", company_id=company.id
+        company = Company.objects.create(name="TestCorp", display_name="Test Corp")
+        job = JobPost.objects.create(
+            title="Engineer", description="Build things", company=company,
+            created_by=self.user,
         )
-        session.add(job)
-        session.commit()
 
         # Test null posted_date (should be allowed)
         payload = {
@@ -427,5 +361,5 @@ class JSONAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
         # Reload and verify
-        session.refresh(job)
+        job.refresh_from_db()
         self.assertIsNone(job.posted_date)

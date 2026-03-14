@@ -3,7 +3,6 @@ from typing import Union
 from jinja2 import Environment, FileSystemLoader
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIChatModel
-from pydantic_ai.settings import ModelSettings
 from pydantic_ai.providers.ollama import OllamaProvider
 from .schemas import JobMatchRequest, JobMatchResponse
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file

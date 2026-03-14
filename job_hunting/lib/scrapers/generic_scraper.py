@@ -1,5 +1,5 @@
 # DO we want?
-from job_hunting.lib.models.scrape import Scrape
+from job_hunting.models import Scrape
 from markdownify import markdownify as md
 
 

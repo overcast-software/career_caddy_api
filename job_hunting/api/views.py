@@ -1,7 +1,5 @@
 import dateparser
 import os
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.ollama import OllamaProvider
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -26,23 +24,16 @@ from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.lib.services.answer_service import AnswerService
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import (
-    Resume,
-    Score,
-    Scrape,
-    CoverLetter,
-    Application,
-    Experience,
-    ExperienceDescription,
-    ResumeEducation,
-    ResumeCertification,
-    ResumeSummaries,
-    ResumeExperience,
-    ResumeSkill,
-    JobApplicationStatus,
-    Answer,
     CareerData,
 )
-from job_hunting.models import Status, Skill, Description, Certification, Education, Summary, Company, ApiKey, Question, JobPost
+from job_hunting.models import (
+    Status, Skill, Description, Certification, Education, Summary,
+    Company, ApiKey, Question, JobPost,
+    Answer, Application, CoverLetter, Experience, Resume, Score, Scrape,
+    ExperienceDescription, ResumeEducation, ResumeCertification,
+    ResumeSummary, ResumeExperience, ResumeSkill,
+    JobApplicationStatus,
+)
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
@@ -373,7 +364,23 @@ class BaseSAViewSet(viewsets.ViewSet):
             except Exception:
                 pass
 
+    def _is_django_model(self):
+        """Return True if self.model is a Django ORM model."""
+        try:
+            from django.db import models as _django_models
+            return self.model is not None and issubclass(self.model, _django_models.Model)
+        except (TypeError, AttributeError):
+            return False
+
+    def _get_obj(self, pk):
+        """Fetch a single object by PK, handling both Django and SA models."""
+        if self._is_django_model():
+            return self.model.objects.filter(pk=int(pk)).first()
+        return self.model.get(int(pk))
+
     def get_session(self):
+        if self._is_django_model():
+            return BaseModel.get_session()
         return self.model.get_session()
 
     def get_serializer(self, *args, **kwargs):
@@ -516,7 +523,10 @@ class BaseSAViewSet(viewsets.ViewSet):
                                 rel_ser = ser_cls()
                                 model_cls = rel_ser.model
                                 try:
-                                    fetched = model_cls.get(int(rel_id))
+                                    if hasattr(model_cls, "objects"):
+                                        fetched = model_cls.objects.filter(pk=int(rel_id)).first()
+                                    else:
+                                        fetched = model_cls.get(int(rel_id))
                                     if fetched:
                                         targets = [fetched]
                                 except (TypeError, ValueError, AttributeError):
@@ -542,23 +552,23 @@ class BaseSAViewSet(viewsets.ViewSet):
 
                 for t in targets:
                     key = (effective_type, str(t.id))
-                    if key in seen:
-                        continue
+                    already_seen = key in seen
 
-                    # Filter cover-letter resources to only include those owned by authenticated user
-                    if (
-                        effective_type == "cover-letter"
-                        and request
-                        and hasattr(request, "user")
-                        and request.user.is_authenticated
-                    ):
-                        if getattr(t, "user_id", None) != request.user.id:
-                            continue
+                    if not already_seen:
+                        # Filter cover-letter resources to only include those owned by authenticated user
+                        if (
+                            effective_type == "cover-letter"
+                            and request
+                            and hasattr(request, "user")
+                            and request.user.is_authenticated
+                        ):
+                            if getattr(t, "user_id", None) != request.user.id:
+                                continue
 
-                    seen.add(key)
-                    included.append(rel_ser.to_resource(t))
+                        seen.add(key)
+                        included.append(rel_ser.to_resource(t))
 
-                    # If there are more segments, recurse
+                    # If there are more segments, always recurse (even if this node was already seen)
                     if remaining_segments:
                         _include_recursive([t], remaining_segments, rel_ser)
 
@@ -592,8 +602,11 @@ class BaseSAViewSet(viewsets.ViewSet):
 
     @extend_schema(tags=["API"], summary="List resources", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
-        session = self.get_session()
-        items = session.query(self.model).all()
+        if self._is_django_model():
+            items = list(self.model.objects.all())
+        else:
+            session = self.get_session()
+            items = session.query(self.model).all()
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -605,7 +618,7 @@ class BaseSAViewSet(viewsets.ViewSet):
 
     @extend_schema(tags=["API"], summary="Retrieve a resource", parameters=[_INCLUDE_PARAM], responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = self._get_obj(pk)
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -655,10 +668,13 @@ class BaseSAViewSet(viewsets.ViewSet):
             # Ensure unsupported ownership fields are not passed to the model
             attrs.pop("created_by_id", None)
             attrs.pop("created_by", None)
-        obj = self.model(**attrs)
-        session = self.get_session()
-        session.add(obj)
-        session.commit()
+        if self._is_django_model():
+            obj = self.model.objects.create(**attrs)
+        else:
+            obj = self.model(**attrs)
+            session = self.get_session()
+            session.add(obj)
+            session.commit()
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
     @extend_schema(tags=["API"], summary="Replace a resource (full update)", request=_JSONAPI_WRITE, responses={200: _JSONAPI_ITEM, 400: OpenApiResponse(description="Validation error"), 404: OpenApiResponse(description="Not found")})
@@ -670,7 +686,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         return self._upsert(request, pk, partial=True)
 
     def _upsert(self, request, pk, partial=False):
-        obj = self.model.get(int(pk))
+        obj = self._get_obj(pk)
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -683,13 +699,19 @@ class BaseSAViewSet(viewsets.ViewSet):
         attrs.pop("created_by_id", None)
         for k, v in attrs.items():
             setattr(obj, k, v)
-        session = self.get_session()
-        session.add(obj)
-        session.commit()
+        if self._is_django_model():
+            obj.save()
+        else:
+            session = self.get_session()
+            session.add(obj)
+            session.commit()
         return Response({"data": ser.to_resource(obj)})
 
     @extend_schema(tags=["API"], summary="Delete a resource", responses={204: OpenApiResponse(description="Deleted")})
     def destroy(self, request, pk=None):
+        if self._is_django_model():
+            self.model.objects.filter(pk=int(pk)).delete()
+            return Response(status=204)
         obj = self.model.get(int(pk))
         if not obj:
             return Response(status=204)
@@ -703,7 +725,7 @@ class BaseSAViewSet(viewsets.ViewSet):
     @extend_schema(tags=["API"], summary="Get JSON:API relationship linkage data", responses={200: OpenApiResponse(description="Relationship linkage"), 404: OpenApiResponse(description="Not found or relationship not found")})
     @action(detail=True, methods=["get"], url_path=r"relationships/(?P<rel>[^/]+)")
     def relationships(self, request, pk=None, rel=None):
-        obj = self.model.get(int(pk))
+        obj = self._get_obj(pk)
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -726,6 +748,8 @@ class BaseSAViewSet(viewsets.ViewSet):
         target = getattr(obj, cfg["attr"], None)
 
         if uselist:
+            if hasattr(target, "all"):
+                target = target.all()
             data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
             links = {
                 "self": f"{_resource_base_path(ser.type)}/{obj.id}/relationships/{rel}",
@@ -839,7 +863,7 @@ class SummaryViewSet(BaseSAViewSet):
             )
 
         try:
-            resume = Resume.get(int(resume_id))
+            resume = Resume.objects.filter(pk=int(resume_id)).first()
         except (TypeError, ValueError):
             resume = None
         if not resume:
@@ -903,17 +927,13 @@ class SummaryViewSet(BaseSAViewSet):
             summary_service = SummaryService(client, job=job_post, resume=resume)
             summary = summary_service.generate_summary()
 
-        session = self.get_session()
         # Deactivate existing links, then create new active link
-        session.query(ResumeSummaries).filter_by(resume_id=resume.id).update(
-            {ResumeSummaries.active: False}, synchronize_session=False
-        )
-        session.add(
-            ResumeSummaries(resume_id=resume.id, summary_id=summary.id, active=True)
-        )
-        session.commit()
-        ResumeSummaries.ensure_single_active_for_resume(resume.id, session=session)
-        session.commit()
+        ResumeSummary.objects.filter(resume_id=resume.id).update(active=False)
+        ResumeSummary.objects.get_or_create(
+            resume_id=resume.id, summary_id=summary.id, defaults={"active": True}
+        )[0]
+        ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).update(active=True)
+        ResumeSummary.ensure_single_active_for_resume(resume.id)
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(summary)}
@@ -1309,8 +1329,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = Resume.get_session()
-        resumes = session.query(Resume).filter_by(user_id=user.id).all()
+        resumes = list(Resume.objects.filter(user_id=user.id))
         data = [ResumeSerializer().to_resource(r) for r in resumes]
         return Response({"data": data})
 
@@ -1324,8 +1343,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = Score.get_session()
-        scores = session.query(Score).filter_by(user_id=user.id).all()
+        scores = list(Score.objects.filter(user_id=user.id))
         data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
@@ -1339,8 +1357,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = CoverLetter.get_session()
-        cover_letters = session.query(CoverLetter).filter_by(user_id=user.id).all()
+        cover_letters = list(CoverLetter.objects.filter(user_id=user.id))
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
@@ -1354,8 +1371,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = Application.get_session()
-        applications = session.query(Application).filter_by(user_id=user.id).all()
+        applications = list(Application.objects.filter(user_id=user.id))
         data = [ApplicationSerializer().to_resource(a) for a in applications]
         return Response({"data": data})
 
@@ -1426,8 +1442,7 @@ class ResumeViewSet(BaseSAViewSet):
 
     @extend_schema(tags=["Resumes"], summary="List resumes (auto-includes all relationships)", parameters=_PAGE_PARAMS, responses={200: _JSONAPI_LIST})
     def list(self, request):
-        session = self.get_session()
-        items = session.query(self.model).all()
+        items = list(self.model.objects.all())
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -1441,7 +1456,7 @@ class ResumeViewSet(BaseSAViewSet):
 
     @extend_schema(tags=["Resumes"], summary="Retrieve a resume (auto-includes all relationships)", parameters=[_INCLUDE_PARAM], responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     def retrieve(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = self.model.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -1454,8 +1469,7 @@ class ResumeViewSet(BaseSAViewSet):
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
-        session = self.get_session()
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1468,8 +1482,7 @@ class ResumeViewSet(BaseSAViewSet):
         # Update scalar attributes
         for k, v in attrs.items():
             setattr(obj, k, v)
-        session.add(obj)
-        session.commit()
+        obj.save()
 
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
@@ -1480,24 +1493,16 @@ class ResumeViewSet(BaseSAViewSet):
         if isinstance(incoming_summary, str):
             new_content = incoming_summary.strip()
             # Find active link
-            active_link = (
-                session.query(ResumeSummaries)
-                .filter_by(resume_id=obj.id, active=True)
-                .first()
-            )
+            active_link = ResumeSummary.objects.filter(resume_id=obj.id, active=True).first()
             if active_link:
                 sm = Summary.objects.filter(pk=active_link.summary_id).first()
                 if sm and (sm.content or "") != new_content:
                     sm.content = new_content
                     sm.save()
                 # Ensure only this one is active
-                session.query(ResumeSummaries).filter(
-                    ResumeSummaries.resume_id == obj.id,
-                    ResumeSummaries.id != active_link.id,
-                ).update({ResumeSummaries.active: False}, synchronize_session=False)
+                ResumeSummary.objects.filter(resume_id=obj.id).exclude(pk=active_link.id).update(active=False)
                 active_link.active = True
-                session.add(active_link)
-                session.commit()
+                active_link.save()
             else:
                 # No active summary; create one and activate it
                 sm = Summary.objects.create(
@@ -1505,13 +1510,8 @@ class ResumeViewSet(BaseSAViewSet):
                     user_id=getattr(obj, "user_id", None),
                     content=new_content,
                 )
-                session.query(ResumeSummaries).filter_by(resume_id=obj.id).update(
-                    {ResumeSummaries.active: False}, synchronize_session=False
-                )
-                session.add(
-                    ResumeSummaries(resume_id=obj.id, summary_id=sm.id, active=True)
-                )
-                session.commit()
+                ResumeSummary.objects.filter(resume_id=obj.id).update(active=False)
+                ResumeSummary.objects.create(resume_id=obj.id, summary_id=sm.id, active=True)
 
         # Helpers for relationship reconciliation
         def _int_or_none(v):
@@ -1541,7 +1541,7 @@ class ResumeViewSet(BaseSAViewSet):
                         {"errors": [{"detail": "Experience id is required in PATCH"}]},
                         status=400,
                     )
-                exp = Experience.get(exp_id)
+                exp = Experience.objects.filter(pk=exp_id).first()
                 if not exp:
                     return Response(
                         {"errors": [{"detail": f"Invalid experience id: {exp_id}"}]},
@@ -1568,13 +1568,10 @@ class ResumeViewSet(BaseSAViewSet):
                 if comp_rel:
                     exp.company_id = comp_id
 
-                session.add(exp)
-                session.flush()  # ensure exp.id
+                exp.save()
 
                 # Ensure resume <-> experience link exists
-                ResumeExperience.first_or_create(
-                    session=session, resume_id=obj.id, experience_id=exp.id
-                )
+                ResumeExperience.objects.get_or_create(resume_id=obj.id, experience_id=exp.id)
 
                 # Reconcile descriptions for this experience (keep order as provided)
                 desc_nodes = (exp_rels.get("descriptions") or {}).get("data") or []
@@ -1601,58 +1598,50 @@ class ResumeViewSet(BaseSAViewSet):
                     )
 
                 if desc_nodes is not None:
-                    existing_links = (
-                        session.query(ExperienceDescription)
-                        .filter_by(experience_id=exp.id)
-                        .all()
+                    existing_links = list(
+                        ExperienceDescription.objects.filter(experience_id=exp.id)
                     )
-                    existing_by_desc = {l.description_id: l for l in existing_links}
+                    existing_by_desc = {lnk.description_id: lnk for lnk in existing_links}
                     desired_set = set(desired_desc_ids_ordered)
                     existing_set = set(existing_by_desc.keys())
 
                     # Remove links not desired
                     to_remove = existing_set - desired_set
                     if to_remove:
-                        session.query(ExperienceDescription).filter(
-                            ExperienceDescription.experience_id == exp.id,
-                            ExperienceDescription.description_id.in_(list(to_remove)),
-                        ).delete(synchronize_session=False)
+                        ExperienceDescription.objects.filter(
+                            experience_id=exp.id,
+                            description_id__in=list(to_remove),
+                        ).delete()
 
                     # Add/update desired links with order
                     for order_idx, did in enumerate(desired_desc_ids_ordered):
                         link = existing_by_desc.get(did)
                         if not link:
-                            session.add(
-                                ExperienceDescription(
-                                    experience_id=exp.id,
-                                    description_id=did,
-                                    order=order_idx,
-                                )
+                            ExperienceDescription.objects.create(
+                                experience_id=exp.id,
+                                description_id=did,
+                                order=order_idx,
                             )
                         else:
                             link.order = order_idx
-                            session.add(link)
+                            link.save()
 
                 desired_exp_ids.append(exp.id)
 
             # Reconcile resume_experience set to match provided experiences
-            existing_links = (
-                session.query(ResumeExperience).filter_by(resume_id=obj.id).all()
-            )
-            existing_ids = {l.experience_id for l in existing_links}
+            existing_links = list(ResumeExperience.objects.filter(resume_id=obj.id))
+            existing_ids = {lnk.experience_id for lnk in existing_links}
             desired_ids = set(desired_exp_ids)
             to_add = desired_ids - existing_ids
             to_remove = existing_ids - desired_ids
 
             for eid in to_add:
-                ResumeExperience.first_or_create(
-                    session=session, resume_id=obj.id, experience_id=eid
-                )
+                ResumeExperience.objects.get_or_create(resume_id=obj.id, experience_id=eid)
             if to_remove:
-                session.query(ResumeExperience).filter(
-                    ResumeExperience.resume_id == obj.id,
-                    ResumeExperience.experience_id.in_(list(to_remove)),
-                ).delete(synchronize_session=False)
+                ResumeExperience.objects.filter(
+                    resume_id=obj.id,
+                    experience_id__in=list(to_remove),
+                ).delete()
 
         # Educations: reconcile join set if provided
         educations_in = node.get("educations") or data.get("educations")
@@ -1679,19 +1668,18 @@ class ResumeViewSet(BaseSAViewSet):
                     },
                     status=400,
                 )
-            existing_links = (
-                session.query(ResumeEducation).filter_by(resume_id=obj.id).all()
+            existing_ids = set(
+                ResumeEducation.objects.filter(resume_id=obj.id).values_list("education_id", flat=True)
             )
-            existing_ids = {l.education_id for l in existing_links}
             to_add = desired_ids - existing_ids
             to_remove = existing_ids - desired_ids
             for eid in to_add:
-                session.add(ResumeEducation(resume_id=obj.id, education_id=eid))
+                ResumeEducation.objects.create(resume_id=obj.id, education_id=eid)
             if to_remove:
-                session.query(ResumeEducation).filter(
-                    ResumeEducation.resume_id == obj.id,
-                    ResumeEducation.education_id.in_(list(to_remove)),
-                ).delete(synchronize_session=False)
+                ResumeEducation.objects.filter(
+                    resume_id=obj.id,
+                    education_id__in=list(to_remove),
+                ).delete()
 
         # Certifications: reconcile join set if provided
         certifications_in = node.get("certifications") or data.get("certifications")
@@ -1718,19 +1706,18 @@ class ResumeViewSet(BaseSAViewSet):
                     },
                     status=400,
                 )
-            existing_links = (
-                session.query(ResumeCertification).filter_by(resume_id=obj.id).all()
+            existing_ids = set(
+                ResumeCertification.objects.filter(resume_id=obj.id).values_list("certification_id", flat=True)
             )
-            existing_ids = {l.certification_id for l in existing_links}
             to_add = desired_ids - existing_ids
             to_remove = existing_ids - desired_ids
             for cid in to_add:
-                session.add(ResumeCertification(resume_id=obj.id, certification_id=cid))
+                ResumeCertification.objects.create(resume_id=obj.id, certification_id=cid)
             if to_remove:
-                session.query(ResumeCertification).filter(
-                    ResumeCertification.resume_id == obj.id,
-                    ResumeCertification.certification_id.in_(list(to_remove)),
-                ).delete(synchronize_session=False)
+                ResumeCertification.objects.filter(
+                    resume_id=obj.id,
+                    certification_id__in=list(to_remove),
+                ).delete()
 
         # Skills: reconcile join set if provided
         skills_in = node.get("skills") or data.get("skills")
@@ -1773,10 +1760,8 @@ class ResumeViewSet(BaseSAViewSet):
                     status=400,
                 )
 
-            existing_links = (
-                session.query(ResumeSkill).filter_by(resume_id=obj.id).all()
-            )
-            existing_ids = {l.skill_id for l in existing_links}
+            existing_links = list(ResumeSkill.objects.filter(resume_id=obj.id))
+            existing_ids = {lnk.skill_id for lnk in existing_links}
             desired_ids = set(desired_active_by_id.keys())
 
             to_add = desired_ids - existing_ids
@@ -1785,15 +1770,14 @@ class ResumeViewSet(BaseSAViewSet):
 
             # Remove undesired links
             if to_remove:
-                session.query(ResumeSkill).filter(
-                    ResumeSkill.resume_id == obj.id,
-                    ResumeSkill.skill_id.in_(list(to_remove)),
-                ).delete(synchronize_session=False)
+                ResumeSkill.objects.filter(
+                    resume_id=obj.id,
+                    skill_id__in=list(to_remove),
+                ).delete()
 
             # Add missing links
             for sid in to_add:
-                ResumeSkill.first_or_create(
-                    session=session,
+                ResumeSkill.objects.get_or_create(
                     resume_id=obj.id,
                     skill_id=sid,
                     defaults={"active": desired_active_by_id[sid]},
@@ -1805,9 +1789,7 @@ class ResumeViewSet(BaseSAViewSet):
                     desired_active = desired_active_by_id[link.skill_id]
                     if bool(link.active) != bool(desired_active):
                         link.active = bool(desired_active)
-                        session.add(link)
-
-            session.commit()
+                        link.save()
 
         # Summaries: reconcile join set if provided (preserve current active if still present)
         summaries_in = node.get("summaries") or data.get("summaries")
@@ -1839,35 +1821,28 @@ class ResumeViewSet(BaseSAViewSet):
                     },
                     status=400,
                 )
-            existing_links = (
-                session.query(ResumeSummaries).filter_by(resume_id=obj.id).all()
-            )
-            existing_ids = {l.summary_id for l in existing_links}
-            active_by_id = {l.summary_id: l.active for l in existing_links}
+            existing_links = list(ResumeSummary.objects.filter(resume_id=obj.id))
+            existing_ids = {lnk.summary_id for lnk in existing_links}
+            active_by_id = {lnk.summary_id: lnk.active for lnk in existing_links}
 
             to_add = desired_ids - existing_ids
             to_remove = existing_ids - desired_ids
 
             for sid in to_add:
-                session.add(
-                    ResumeSummaries(resume_id=obj.id, summary_id=sid, active=False)
-                )
+                ResumeSummary.objects.create(resume_id=obj.id, summary_id=sid, active=False)
             if to_remove:
-                session.query(ResumeSummaries).filter(
-                    ResumeSummaries.resume_id == obj.id,
-                    ResumeSummaries.summary_id.in_(list(to_remove)),
-                ).delete(synchronize_session=False)
+                ResumeSummary.objects.filter(
+                    resume_id=obj.id,
+                    summary_id__in=list(to_remove),
+                ).delete()
 
             # Update active flag if explicitly requested, otherwise preserve existing active
-            session.flush()
             if desired_active_sid is not None:
                 # Set requested summary as active and deactivate all others
-                session.query(ResumeSummaries).filter(
-                    ResumeSummaries.resume_id == obj.id
-                ).update({ResumeSummaries.active: False}, synchronize_session=False)
-                session.query(ResumeSummaries).filter_by(
+                ResumeSummary.objects.filter(resume_id=obj.id).update(active=False)
+                ResumeSummary.objects.filter(
                     resume_id=obj.id, summary_id=desired_active_sid
-                ).update({ResumeSummaries.active: True}, synchronize_session=False)
+                ).update(active=True)
             else:
                 # Preserve active on the one that remains, otherwise none active
                 still_existing = desired_ids
@@ -1878,29 +1853,13 @@ class ResumeViewSet(BaseSAViewSet):
                     ]
                     if active_remaining:
                         keep_sid = active_remaining[0]
-                        session.query(ResumeSummaries).filter(
-                            ResumeSummaries.resume_id == obj.id
-                        ).update(
-                            {ResumeSummaries.active: False}, synchronize_session=False
-                        )
-                        session.query(ResumeSummaries).filter_by(
+                        ResumeSummary.objects.filter(resume_id=obj.id).update(active=False)
+                        ResumeSummary.objects.filter(
                             resume_id=obj.id, summary_id=keep_sid
-                        ).update(
-                            {ResumeSummaries.active: True}, synchronize_session=False
-                        )
+                        ).update(active=True)
 
-        # Final commit and refresh relationships for response
-        session.commit()
         # Enforce exactly one active summary if any exist
-        ResumeSummaries.ensure_single_active_for_resume(obj.id, session=session)
-        session.commit()
-        try:
-            session.expire(
-                obj,
-                ["experiences", "educations", "certifications", "summaries", "skills"],
-            )
-        except Exception:
-            pass
+        ResumeSummary.ensure_single_active_for_resume(obj.id)
 
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -1986,12 +1945,8 @@ class ResumeViewSet(BaseSAViewSet):
                 )
             attrs["user_id"] = user_id_int
 
-        session = self.get_session()
-
         # Create the resume
-        resume = Resume(**attrs)
-        session.add(resume)
-        session.commit()  # ensure resume.id
+        resume = Resume.objects.create(**attrs)
 
         # Extract potential child arrays from JSON:API attributes or top-level convenience keys
         data = request.data if isinstance(request.data, dict) else {}
@@ -2028,7 +1983,7 @@ class ResumeViewSet(BaseSAViewSet):
             # Support explicit id if provided
             eid = (item.get("data") or {}).get("id") or item.get("id")
             if eid:
-                exp = Experience.get(eid)
+                exp = Experience.objects.filter(pk=eid).first()
 
             # Helper to normalize company_id
             rels = item.get("relationships") or {}
@@ -2062,9 +2017,8 @@ class ResumeViewSet(BaseSAViewSet):
 
             if exp is None:
                 # Try to find an existing experience with matching scalars and identical description list
-                candidates = (
-                    session.query(Experience)
-                    .filter_by(
+                candidates = list(
+                    Experience.objects.filter(
                         company_id=company_id,
                         title=item.get("title"),
                         location=item.get("location"),
@@ -2072,7 +2026,6 @@ class ResumeViewSet(BaseSAViewSet):
                         start_date=s_date,
                         end_date=e_date,
                     )
-                    .all()
                 )
                 match = None
                 for cand in candidates:
@@ -2092,7 +2045,7 @@ class ResumeViewSet(BaseSAViewSet):
                     exp = match
                 else:
                     # Create new experience
-                    exp = Experience(
+                    exp = Experience.objects.create(
                         company_id=company_id,
                         title=item.get("title"),
                         location=item.get("location"),
@@ -2101,33 +2054,23 @@ class ResumeViewSet(BaseSAViewSet):
                         end_date=e_date,
                         content=item.get("content"),
                     )
-                    session.add(exp)
-                    session.commit()
                     # Link descriptions in order, creating Description rows as needed
-                    session.query(ExperienceDescription).filter_by(
-                        experience_id=exp.id
-                    ).delete()
-                    session.commit()
+                    ExperienceDescription.objects.filter(experience_id=exp.id).delete()
                     for idx, line in enumerate(incoming_lines or []):
                         if not line:
                             continue
                         desc, _ = Description.objects.get_or_create(content=line)
-                        session.add(
-                            ExperienceDescription(
-                                experience_id=exp.id,
-                                description_id=desc.id,
-                                order=idx,
-                            )
+                        ExperienceDescription.objects.create(
+                            experience_id=exp.id,
+                            description_id=desc.id,
+                            order=idx,
                         )
-                    session.commit()
 
             # Join resume_experience (avoid duplicates)
-            ResumeExperience.first_or_create(
-                session=session,
+            ResumeExperience.objects.get_or_create(
                 resume_id=resume.id,
                 experience_id=exp.id,
             )
-            session.commit()
 
             # Nested descriptions for this experience
             for d in item.get("descriptions") or []:
@@ -2150,13 +2093,11 @@ class ResumeViewSet(BaseSAViewSet):
                     order = int(order) if order is not None else 0
                 except (TypeError, ValueError):
                     order = 0
-                ExperienceDescription.first_or_create(
-                    session=session,
+                ExperienceDescription.objects.get_or_create(
                     experience_id=exp.id,
                     description_id=desc.id,
                     defaults={"order": order},
                 )
-                session.commit()
 
         # Upsert Educations and link
         for item in educations_in or []:
@@ -2188,8 +2129,7 @@ class ResumeViewSet(BaseSAViewSet):
                         k: v for k, v in create_attrs.items() if v is not None
                     }
                     edu = Education.objects.create(**create_attrs)
-            session.add(ResumeEducation(resume_id=resume.id, education_id=edu.id))
-            session.commit()
+            ResumeEducation.objects.get_or_create(resume_id=resume.id, education_id=edu.id)
 
         # Upsert Certifications and link
         for item in certifications_in or []:
@@ -2218,10 +2158,7 @@ class ResumeViewSet(BaseSAViewSet):
                         k: v for k, v in create_attrs.items() if v is not None
                     }
                     cert = Certification.objects.create(**create_attrs)
-            session.add(
-                ResumeCertification(resume_id=resume.id, certification_id=cert.id)
-            )
-            session.commit()
+            ResumeCertification.objects.get_or_create(resume_id=resume.id, certification_id=cert.id)
 
         # Upsert Skills and link
         skills_in = node.get("skills") or data.get("skills") or []
@@ -2243,13 +2180,11 @@ class ResumeViewSet(BaseSAViewSet):
             # Determine 'active' (default True)
             active_val = (s_node.get("attributes") or {}).get("active")
             active_val = bool(active_val) if active_val is not None else True
-            ResumeSkill.first_or_create(
-                session=session,
+            ResumeSkill.objects.get_or_create(
                 resume_id=resume.id,
                 skill_id=skill.id,
                 defaults={"active": active_val},
             )
-        session.commit()
 
         # Upsert Summaries and link
         active_set = False
@@ -2332,26 +2267,13 @@ class ResumeViewSet(BaseSAViewSet):
                 summary = Summary.objects.create(job_post_id=jp_id, user_id=u_id, content=content)
 
             # Link summary to resume; mark the first one as active
-            session.add(
-                ResumeSummaries(
-                    resume_id=resume.id,
-                    summary_id=summary.id,
-                    active=(not active_set),
-                )
+            ResumeSummary.objects.get_or_create(
+                resume_id=resume.id,
+                summary_id=summary.id,
+                defaults={"active": (not active_set)},
             )
             active_set = True
-        session.commit()
-        ResumeSummaries.ensure_single_active_for_resume(resume.id, session=session)
-        session.commit()
-
-        # Refresh relationships so response includes all links
-        try:
-            session.expire(
-                resume,
-                ["experiences", "educations", "certifications", "summaries", "skills"],
-            )
-        except Exception:
-            pass
+        ResumeSummary.ensure_single_active_for_resume(resume.id)
 
         payload = {"data": ser.to_resource(resume)}
         include_rels = self._parse_include(request)
@@ -2361,10 +2283,10 @@ class ResumeViewSet(BaseSAViewSet):
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ScoreSerializer().to_resource(s) for s in (obj.scores or [])]
+        data = [ScoreSerializer().to_resource(s) for s in obj.scores.all()]
         return Response({"data": data})
 
     @action(
@@ -2374,27 +2296,20 @@ class ResumeViewSet(BaseSAViewSet):
         permission_classes=[IsAuthenticated],
     )
     def cover_letters(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = CoverLetter.get_session()
-        cover_letters = (
-            session.query(CoverLetter)
-            .filter_by(resume_id=obj.id, user_id=request.user.id)
-            .all()
-        )
+        cover_letters = list(CoverLetter.objects.filter(resume_id=obj.id, user_id=request.user.id))
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [
-            ApplicationSerializer().to_resource(a) for a in (obj.applications or [])
-        ]
+        data = [ApplicationSerializer().to_resource(a) for a in obj.applications.all()]
         return Response({"data": data})
 
     @extend_schema(methods=["GET"], tags=["Resumes"], summary="List summaries for a resume", responses={200: _JSONAPI_LIST})
@@ -2402,7 +2317,7 @@ class ResumeViewSet(BaseSAViewSet):
     @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
         if request.method.lower() == "post":
-            obj = self.model.get(int(pk))  # obj is the Resume
+            obj = Resume.objects.filter(pk=int(pk)).first()  # obj is the Resume
             if not obj:
                 return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -2475,16 +2390,12 @@ class ResumeViewSet(BaseSAViewSet):
                 summary_service = SummaryService(client, job=job_post, resume=obj)
                 summary = summary_service.generate_summary()
 
-            session = self.get_session()
-            session.query(ResumeSummaries).filter_by(resume_id=obj.id).update(
-                {ResumeSummaries.active: False}, synchronize_session=False
+            ResumeSummary.objects.filter(resume_id=obj.id).update(active=False)
+            ResumeSummary.objects.get_or_create(
+                resume_id=obj.id, summary_id=summary.id, defaults={"active": True}
             )
-            session.add(
-                ResumeSummaries(resume_id=obj.id, summary_id=summary.id, active=True)
-            )
-            session.commit()
-            ResumeSummaries.ensure_single_active_for_resume(obj.id, session=session)
-            session.commit()
+            ResumeSummary.objects.filter(resume_id=obj.id, summary_id=summary.id).update(active=True)
+            ResumeSummary.ensure_single_active_for_resume(obj.id)
 
             ser = SummarySerializer()
             payload = {"data": ser.to_resource(summary)}
@@ -2495,7 +2406,7 @@ class ResumeViewSet(BaseSAViewSet):
                 )
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -2504,7 +2415,8 @@ class ResumeViewSet(BaseSAViewSet):
         if hasattr(ser, "set_parent_context"):
             ser.set_parent_context("resume", obj.id, "summaries")
 
-        items = list(obj.summaries or [])
+        _summary_ids = list(ResumeSummary.objects.filter(resume_id=obj.id).values_list("summary_id", flat=True))
+        items = list(Summary.objects.filter(pk__in=_summary_ids))
         data = [ser.to_resource(s) for s in items]
 
         # Build included only when ?include=... is provided
@@ -2520,23 +2432,18 @@ class ResumeViewSet(BaseSAViewSet):
     @extend_schema(tags=["Resumes"], summary="Retrieve a specific summary linked to a resume", responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")})
     @action(detail=True, methods=["get"], url_path=r"summaries/(?P<summary_id>\d+)")
     def summary(self, request, pk=None, summary_id=None):
-        session = self.get_session()
-        resume = self.model.get(int(pk))
+        resume = Resume.objects.filter(pk=int(pk)).first()
         if not resume:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         try:
             sid = int(summary_id)
         except (TypeError, ValueError):
             return Response({"errors": [{"detail": "Invalid summary id"}]}, status=400)
-        summary = Summary.get(sid)
+        summary = Summary.objects.filter(pk=sid).first()
         if not summary:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         # Ensure the summary is associated with this resume via the link table
-        link = (
-            session.query(ResumeSummaries)
-            .filter_by(resume_id=resume.id, summary_id=summary.id)
-            .first()
-        )
+        link = ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).first()
         if not link:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = SummarySerializer()
@@ -2560,12 +2467,14 @@ class ResumeViewSet(BaseSAViewSet):
     @extend_schema(tags=["Resumes"], summary="List experiences for a resume", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = ExperienceSerializer()
         ser.set_parent_context("resume", obj.id, "experiences")
-        items = list(obj.experiences or [])
+        _exp_ids = list(ResumeExperience.objects.filter(resume_id=obj.id).order_by("order").values_list("experience_id", flat=True))
+        _exp_map = {e.id: e for e in Experience.objects.filter(pk__in=_exp_ids)}
+        items = [_exp_map[eid] for eid in _exp_ids if eid in _exp_map]
         data = [ser.to_resource(e) for e in items]
 
         # Build included only when ?include=... is provided
@@ -2581,25 +2490,24 @@ class ResumeViewSet(BaseSAViewSet):
     @extend_schema(tags=["Resumes"], summary="List educations for a resume", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def educations(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = EducationSerializer()
         ser.set_parent_context("resume", obj.id, "educations")
-        data = [ser.to_resource(e) for e in (obj.educations or [])]
+        _edu_ids = list(ResumeEducation.objects.filter(resume_id=obj.id).values_list("education_id", flat=True))
+        data = [ser.to_resource(e) for e in Education.objects.filter(pk__in=_edu_ids)]
         return Response({"data": data})
 
     @extend_schema(tags=["Resumes"], summary="List skills for a resume", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def skills(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = SkillSerializer()
         ser.set_parent_context("resume", obj.id, "skills")
-        _session = BaseModel.get_session()
-        rs_links = _session.query(ResumeSkill).filter_by(resume_id=obj.id).all()
-        skill_ids = [rs.skill_id for rs in rs_links]
+        skill_ids = list(ResumeSkill.objects.filter(resume_id=obj.id).values_list("skill_id", flat=True))
         items = list(Skill.objects.filter(pk__in=skill_ids))
         data = [ser.to_resource(s) for s in items]
 
@@ -2622,7 +2530,7 @@ class ResumeViewSet(BaseSAViewSet):
     )
     @action(detail=True, methods=["get"], url_path="export")
     def export(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -2748,10 +2656,6 @@ class ResumeViewSet(BaseSAViewSet):
             # Create a new resume for the authenticated user
             # resume = Resume(user_id=request.user.id, file_path=uploaded_file.name)
 
-            ollama_model = OpenAIChatModel(
-                model_name="qwen3-coder",
-                provider=OllamaProvider(base_url="http://localhost:11434/v1"),
-            )
             # Create IngestResume service with the blob
             resume_name = uploaded_file.name
             ingest_service = IngestResume(
@@ -2782,9 +2686,7 @@ class ResumeViewSet(BaseSAViewSet):
                 derived_name = base_name.strip()[:100]  # Trim to reasonable length
                 if derived_name:
                     resume.title = derived_name
-                    session = self.get_session()
-                    session.add(resume)
-                    session.commit()
+                    resume.save()
             elif hasattr(resume, "name") and not getattr(resume, "name", None):
                 # Fallback to 'name' field if 'title' doesn't exist
                 base_name = uploaded_file.name
@@ -2793,9 +2695,7 @@ class ResumeViewSet(BaseSAViewSet):
                 derived_name = base_name.strip()[:100]  # Trim to reasonable length
                 if derived_name:
                     resume.name = derived_name
-                    session = self.get_session()
-                    session.add(resume)
-                    session.commit()
+                    resume.save()
 
             # Return the created resume with all relationships
             ser = self.get_serializer()
@@ -2898,15 +2798,17 @@ class ScoreViewSet(BaseSAViewSet):
         resume_id = int(resume_id)
 
         jp = JobPost.objects.filter(pk=job_post_id).first()
-        resume = Resume.get(resume_id)
+        resume = Resume.objects.filter(pk=resume_id).first()
 
         # Export resume to markdown for improved scoring context
         exporter = DbExportService()
         resume_markdown = exporter.resume_markdown_export(resume)
 
-        myScore, is_created = Score.first_or_initialize(
+        myScore = Score.objects.filter(
             job_post_id=job_post_id, resume_id=resume_id, user_id=user_id
-        )
+        ).first()
+        if not myScore:
+            myScore = Score(job_post_id=job_post_id, resume_id=resume_id, user_id=user_id)
 
         try:
             result = myJobScorer.score_job_match(jp.description, resume_markdown)
@@ -2966,20 +2868,40 @@ class JobPostViewSet(BaseSAViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
 
+    def get_session(self):
+        return BaseModel.get_session()
+
     def pre_save_payload(self, request, attrs, creating):
         # Remove any client-supplied ownership fields so they can't be spoofed
         attrs.pop("created_by", None)
         attrs.pop("created_by_id", None)  # defensive
 
-        # If creating, set created_by to the authenticated user
+        # If creating, set created_by_id to the authenticated user
         if creating:
-            attrs["created_by"] = request.user.id
+            attrs["created_by_id"] = request.user.id
 
         return attrs
 
+    @staticmethod
+    def _parse_date_attrs(attrs):
+        """Parse posted_date and extraction_date from ISO strings to date objects."""
+        from dateutil import parser as dateutil_parser
+        from datetime import date as date_type
+        errors = {}
+        for field in ("posted_date", "extraction_date"):
+            if field not in attrs or attrs[field] is None:
+                continue
+            val = attrs[field]
+            if isinstance(val, date_type):
+                continue
+            try:
+                attrs[field] = dateutil_parser.parse(str(val)).date()
+            except (ValueError, TypeError):
+                errors[field] = f"Invalid {field}: {val!r}. Expected a date (e.g. '2025-01-15')."
+        return errors
+
     def list(self, request):
-        session = self.get_session()
-        items = session.query(self.model).all()
+        items = list(JobPost.objects.all())
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -2990,7 +2912,7 @@ class JobPostViewSet(BaseSAViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -3000,22 +2922,70 @@ class JobPostViewSet(BaseSAViewSet):
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data) if "data" in data else {}
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        attrs = self.pre_save_payload(request, attrs, creating=True)
+        date_errors = self._parse_date_attrs(attrs)
+        if date_errors:
+            return Response({"errors": [{"detail": v} for v in date_errors.values()]}, status=400)
+        obj = JobPost(**attrs)
+        obj.save()
+        return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
+
+    def update(self, request, pk=None):
+        return self._upsert_django(request, pk, partial=False)
+
+    def partial_update(self, request, pk=None):
+        return self._upsert_django(request, pk, partial=True)
+
+    def _upsert_django(self, request, pk, partial=False):
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        attrs = self.pre_save_payload(request, attrs, creating=False)
+        attrs.pop("created_by_id", None)
+        attrs.pop("created_at", None)  # never allow overriding auto timestamp
+        date_errors = self._parse_date_attrs(attrs)
+        if date_errors:
+            return Response({"errors": [{"detail": v} for v in date_errors.values()]}, status=400)
+        for k, v in attrs.items():
+            setattr(obj, k, v)
+        obj.save()
+        return Response({"data": ser.to_resource(obj)})
+
+    def destroy(self, request, pk=None):
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response(status=204)
+        obj.delete()
+        return Response(status=204)
+
     @extend_schema(tags=["Job Posts"], summary="List scores for a job post", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
-        obj = self.model.get(int(pk))
-        if not obj:
+        if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ScoreSerializer().to_resource(s) for s in (obj.scores or [])]
+        scores = list(Score.objects.filter(job_post_id=int(pk)))
+        data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
     @extend_schema(tags=["Job Posts"], summary="List scrapes for a job post", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def scrapes(self, request, pk=None):
-        obj = self.model.get(int(pk))
-        if not obj:
+        if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ScrapeSerializer().to_resource(s) for s in (obj.scrapes or [])]
+        scrapes = list(Scrape.objects.filter(job_post_id=int(pk)))
+        data = [ScrapeSerializer().to_resource(s) for s in scrapes]
         return Response({"data": data})
 
     @extend_schema(tags=["Job Posts"], summary="List cover letters for a job post (authenticated user's only)", responses={200: _JSONAPI_LIST})
@@ -3026,28 +2996,19 @@ class JobPostViewSet(BaseSAViewSet):
         permission_classes=[IsAuthenticated],
     )
     def cover_letters(self, request, pk=None):
-        obj = self.model.get(int(pk))
-        if not obj:
+        if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-
-        session = CoverLetter.get_session()
-        cover_letters = (
-            session.query(CoverLetter)
-            .filter_by(job_post_id=obj.id, user_id=request.user.id)
-            .all()
-        )
+        cover_letters = list(CoverLetter.objects.filter(job_post_id=int(pk), user_id=request.user.id))
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
 
     @extend_schema(tags=["Job Posts"], summary="List job applications for a job post", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
-        obj = self.model.get(int(pk))
-        if not obj:
+        if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [
-            ApplicationSerializer().to_resource(a) for a in (obj.applications or [])
-        ]
+        apps = list(Application.objects.filter(job_post_id=int(pk)))
+        data = [ApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
     @extend_schema(methods=["GET"], tags=["Job Posts"], summary="List summaries for a job post", responses={200: _JSONAPI_LIST})
@@ -3055,7 +3016,7 @@ class JobPostViewSet(BaseSAViewSet):
     @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
         if request.method.lower() == "post":
-            obj = self.model.get(int(pk))  # obj is the JobPost
+            obj = JobPost.objects.filter(pk=pk).first()
             if not obj:
                 return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -3116,16 +3077,12 @@ class JobPostViewSet(BaseSAViewSet):
                 summary_service = SummaryService(client, job=obj, resume=resume)
                 summary = summary_service.generate_summary()
 
-            session = self.get_session()
-            session.query(ResumeSummaries).filter_by(resume_id=resume.id).update(
-                {ResumeSummaries.active: False}, synchronize_session=False
+            ResumeSummary.objects.filter(resume_id=resume.id).update(active=False)
+            ResumeSummary.objects.get_or_create(
+                resume_id=resume.id, summary_id=summary.id, defaults={"active": True}
             )
-            session.add(
-                ResumeSummaries(resume_id=resume.id, summary_id=summary.id, active=True)
-            )
-            session.commit()
-            ResumeSummaries.ensure_single_active_for_resume(resume.id, session=session)
-            session.commit()
+            ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).update(active=True)
+            ResumeSummary.ensure_single_active_for_resume(resume.id)
 
             ser = SummarySerializer()
             payload = {"data": ser.to_resource(summary)}
@@ -3136,10 +3093,11 @@ class JobPostViewSet(BaseSAViewSet):
                 )
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        obj = self.model.get(int(pk))
+        obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [SummarySerializer().to_resource(s) for s in (obj.summaries or [])]
+        summaries = list(Summary.objects.filter(job_post_id=obj.id))
+        data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
 
 
@@ -3195,8 +3153,7 @@ class ScrapeViewSet(BaseSAViewSet):
             )
 
         # Check for existing scrape with the same URL
-        session = self.get_session()
-        existing_scrape = session.query(Scrape).filter_by(url=url).first()
+        existing_scrape = Scrape.objects.filter(url=url).first()
 
         # If there's an existing scrape that's pending or completed, return it
         if existing_scrape:
@@ -3227,9 +3184,7 @@ class ScrapeViewSet(BaseSAViewSet):
             # If failed, we'll create a new scrape below
 
         # Create a pending scrape record
-        scrape = Scrape(url=url, state="pending")
-        session.add(scrape)
-        session.commit()
+        scrape = Scrape.objects.create(url=url, state="pending")
 
         # Start the scraping process in the background
         import threading
@@ -3248,7 +3203,7 @@ class ScrapeViewSet(BaseSAViewSet):
                     settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
                 )
                 scraper = Scraper(browser_service_url, url, scrape_id=scrape_id)
-                job_post_data = scraper.process()
+                scraper.process()
 
                 # Update scrape record with success state
                 # The browser service should handle updating the scrape record
@@ -3256,25 +3211,15 @@ class ScrapeViewSet(BaseSAViewSet):
             except Exception as e:
                 # Update scrape record with error state
                 try:
-                    from job_hunting.lib.models.base import BaseModel
-
-                    # Ensure we have a fresh session for error handling
-                    BaseModel.clear_session()
-                    session = BaseModel.get_session()
-                    scrape_obj = Scrape.get(scrape_id)
+                    import django
+                    django.db.close_old_connections()
+                    scrape_obj = Scrape.objects.filter(pk=scrape_id).first()
                     if scrape_obj:
                         scrape_obj.state = "failed"
                         scrape_obj.error_message = str(e)
-                        session.add(scrape_obj)
-                        session.commit()
+                        scrape_obj.save()
                 except Exception:
                     pass
-                finally:
-                    # Clean up the background thread's session
-                    try:
-                        BaseModel.clear_session()
-                    except Exception:
-                        pass
 
         # Start background thread
         thread = threading.Thread(target=run_scraper_background, daemon=True)
@@ -3297,7 +3242,7 @@ class ScrapeViewSet(BaseSAViewSet):
                 status=status.HTTP_501_NOT_IMPLEMENTED,
             )
 
-        obj = self.model.get(int(pk))
+        obj = Scrape.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -3309,11 +3254,9 @@ class ScrapeViewSet(BaseSAViewSet):
             )
 
         # Reset the scrape state
-        session = self.get_session()
         obj.state = "pending"
         obj.error_message = None
-        session.add(obj)
-        session.commit()
+        obj.save()
 
         # Start the scraping process in the background
         import threading
@@ -3333,30 +3276,20 @@ class ScrapeViewSet(BaseSAViewSet):
                     settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
                 )
                 scraper = Scraper(browser_service_url, url, scrape_id=scrape_id)
-                job_post_data = scraper.process()
+                scraper.process()
 
             except Exception as e:
                 # Update scrape record with error state
                 try:
-                    from job_hunting.lib.models.base import BaseModel
-
-                    # Ensure we have a fresh session for error handling
-                    BaseModel.clear_session()
-                    session = BaseModel.get_session()
-                    scrape_obj = Scrape.get(scrape_id)
+                    import django
+                    django.db.close_old_connections()
+                    scrape_obj = Scrape.objects.filter(pk=scrape_id).first()
                     if scrape_obj:
                         scrape_obj.state = "failed"
                         scrape_obj.error_message = str(e)
-                        session.add(scrape_obj)
-                        session.commit()
+                        scrape_obj.save()
                 except Exception:
                     pass
-                finally:
-                    # Clean up the background thread's session
-                    try:
-                        BaseModel.clear_session()
-                    except Exception:
-                        pass
 
         # Start background thread
         thread = threading.Thread(target=run_scraper_background, daemon=True)
@@ -3446,8 +3379,7 @@ class CompanyViewSet(BaseSAViewSet):
     def scrapes(self, request, pk=None):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        session = self.get_session()
-        scrapes_list = session.query(Scrape).filter_by(company_id=int(pk)).all()
+        scrapes_list = list(Scrape.objects.filter(company_id=int(pk)))
         data = [ScrapeSerializer().to_resource(s) for s in scrapes_list]
         return Response({"data": data})
 
@@ -3465,8 +3397,7 @@ class CoverLetterViewSet(BaseSAViewSet):
     permission_classes = [IsAuthenticated]
 
     def list(self, request):
-        session = self.get_session()
-        items = session.query(self.model).filter_by(user_id=request.user.id).all()
+        items = list(CoverLetter.objects.filter(user_id=request.user.id))
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -3477,7 +3408,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = CoverLetter.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -3496,7 +3427,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
-        obj = self.model.get(int(pk))
+        obj = CoverLetter.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -3518,7 +3449,7 @@ class CoverLetterViewSet(BaseSAViewSet):
 
         # If resume_id is being changed, validate new resume ownership
         if attrs.get("resume_id", None) is not None:
-            new_resume = Resume.get(attrs["resume_id"])
+            new_resume = Resume.objects.filter(pk=attrs["resume_id"]).first()
             if not new_resume or new_resume.user_id != request.user.id:
                 return Response(
                     {"errors": [{"detail": "Forbidden"}]},
@@ -3527,13 +3458,11 @@ class CoverLetterViewSet(BaseSAViewSet):
 
         for k, v in attrs.items():
             setattr(obj, k, v)
-        session = self.get_session()
-        session.add(obj)
-        session.commit()
+        obj.save()
         return Response({"data": ser.to_resource(obj)})
 
     def destroy(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = CoverLetter.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response(status=204)
 
@@ -3544,9 +3473,7 @@ class CoverLetterViewSet(BaseSAViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        session = self.get_session()
-        session.delete(obj)
-        session.commit()
+        obj.delete()
         return Response(status=204)
 
     @extend_schema(
@@ -3861,11 +3788,10 @@ class ApplicationViewSet(BaseSAViewSet):
     @extend_schema(tags=["Job Applications"], summary="List application statuses for a job application", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
-        obj = self.model.get(int(pk))
-        if not obj:
+        if not Application.objects.filter(pk=int(pk)).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = JobApplicationStatusSerializer()
-        items = list(obj.application_statuses or [])
+        items = list(JobApplicationStatus.objects.filter(application_id=int(pk)))
         data = [ser.to_resource(i) for i in items]
 
         # Build included only when ?include=... is provided
@@ -3881,11 +3807,10 @@ class ApplicationViewSet(BaseSAViewSet):
     @extend_schema(tags=["Job Applications"], summary="List questions for a job application", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
-        obj = self.model.get(int(pk))
-        if not obj:
+        if not Application.objects.filter(pk=int(pk)).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = QuestionSerializer()
-        items = list(obj.questions or [])
+        items = list(Question.objects.filter(application_id=int(pk)))
         data = [ser.to_resource(i) for i in items]
 
         # Build included only when ?include=... is provided
@@ -3985,9 +3910,7 @@ class QuestionViewSet(BaseSAViewSet):
         ans_str = ans_val.strip() if isinstance(ans_val, str) else None
         if ans_str:
             try:
-                session = self.get_session()
-                session.add(Answer(question_id=obj.id, content=ans_str))
-                session.commit()
+                Answer.objects.create(question_id=obj.id, content=ans_str)
             except Exception:
                 pass
 
@@ -4020,9 +3943,7 @@ class QuestionViewSet(BaseSAViewSet):
         ans_str = ans_val.strip() if isinstance(ans_val, str) else None
         if ans_str:
             try:
-                session = self.get_session()
-                session.add(Answer(question_id=obj.id, content=ans_str))
-                session.commit()
+                Answer.objects.create(question_id=obj.id, content=ans_str)
             except Exception:
                 pass
 
@@ -4046,8 +3967,7 @@ class QuestionViewSet(BaseSAViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        session = self.get_session()
-        items = session.query(Answer).filter_by(question_id=obj.id).all()
+        items = list(Answer.objects.filter(question_id=obj.id).order_by("created_at"))
         ser = AnswerSerializer()
         data = [ser.to_resource(i) for i in items]
 
@@ -4218,18 +4138,13 @@ class AnswerViewSet(BaseSAViewSet):
                     status=status.HTTP_502_BAD_GATEWAY,
                 )
 
-        session = self.get_session()
-
         if generated_obj:
-            # Use the generated Answer object
+            # Use the generated Answer object (may already be saved by AnswerService)
             obj = generated_obj
-            # Ensure question_id is set
             if not getattr(obj, "question_id", None):
                 obj.question_id = question.id
-            # If not yet persisted, add to session and commit
-            if not getattr(obj, "id", None):
-                session.add(obj)
-                session.commit()
+            if not getattr(obj, "pk", None) and not getattr(obj, "id", None):
+                obj.save()
         else:
             # Create new Answer with provided or generated content
             if not content:
@@ -4243,13 +4158,7 @@ class AnswerViewSet(BaseSAViewSet):
                     },
                     status=400,
                 )
-
-            attrs["question_id"] = question.id
-            attrs["content"] = content
-
-            obj = self.model(**attrs)
-            session.add(obj)
-            session.commit()
+            obj = Answer.objects.create(question_id=question.id, content=content)
 
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -4272,12 +4181,15 @@ class ExperienceViewSet(BaseSAViewSet):
     @extend_schema(tags=["Experiences"], summary="List descriptions for an experience", responses={200: _JSONAPI_LIST})
     @action(detail=True, methods=["get"])
     def descriptions(self, request, pk=None):
-        obj = self.model.get(int(pk))
+        obj = Experience.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = DescriptionSerializer()
         ser.set_parent_context("experience", obj.id, "descriptions")
-        data = [ser.to_resource(d) for d in (obj.descriptions or [])]
+        _desc_ids = list(ExperienceDescription.objects.filter(experience_id=obj.id).order_by("order").values_list("description_id", flat=True))
+        _desc_map = {d.id: d for d in Description.objects.filter(pk__in=_desc_ids)}
+        items = [_desc_map[did] for did in _desc_ids if did in _desc_map]
+        data = [ser.to_resource(d) for d in items]
         return Response({"data": data})
 
     @extend_schema(
@@ -4320,7 +4232,7 @@ class ExperienceViewSet(BaseSAViewSet):
                     )
 
         # Validate referenced resumes (if provided)
-        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        invalid = [rid for rid in resume_ids if not Resume.objects.filter(pk=rid).exists()]
         if invalid:
             return Response(
                 {
@@ -4333,14 +4245,12 @@ class ExperienceViewSet(BaseSAViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session = self.get_session()
-
         # Use existing Experience if client supplies an id; otherwise create a new one
         provided_id = node.get("id")
         exp = None
         if provided_id is not None:
             try:
-                exp = Experience.get(int(provided_id))
+                exp = Experience.objects.filter(pk=int(provided_id)).first()
             except (TypeError, ValueError):
                 exp = None
             if not exp:
@@ -4349,17 +4259,11 @@ class ExperienceViewSet(BaseSAViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         else:
-            exp = Experience(**attrs)
-            session.add(exp)
-            session.commit()  # ensure exp.id is available
+            exp = Experience.objects.create(**attrs)
 
         # Populate join table (avoid duplicates)
         for rid in resume_ids:
-            ResumeExperience.first_or_create(resume_id=rid, experience_id=exp.id)
-        session.commit()
-
-        # Ensure relationships reflect the new joins
-        session.expire(exp, ["resumes"])
+            ResumeExperience.objects.get_or_create(resume_id=rid, experience_id=exp.id)
 
         payload = {"data": ser.to_resource(exp)}
         include_rels = self._parse_include(request)
@@ -4368,8 +4272,7 @@ class ExperienceViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
-        session = self.get_session()
-        exp = self.model.get(int(pk))
+        exp = Experience.objects.filter(pk=int(pk)).first()
         if not exp:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -4384,8 +4287,7 @@ class ExperienceViewSet(BaseSAViewSet):
         # Update scalar attributes (including company via relationship_fks)
         for k, v in attrs.items():
             setattr(exp, k, v)
-        session.add(exp)
-        session.commit()
+        exp.save()
 
         # Parse resume relationship to add join(s)
         data = request.data if isinstance(request.data, dict) else {}
@@ -4412,7 +4314,7 @@ class ExperienceViewSet(BaseSAViewSet):
                     )
 
         # Validate resumes and create missing links
-        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        invalid = [rid for rid in resume_ids if not Resume.objects.filter(pk=rid).exists()]
         if invalid:
             return Response(
                 {
@@ -4426,13 +4328,7 @@ class ExperienceViewSet(BaseSAViewSet):
             )
 
         for rid in resume_ids:
-            ResumeExperience.first_or_create(
-                session=session, resume_id=rid, experience_id=exp.id
-            )
-        session.commit()
-
-        # Refresh relationships so response includes all linked resumes
-        session.expire(exp, ["resumes"])
+            ResumeExperience.objects.get_or_create(resume_id=rid, experience_id=exp.id)
 
         payload = {"data": ser.to_resource(exp)}
         include_rels = self._parse_include(request)
@@ -4514,20 +4410,17 @@ class EducationViewSet(BaseSAViewSet):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        invalid = [rid for rid in resume_ids if not Resume.objects.filter(pk=rid).exists()]
         if invalid:
             return Response(
                 {"errors": [{"detail": f"Invalid resume ID(s): {', '.join(map(str, invalid))}"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session = self.get_session()
         edu = Education.objects.create(**attrs)
 
         for rid in resume_ids:
-            link = ResumeEducation(resume_id=rid, education_id=edu.id)
-            session.add(link)
-        session.commit()
+            ResumeEducation.objects.get_or_create(resume_id=rid, education_id=edu.id)
 
         payload = {"data": ser.to_resource(edu)}
         include_rels = self._parse_include(request)
@@ -4611,7 +4504,7 @@ class CertificationViewSet(BaseSAViewSet):
                     )
 
         # Validate referenced resumes (if provided)
-        invalid = [rid for rid in resume_ids if Resume.get(rid) is None]
+        invalid = [rid for rid in resume_ids if not Resume.objects.filter(pk=rid).exists()]
         if invalid:
             return Response(
                 {
@@ -4624,16 +4517,12 @@ class CertificationViewSet(BaseSAViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session = self.get_session()
-
         # Create Certification
         cert = Certification.objects.create(**attrs)
 
         # Populate join table
         for rid in resume_ids:
-            link = ResumeCertification(resume_id=rid, certification_id=cert.id)
-            session.add(link)
-        session.commit()
+            ResumeCertification.objects.get_or_create(resume_id=rid, certification_id=cert.id)
 
         payload = {"data": ser.to_resource(cert)}
         include_rels = self._parse_include(request)
@@ -4739,7 +4628,7 @@ class DescriptionViewSet(BaseSAViewSet):
                 exp_items.append((eid, order))
 
         # Validate referenced experiences before creating description
-        invalid_ids = [eid for eid, _ in exp_items if Experience.get(eid) is None]
+        invalid_ids = [eid for eid, _ in exp_items if not Experience.objects.filter(pk=eid).exists()]
         if invalid_ids:
             return Response(
                 {
@@ -4752,20 +4641,16 @@ class DescriptionViewSet(BaseSAViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session = self.get_session()
-
         # Create description
         desc = Description.objects.create(**attrs)
 
         # Populate join table with optional per-link order
         for eid, order in exp_items:
-            link = ExperienceDescription(
+            ExperienceDescription.objects.get_or_create(
                 experience_id=eid,
                 description_id=desc.id,
-                order=(order if order is not None else 0),
+                defaults={"order": (order if order is not None else 0)},
             )
-            session.add(link)
-        session.commit()
 
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
@@ -4774,7 +4659,6 @@ class DescriptionViewSet(BaseSAViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
-        session = self.get_session()
         desc = Description.objects.filter(pk=int(pk)).first()
         if not desc:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -4818,7 +4702,7 @@ class DescriptionViewSet(BaseSAViewSet):
                         {"errors": [{"detail": f"Invalid experience id: {rid}"}]},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                if Experience.get(eid) is None:
+                if not Experience.objects.filter(pk=eid).exists():
                     return Response(
                         {"errors": [{"detail": f"Invalid experience ID: {eid}"}]},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -4838,24 +4722,14 @@ class DescriptionViewSet(BaseSAViewSet):
                     except (TypeError, ValueError):
                         order_val = None
 
-                link = (
-                    session.query(ExperienceDescription)
-                    .filter_by(experience_id=eid, description_id=desc.id)
-                    .first()
+                link, created = ExperienceDescription.objects.get_or_create(
+                    experience_id=eid,
+                    description_id=desc.id,
+                    defaults={"order": (order_val if order_val is not None else 0)},
                 )
-                if not link:
-                    session.add(
-                        ExperienceDescription(
-                            experience_id=eid,
-                            description_id=desc.id,
-                            order=(order_val if order_val is not None else 0),
-                        )
-                    )
-                else:
-                    if order_val is not None:
-                        link.order = order_val
-                    session.add(link)
-            session.commit()
+                if not created and order_val is not None:
+                    link.order = order_val
+                    link.save()
 
         payload = {"data": ser.to_resource(desc)}
         include_rels = self._parse_include(request)
@@ -4869,10 +4743,8 @@ class DescriptionViewSet(BaseSAViewSet):
         obj = Description.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        session = self.get_session()
-        links = session.query(ExperienceDescription).filter_by(description_id=obj.id).all()
-        exp_ids = [link.experience_id for link in links]
-        experiences = session.query(Experience).filter(Experience.id.in_(exp_ids)).all()
+        exp_ids = list(ExperienceDescription.objects.filter(description_id=obj.id).values_list("experience_id", flat=True))
+        experiences = list(Experience.objects.filter(pk__in=exp_ids))
         data = [ExperienceSerializer().to_resource(e) for e in experiences]
         return Response({"data": data})
 

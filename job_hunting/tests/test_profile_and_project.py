@@ -5,7 +5,7 @@ from rest_framework import status
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
 from job_hunting.models import Profile
-from job_hunting.lib.models.project import Project
+from job_hunting.models import Project
 
 
 class ProfileAPITests(APITestCase):
@@ -102,44 +102,26 @@ class ProjectModelTests(TestCase):
 
     def test_project_model_roundtrip_simple(self):
         """Test simple Project model round-trip using explicit fields"""
-        session = Project.get_session()
-        project = Project(user_id=1, title="Test Project")
-        session.add(project)
-        session.commit()
+        User = get_user_model()
+        user = User.objects.create_user(username="projuser1", password="pass")
+        project = Project.objects.create(user_id=user.id, title="Test Project")
         self.assertIsNotNone(project.id)
 
-        retrieved = Project.get(project.id)
+        retrieved = Project.objects.filter(pk=project.id).first()
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.id, project.id)
         self.assertEqual(retrieved.title, "Test Project")
-        self.assertEqual(retrieved.user_id, 1)
+        self.assertEqual(retrieved.user_id, user.id)
 
     def test_project_model_explicit_fields(self):
         """Test Project model with explicit known fields"""
-        session = Project.get_session()
+        User = get_user_model()
+        user = User.objects.create_user(username="projuser2", password="pass")
 
-        # Use known fields that likely exist in Project model
-        project_data = {
-            "user_id": 1,  # Assuming this is nullable or user exists
-            "title": "test title",
-        }
-
-        # Add any other fields we can reasonably assume exist
-        for column in Project.__table__.columns:
-            col_name = column.name
-            if col_name in ("id", "title", "created_at", "updated_at", "user_id"):
-                continue
-            if "name" in col_name.lower():
-                project_data[col_name] = "Test Project"
-                break
-
-        project = Project(**project_data)
-        session.add(project)
-        session.commit()
-
+        project = Project.objects.create(user_id=user.id, title="test title")
         self.assertIsNotNone(project.id)
 
         # Verify retrieval
-        retrieved = Project.get(project.id)
+        retrieved = Project.objects.filter(pk=project.id).first()
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.id, project.id)

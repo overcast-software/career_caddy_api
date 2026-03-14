@@ -1,8 +1,7 @@
-from job_hunting.lib.models import Scrape, JobPost
+from job_hunting.models import Scrape, JobPost
 from job_hunting.models import Company
-import sys
 import os
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, validator
 from pydantic_ai import Agent
@@ -109,7 +108,7 @@ class GenericParser:
                 job_defaults["extraction_date"] = validated_data.extraction_date
 
             # Create or find job post using validated data
-            job, _ = JobPost.first_or_create(
+            job, _ = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company_id=company.id,
                 defaults=job_defaults,

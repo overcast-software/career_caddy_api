@@ -13,19 +13,19 @@ from datetime import date
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.models.openai import OpenAIResponsesModel
-from job_hunting.lib.models.experience import Experience
-from job_hunting.lib.models.experience_description import ExperienceDescription
+from job_hunting.models import Experience
+from job_hunting.models import ExperienceDescription
 from job_hunting.models import Education
-from job_hunting.lib.models.project import Project
-from job_hunting.lib.models.project_description import ProjectDescription
+from job_hunting.models import Project
+from job_hunting.models import ProjectDescription
 from job_hunting.models import Certification
-from job_hunting.lib.models.resume import Resume
-from job_hunting.lib.models.resume_experience import ResumeExperience
-from job_hunting.lib.models.resume_education import ResumeEducation
-from job_hunting.lib.models.resume_certification import ResumeCertification
-from job_hunting.lib.models.resume_project import ResumeProject
-from job_hunting.lib.models.resume_skill import ResumeSkill
-from job_hunting.lib.models.resume_summary import ResumeSummaries
+from job_hunting.models import Resume
+from job_hunting.models import ResumeExperience
+from job_hunting.models import ResumeEducation
+from job_hunting.models import ResumeCertification
+from job_hunting.models import ResumeProject
+from job_hunting.models import ResumeSkill
+from job_hunting.models import ResumeSummary
 from job_hunting.models import Skill
 from job_hunting.models import Description, Summary, Company
 
@@ -280,12 +280,10 @@ class IngestResume:
             if content:
                 summary, _ = Summary.objects.get_or_create(content=content)
                 # Create join record linking resume and summary and mark as active
-                rs = ResumeSummaries(
-                    resume_id=self.db_resume.id, summary_id=summary.id, active=True
+                ResumeSummary.objects.get_or_create(
+                    resume_id=self.db_resume.id, summary_id=summary.id, defaults={"active": True}
                 )
-                rs.save()
-                # Ensure only one active summary per resume
-                # ResumeSummaries.ensure_single_active_for_resume(resume.id)
+                ResumeSummary.ensure_single_active_for_resume(self.db_resume.id)
 
         print("Creating experiences...")
         for exp_data in parsed_resume.experiences:
@@ -310,7 +308,7 @@ class IngestResume:
             )
 
             print(f"company: {company.name}")
-            experience, _ = Experience.first_or_create(
+            experience, _ = Experience.objects.get_or_create(
                 title=exp_data.title,
                 company_id=company.id if company else None,
                 start_date=self.parse_date(exp_data.start_date),
@@ -318,23 +316,17 @@ class IngestResume:
                 location=exp_data.location,
             )
 
-            # Ensure company_id is set (experience.company_id is non-nullable in the model)
-            experience.company_id = company.id
-            experience.resume = self.db_resume
             print("*" * 88)
-            ResumeExperience.first_or_create(
+            ResumeExperience.objects.get_or_create(
                 resume_id=self.db_resume.id, experience_id=experience.id
             )
             print("*" * 88)
-            experience.save()
 
             # Create experience descriptions
             for bullet in exp_data.bullets:
                 print(bullet)
                 desc, _ = Description.objects.get_or_create(content=bullet)
-                # Link description to experience
-                # This assumes ExperienceDescription is the linking table
-                ExperienceDescription.first_or_create(
+                ExperienceDescription.objects.get_or_create(
                     experience_id=experience.id, description_id=desc.id
                 )
 
@@ -346,7 +338,7 @@ class IngestResume:
                 major=edu_data.major,
                 issue_date=self.parse_date(edu_data.issue_date),
             )
-            ResumeEducation.first_or_create(resume_id=self.db_resume.id, education_id=education.id)
+            ResumeEducation.objects.get_or_create(resume_id=self.db_resume.id, education_id=education.id)
 
         print("Creating projects...")
         for idx, proj_data in enumerate(parsed_resume.projects):
@@ -359,18 +351,16 @@ class IngestResume:
             project.save()
 
             # Associate project with resume
-            ResumeProject.first_or_create(
+            ResumeProject.objects.get_or_create(
                 resume_id=self.db_resume.id,
                 project_id=project.id,
-                defaults={"order": idx}
+                defaults={"order": idx},
             )
 
             # Create project descriptions
             for bullet in proj_data.bullets:
                 desc, _ = Description.objects.get_or_create(content=bullet)
-                # Link description to project
-                # This assumes ProjectDescription is the linking table
-                ProjectDescription.first_or_create(
+                ProjectDescription.objects.get_or_create(
                     project_id=project.id, description_id=desc.id
                 )
 
@@ -382,7 +372,7 @@ class IngestResume:
                 issue_date=self.parse_date(cert_data.issue_date),
                 content=cert_data.content,
             )
-            ResumeCertification.first_or_create(
+            ResumeCertification.objects.get_or_create(
                 certification_id=certification.id, resume_id=self.db_resume.id
             )
 
@@ -395,7 +385,7 @@ class IngestResume:
                 },
             )
             try:
-                ResumeSkill.first_or_create(
+                ResumeSkill.objects.get_or_create(
                     resume_id=self.db_resume.id, skill_id=skill_model.id
                 )
             except Exception as e:

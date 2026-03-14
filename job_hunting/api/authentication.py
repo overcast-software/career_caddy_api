@@ -23,6 +23,9 @@ class ApiKeyAuthentication(BaseAuthentication):
     Custom authentication class for API keys in Django REST Framework.
     """
     
+    def authenticate_header(self, request):
+        return 'Bearer realm="api"'
+
     def authenticate(self, request):
         """
         Authenticate the request using API key.

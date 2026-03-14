@@ -4,8 +4,6 @@ from typing import Optional
 
 """Shared Pydantic models for job and company data."""
 
-from typing import Optional
-from pydantic import BaseModel, Field
 from job_hunting.lib.validations.job_post_data import JobPostData
 
 

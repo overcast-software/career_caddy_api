@@ -1,4 +1,5 @@
-from job_hunting.lib.models import JobPost, Resume
+from job_hunting.models import Resume
+from job_hunting.models import JobPost
 from job_hunting.models import Summary
 from jinja2 import Environment, FileSystemLoader
 from .db_export_service import DbExportService

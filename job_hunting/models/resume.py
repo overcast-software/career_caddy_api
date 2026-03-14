@@ -1,0 +1,136 @@
+from django.conf import settings
+from django.db import models
+
+
+class Resume(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="resumes",
+    )
+    file_path = models.CharField(max_length=500, null=True, blank=True)
+    title = models.CharField(max_length=255, null=True, blank=True)
+    name = models.CharField(max_length=255, null=True, blank=True)
+    notes = models.TextField(null=True, blank=True)
+    favorite = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "resume"
+
+    def skills_by_type(self, skill_type):
+        return [s for s in self._get_django_skills() if s.skill_type == skill_type]
+
+    def _get_django_skills(self):
+        from job_hunting.models.skill import Skill
+        from job_hunting.models.resume_skill import ResumeSkill
+
+        skill_ids = list(ResumeSkill.objects.filter(resume_id=self.id).values_list("skill_id", flat=True))
+        return list(Skill.objects.filter(pk__in=skill_ids))
+
+    @property
+    def language_skills(self):
+        return self.skills_by_type("Language")
+
+    @property
+    def database_skills(self):
+        return self.skills_by_type("Database")
+
+    @property
+    def framework_skills(self):
+        return self.skills_by_type("Framework")
+
+    @property
+    def tool_skills(self):
+        return self.skills_by_type("Tools/Platform")
+
+    @property
+    def security_skills(self):
+        return self.skills_by_type("Security")
+
+    @property
+    def active_summary(self):
+        from job_hunting.models.summary import Summary
+        from job_hunting.models.resume_summary import ResumeSummary
+
+        try:
+            active_link = ResumeSummary.objects.filter(resume_id=self.id, active=True).first()
+            if active_link:
+                return Summary.objects.filter(pk=active_link.summary_id).first()
+            first_link = ResumeSummary.objects.filter(resume_id=self.id).first()
+            if first_link:
+                return Summary.objects.filter(pk=first_link.summary_id).first()
+        except Exception:
+            pass
+        return None
+
+    def active_summary_content(self) -> str:
+        s = self.active_summary
+        return s.content if s else ""
+
+    def to_export_context(self) -> dict:
+        from job_hunting.models.education import Education
+        from job_hunting.models.certification import Certification
+        from job_hunting.models.resume_education import ResumeEducation
+        from job_hunting.models.resume_certification import ResumeCertification
+
+        context = {}
+
+        header = {
+            "name": getattr(self.user, "get_full_name", lambda: "")() if self.user else "",
+            "title": self.title or "",
+            "phone": "",
+        }
+        context["header"] = header
+        context["HEADER"] = header
+        context["summary"] = self.active_summary_content().strip()
+
+        experiences = []
+        try:
+            from job_hunting.models.resume_experience import ResumeExperience
+            from job_hunting.models.experience import Experience
+
+            exp_ids = list(
+                ResumeExperience.objects.filter(resume_id=self.id)
+                .order_by("order")
+                .values_list("experience_id", flat=True)
+            )
+            exp_map = {e.id: e for e in Experience.objects.filter(pk__in=exp_ids).select_related("company")}
+            for exp_id in exp_ids:
+                exp = exp_map.get(exp_id)
+                if exp:
+                    experiences.append(exp.to_export_dict())
+        except Exception:
+            pass
+        context["experiences"] = experiences
+
+        educations = []
+        try:
+            edu_ids = list(ResumeEducation.objects.filter(resume_id=self.id).values_list("education_id", flat=True))
+            for edu in Education.objects.filter(pk__in=edu_ids):
+                educations.append(edu.to_export_dict())
+        except Exception:
+            pass
+        context["educations"] = educations
+
+        certifications = []
+        try:
+            cert_ids = list(ResumeCertification.objects.filter(resume_id=self.id).values_list("certification_id", flat=True))
+            for cert in Certification.objects.filter(pk__in=cert_ids):
+                certifications.append(cert.to_export_dict())
+        except Exception:
+            pass
+        context["certifications"] = certifications
+
+        skills = []
+        try:
+            for skill in self._get_django_skills():
+                skill_value = skill.to_export_value()
+                if skill_value:
+                    skills.append(skill_value)
+        except Exception:
+            pass
+        context["skills"] = skills
+
+        return context

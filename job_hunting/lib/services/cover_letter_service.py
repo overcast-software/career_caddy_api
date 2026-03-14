@@ -1,5 +1,5 @@
 from jinja2 import Environment, FileSystemLoader
-from job_hunting.lib.models.cover_letter import CoverLetter
+from job_hunting.models import CoverLetter
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -45,7 +45,7 @@ class CoverLetterService:
         )
         cover_letter_content = completion.choices[0].message.content.strip()
 
-        cover_letter, created = CoverLetter.first_or_create(
+        cover_letter, created = CoverLetter.objects.get_or_create(
             content=cover_letter_content,
             user_id=self.resume.user.id,
             resume_id=self.resume.id,

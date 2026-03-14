@@ -1,5 +1,4 @@
 import os
-import sys
 from django.core.management.base import BaseCommand, CommandError
 
 # Support either psycopg (v3) or psycopg2 (v2)

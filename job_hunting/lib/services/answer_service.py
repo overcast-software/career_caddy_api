@@ -1,18 +1,7 @@
 from datetime import datetime
-from typing import Dict, List, Optional
 
-from sqlalchemy import desc, or_
-from sqlalchemy.orm import joinedload, selectinload
-
-from job_hunting.lib.models import (
-    Answer,
-    Application,
-    BaseModel,
-    CoverLetter,
-    JobPost,
-    Resume,
-)
-from job_hunting.models import Company, Question
+from job_hunting.lib.models import BaseModel
+from job_hunting.models import Answer, Application, Company, CoverLetter, Question, Resume
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -50,20 +39,13 @@ class AnswerService:
         if not question:
             question = self.question
 
-        # Resolve application via SA session using application_id
+        # Resolve application via Django ORM
         application = None
         if getattr(question, "application_id", None):
             try:
-                application = (
-                    self.session.query(Application)
-                    .options(
-                        joinedload(Application.user),
-                        joinedload(Application.job_post),
-                        joinedload(Application.resume),
-                    )
-                    .filter_by(id=question.application_id)
-                    .first()
-                )
+                application = Application.objects.select_related("resume").filter(
+                    id=question.application_id
+                ).first()
             except Exception:
                 pass
 
@@ -95,43 +77,39 @@ class AnswerService:
         resumes = []
         resume = None
         if user:
-            resumes = (
-                self.session.query(Resume)
-                .filter_by(user_id=user.id, favorite=True)
-                .order_by(desc(Resume.id))
-                .all()
+            resumes = list(
+                Resume.objects.filter(user_id=user.id, favorite=True).order_by("-id")
             )
-        if application and hasattr(application, "resume") and application.resume:
-            resume = application.resume
-            # Only include application resume if it's a favorite or if no favorite resumes exist
-            if resume and getattr(resume, "favorite", False):
-                if all(r.id != getattr(resume, "id", None) for r in resumes):
+        if application and getattr(application, "resume_id", None):
+            try:
+                resume = application.resume
+            except Exception:
+                resume = None
+            if resume:
+                # Only include application resume if it's a favorite or if no favorite resumes exist
+                if getattr(resume, "favorite", False):
+                    if all(r.id != resume.id for r in resumes):
+                        resumes.insert(0, resume)
+                elif not resumes:
                     resumes.insert(0, resume)
-            elif not resumes:  # Fallback if no favorite resumes exist
-                resumes.insert(0, resume)
         else:
             resume = resumes[0] if resumes else None
 
         # Retrieve cover letters (favorites only)
         cover_letters = []
         if user:
-            # Get favorite cover letters for the user (owned by user OR associated to user's resumes)
-            cover_letters_query = (
-                self.session.query(CoverLetter)
-                .options(
-                    joinedload(CoverLetter.job_post),
-                    joinedload(CoverLetter.resume),
+            from django.db.models import Q
+            cover_letters_qs = (
+                CoverLetter.objects.select_related("resume")
+                .filter(
+                    favorite=True,
                 )
                 .filter(
-                    CoverLetter.favorite == True,
-                    or_(
-                        CoverLetter.user_id == user.id,
-                        CoverLetter.resume.has(user_id=user.id),
-                    ),
+                    Q(user_id=user.id) | Q(resume__user_id=user.id)
                 )
-                .order_by(desc(CoverLetter.created_at), desc(CoverLetter.id))
+                .order_by("-created_at", "-id")
             )
-            cover_letters.extend(cover_letters_query.all())
+            cover_letters.extend(cover_letters_qs)
 
         # Add application's cover letter if not already included and it's a favorite
         if (
@@ -179,15 +157,11 @@ class AnswerService:
             # - Include non-favorite answers if the question is favorited and has only one answer
             if question_ids_list:
                 # First get all favorite answers
-                favorite_answers = (
-                    self.session.query(Answer)
-                    .options(joinedload(Answer.question))
-                    .filter(
-                        Answer.question_id.in_(question_ids_list),
-                        Answer.favorite == True,
-                    )
-                    .order_by(Answer.created_at, Answer.id)
-                    .all()
+                favorite_answers = list(
+                    Answer.objects.filter(
+                        question_id__in=question_ids_list,
+                        favorite=True,
+                    ).order_by("created_at", "id")
                 )
 
                 # Track which questions already have favorite answers
@@ -204,31 +178,26 @@ class AnswerService:
 
                 additional_answers = []
                 if questions_without_favorite_answers:
-                    # Get count of answers per question for questions without favorite answers
-                    from sqlalchemy import func
+                    from django.db.models import Count
 
                     answer_counts = (
-                        self.session.query(Answer.question_id, func.count(Answer.id))
-                        .filter(
-                            Answer.question_id.in_(questions_without_favorite_answers)
+                        Answer.objects.filter(
+                            question_id__in=questions_without_favorite_answers
                         )
-                        .group_by(Answer.question_id)
-                        .all()
+                        .values("question_id")
+                        .annotate(count=Count("id"))
                     )
 
                     # Find questions with exactly one answer
                     single_answer_questions = [
-                        qid for qid, count in answer_counts if count == 1
+                        row["question_id"] for row in answer_counts if row["count"] == 1
                     ]
 
                     if single_answer_questions:
-                        # Get the single answers for these questions
-                        additional_answers = (
-                            self.session.query(Answer)
-                            .options(joinedload(Answer.question))
-                            .filter(Answer.question_id.in_(single_answer_questions))
-                            .order_by(Answer.created_at, Answer.id)
-                            .all()
+                        additional_answers = list(
+                            Answer.objects.filter(
+                                question_id__in=single_answer_questions
+                            ).order_by("created_at", "id")
                         )
 
                 # Combine favorite answers and additional single answers

@@ -1,5 +1,6 @@
 from jinja2 import Environment, FileSystemLoader
-from job_hunting.lib.models import Resume, ResumeSkill
+from job_hunting.models import Resume
+from job_hunting.models import ResumeSkill
 from job_hunting.models import Skill
 
 
@@ -16,15 +17,10 @@ class DbExportService:
         """Build a normalized list of skills for the resume, preferring active skills."""
         skills = []
         try:
-            session = Resume.get_session()
-            links = session.query(ResumeSkill).filter_by(resume_id=resume.id).all()
-
-            # Check if any links have active attribute set
-            has_active_flags = any(
-                getattr(link, "active", None) is not None for link in links
-            )
+            links = list(ResumeSkill.objects.filter(resume_id=resume.id))
 
             # Filter to active only if active flags exist, otherwise include all
+            has_active_flags = any(getattr(link, "active", None) is not None for link in links)
             if has_active_flags:
                 links = [link for link in links if getattr(link, "active", False)]
 
@@ -41,9 +37,7 @@ class DbExportService:
 
                 # Get display value
                 try:
-                    if hasattr(skill, "to_export_value") and callable(
-                        skill.to_export_value
-                    ):
+                    if hasattr(skill, "to_export_value") and callable(skill.to_export_value):
                         value = skill.to_export_value()
                     else:
                         value = getattr(skill, "text", "")
@@ -57,27 +51,7 @@ class DbExportService:
                     skills.append(value)
 
         except Exception:
-            # Fallback using django skill objects
-            try:
-                resume_skills = resume._get_django_skills()
-                seen = set()
-                for skill in resume_skills:
-                    try:
-                        if hasattr(skill, "to_export_value") and callable(
-                            skill.to_export_value
-                        ):
-                            value = skill.to_export_value()
-                        else:
-                            value = getattr(skill, "text", "")
-                    except Exception:
-                        value = getattr(skill, "text", "")
-
-                    value = str(value).strip()
-                    if value and value not in seen:
-                        seen.add(value)
-                        skills.append(value)
-            except Exception:
-                pass
+            pass
 
         return skills
 
@@ -104,7 +78,7 @@ class DbExportService:
         # Active summary (if available)
         try:
             links = list(getattr(resume, "resume_summaries", []) or [])
-            active_link = next((l for l in links if getattr(l, "active", False)), None)
+            active_link = next((lnk for lnk in links if getattr(lnk, "active", False)), None)
             if active_link and getattr(active_link, "summary", None):
                 content = getattr(active_link.summary, "content", None)
                 if content:

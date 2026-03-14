@@ -15,7 +15,6 @@ class ProfileModelTests(TestCase):
 
     def test_one_to_one_intent(self):
         Profile.objects.create(user=self.user, phone="555-0001")
-        from django.db import IntegrityError
         with self.assertRaises(Exception):
             Profile.objects.create(user=self.user, phone="555-0002")
 

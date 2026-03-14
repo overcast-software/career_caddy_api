@@ -1,9 +1,8 @@
-import pytest
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
-from job_hunting.lib.models import JobPost, Resume, CoverLetter
+from job_hunting.models import JobPost, Resume, CoverLetter
 from job_hunting.models import Company
 
 
@@ -56,7 +55,7 @@ class TestNestedIncludes(TestCase):
         self.client.force_authenticate(user=self.user1)
         
         response = self.client.get(
-            f"/api/v1/cover-letters/{self.cover_letter1.id}",
+            f"/api/v1/cover-letters/{self.cover_letter1.id}/",
             {"include": "job-post,job-post.company,resume"}
         )
         
@@ -96,7 +95,7 @@ class TestNestedIncludes(TestCase):
         
         # Get the job-post and include its cover-letters
         response = self.client.get(
-            f"/api/v1/job-posts/{self.job_post.id}",
+            f"/api/v1/job-posts/{self.job_post.id}/",
             {"include": "cover-letters"}
         )
         
