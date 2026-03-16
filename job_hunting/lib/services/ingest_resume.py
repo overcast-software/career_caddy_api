@@ -5,14 +5,14 @@ from pydantic import Field
 from pydantic_ai import Agent
 from enum import Enum
 
+import json
 import re
 import os
 import tempfile
 from job_hunting.lib.parsers.docx_parser import DocxParser
 from datetime import date
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIModel
 from pydantic_ai.providers.ollama import OllamaProvider
-from pydantic_ai.models.openai import OpenAIResponsesModel
 from job_hunting.models import Experience
 from job_hunting.models import ExperienceDescription
 from job_hunting.models import Education
@@ -253,12 +253,21 @@ class IngestResume:
         except Exception as e:
             print(e)
 
-        parsed_resume = result.output
+        output = result.output
+        if isinstance(output, dict):
+            parsed_resume = ParsedResume(**output)
+        elif isinstance(output, str):
+            parsed_resume = ParsedResume(**json.loads(output))
+        else:
+            parsed_resume = output
         resume = Resume(name=self.resume_name, title=parsed_resume.title)
         self.db_resume = resume
 
         from job_hunting.models import Profile as DjangoProfile
-        prof, _ = DjangoProfile.objects.get_or_create(user_id=self.user.id)
+
+        prof = DjangoProfile.objects.filter(user_id=self.user.id).first()
+        if prof is None:
+            prof = DjangoProfile.objects.create(user_id=self.user.id)
         if parsed_resume.phone:
             prof.phone = parsed_resume.phone
             prof.save()
@@ -281,7 +290,9 @@ class IngestResume:
                 summary, _ = Summary.objects.get_or_create(content=content)
                 # Create join record linking resume and summary and mark as active
                 ResumeSummary.objects.get_or_create(
-                    resume_id=self.db_resume.id, summary_id=summary.id, defaults={"active": True}
+                    resume_id=self.db_resume.id,
+                    summary_id=summary.id,
+                    defaults={"active": True},
                 )
                 ResumeSummary.ensure_single_active_for_resume(self.db_resume.id)
 
@@ -338,7 +349,9 @@ class IngestResume:
                 major=edu_data.major,
                 issue_date=self.parse_date(edu_data.issue_date),
             )
-            ResumeEducation.objects.get_or_create(resume_id=self.db_resume.id, education_id=education.id)
+            ResumeEducation.objects.get_or_create(
+                resume_id=self.db_resume.id, education_id=education.id
+            )
 
         print("Creating projects...")
         for idx, proj_data in enumerate(parsed_resume.projects):
@@ -403,9 +416,7 @@ class IngestResume:
             return self.agent
         try:
             if os.getenv("OPENAI_API_KEY"):
-                openai_model = OpenAIResponsesModel(
-                    "gpt-5"
-                )  # , ModelSettings(timeout=300))
+                openai_model = OpenAIModel("gpt-4o")
                 return Agent(openai_model, output_type=ParsedResume)
         except Exception:
             # Fall back to Ollama if OpenAI model initialization fails for any reason

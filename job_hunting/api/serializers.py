@@ -104,11 +104,22 @@ class BaseSASerializer:
                 rel_attr = cfg["attr"]
                 rel_type = cfg["type"]
                 uselist = cfg.get("uselist", True)
-                target = getattr(obj, rel_attr, None)
+                
+                # Safely get target, catching DoesNotExist errors
+                target = None
+                try:
+                    target = getattr(obj, rel_attr, None)
+                except Exception:
+                    # Relationship doesn't exist or target is missing - skip it
+                    target = None
+                
                 if uselist:
                     # Handle Django Managers (reverse FK / M2M) by calling .all()
                     if hasattr(target, "all"):
-                        target = target.all()
+                        try:
+                            target = target.all()
+                        except Exception:
+                            target = []
                     data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
                     # Map relationship name to URL segment for special cases
                     rel_segment = (
@@ -193,6 +204,7 @@ class BaseSASerializer:
 
 class DjangoUserSerializer:
     type = "user"
+    model = get_user_model()
 
     def accepted_types(self):
         return {self.type, _pluralize_type(self.type)}
@@ -329,14 +341,27 @@ class ResumeSerializer(BaseSASerializer):
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Ensure user relationship linkage points to Django user
-        if hasattr(obj, "user_id") and obj.user_id:
-            res.setdefault("relationships", {})["user"] = {
-                "data": {"type": "user", "id": str(obj.user_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
-                },
-            }
+        # Handle both Django and SA Resume models
+        user_id = None
+        if hasattr(obj, "user_id"):
+            user_id = obj.user_id
+        
+        if user_id:
+            # Verify user exists before adding relationship
+            try:
+                User = get_user_model()
+                if User.objects.filter(id=user_id).exists():
+                    res.setdefault("relationships", {})["user"] = {
+                        "data": {"type": "user", "id": str(user_id)},
+                        "links": {
+                            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                            "related": f"{_resource_base_path('user')}/{user_id}",
+                        },
+                    }
+            except Exception:
+                # User doesn't exist or error checking - skip relationship
+                pass
+        
         # Convenience link to related summaries collection
         res.setdefault("links", {})[
             "summaries"
