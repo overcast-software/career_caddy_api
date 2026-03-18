@@ -4,7 +4,7 @@ from django.db import models
 
 class Question(models.Model):
     application = models.ForeignKey(
-        "Application",
+        "JobApplication",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

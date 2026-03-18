@@ -2,7 +2,7 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
-from job_hunting.models import Question, Company, Application
+from job_hunting.models import Question, Company, JobApplication
 
 User = get_user_model()
 
@@ -31,7 +31,7 @@ class TestQuestionModel(TestCase):
         self.assertEqual(q.company_id, co.id)
 
     def test_application_id_integer(self):
-        app = Application.objects.create(user=self.user)
+        app = JobApplication.objects.create(user=self.user)
         q = Question.objects.create(content="Q?", created_by=self.user, application=app)
         q.refresh_from_db()
         self.assertEqual(q.application_id, app.id)

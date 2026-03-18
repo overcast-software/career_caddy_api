@@ -8,7 +8,7 @@ from rest_framework import serializers
 from job_hunting.models import (
     Status, Skill, Description, Certification, Education, Summary,
     Company, ApiKey, Question, JobPost,
-    Answer, Application, CoverLetter, Experience, Resume, Score, Scrape,
+    Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
 )
 
@@ -276,7 +276,7 @@ class DjangoUserSerializer:
         elif rel_name == "cover-letters":
             return "cover-letter", list(CoverLetter.objects.filter(user_id=obj.id))
         elif rel_name == "applications":
-            return "job-application", list(Application.objects.filter(user_id=obj.id))
+            return "job-application", list(JobApplication.objects.filter(user_id=obj.id))
         elif rel_name == "summaries":
             return "summary", list(Summary.objects.filter(user_id=obj.id))
         else:
@@ -600,9 +600,9 @@ class CoverLetterSerializer(BaseSASerializer):
         return super().get_related(obj, rel_name)
 
 
-class ApplicationSerializer(BaseSASerializer):
+class JobApplicationSerializer(BaseSASerializer):
     type = "job-application"
-    model = Application
+    model = JobApplication
     attributes = ["applied_at", "status", "tracking_url", "notes"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
@@ -1060,9 +1060,9 @@ TYPE_TO_SERIALIZER = {
     "scrape": ScrapeSerializer,
     "company": CompanySerializer,
     "cover-letter": CoverLetterSerializer,
-    "application": ApplicationSerializer,
-    "job-application": ApplicationSerializer,
-    "job-applications": ApplicationSerializer,
+    "application": JobApplicationSerializer,
+    "job-application": JobApplicationSerializer,
+    "job-applications": JobApplicationSerializer,
     "summary": SummarySerializer,
     "experience": ExperienceSerializer,
     "education": EducationSerializer,

@@ -31,7 +31,7 @@ from job_hunting.api.views import (
     ScrapeViewSet,
     CompanyViewSet,
     CoverLetterViewSet,
-    ApplicationViewSet,
+    JobApplicationViewSet,
     SummaryViewSet,
     ExperienceViewSet,
     EducationViewSet,
@@ -57,7 +57,7 @@ router.register(r"job-posts", JobPostViewSet, basename="job-posts")
 router.register(r"scrapes", ScrapeViewSet, basename="scrapes")
 router.register(r"companies", CompanyViewSet, basename="companies")
 router.register(r"cover-letters", CoverLetterViewSet, basename="cover-letters")
-router.register(r"job-applications", ApplicationViewSet, basename="job-applications")
+router.register(r"job-applications", JobApplicationViewSet, basename="job-applications")
 router.register(r"summaries", SummaryViewSet, basename="summaries")
 router.register(r"experiences", ExperienceViewSet, basename="experiences")
 router.register(r"educations", EducationViewSet, basename="educations")

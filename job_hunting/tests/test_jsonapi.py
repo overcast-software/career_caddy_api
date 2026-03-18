@@ -4,7 +4,7 @@ from rest_framework import status
 
 from job_hunting.lib.db import init_sqlalchemy
 from job_hunting.lib.models.base import BaseModel, Base
-from job_hunting.models import Company, JobPost, Resume, Score, CoverLetter, Application, Scrape
+from job_hunting.models import Company, JobPost, Resume, Score, CoverLetter, JobApplication, Scrape
 
 
 class JSONAPITests(APITransactionTestCase):
@@ -159,7 +159,7 @@ class JSONAPITests(APITransactionTestCase):
             job_post_id=job.id,
         )
 
-        Application.objects.create(
+        JobApplication.objects.create(
             user_id=self.user.id,
             job_post_id=job.id,
             resume_id=resume.id,
@@ -193,7 +193,7 @@ class JSONAPITests(APITransactionTestCase):
             created_by=self.user,
         )
 
-        app = Application.objects.create(user_id=self.user.id, job_post_id=job.id, status="submitted")
+        app = JobApplication.objects.create(user_id=self.user.id, job_post_id=job.id, status="submitted")
 
         # PATCH (partial update) JSON:API
         payload = {
@@ -230,7 +230,7 @@ class JSONAPITests(APITransactionTestCase):
             job_post_id=job.id,
         )
 
-        Application.objects.create(
+        JobApplication.objects.create(
             user_id=self.user.id,
             job_post_id=job.id,
             resume_id=resume.id,

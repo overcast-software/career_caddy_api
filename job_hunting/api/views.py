@@ -44,7 +44,7 @@ from job_hunting.models import (
     Question,
     JobPost,
     Answer,
-    Application,
+    JobApplication,
     CoverLetter,
     Experience,
     Resume,
@@ -68,7 +68,7 @@ from .serializers import (
     ScrapeSerializer,
     CompanySerializer,
     CoverLetterSerializer,
-    ApplicationSerializer,
+    JobApplicationSerializer,
     SummarySerializer,
     ExperienceSerializer,
     EducationSerializer,
@@ -1561,8 +1561,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        applications = list(Application.objects.filter(user_id=user.id))
-        data = [ApplicationSerializer().to_resource(a) for a in applications]
+        applications = list(JobApplication.objects.filter(user_id=user.id))
+        data = [JobApplicationSerializer().to_resource(a) for a in applications]
         return Response({"data": data})
 
     @extend_schema(
@@ -2556,7 +2556,9 @@ class ResumeViewSet(BaseSAViewSet):
         obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ApplicationSerializer().to_resource(a) for a in obj.applications.all()]
+        data = [
+            JobApplicationSerializer().to_resource(a) for a in obj.applications.all()
+        ]
         return Response({"data": data})
 
     @extend_schema(
@@ -3039,7 +3041,6 @@ class ResumeViewSet(BaseSAViewSet):
             return Response(payload, status=status.HTTP_201_CREATED)
 
         except Exception as e:
-            breakpoint()
             return Response(
                 {"errors": [{"detail": f"Failed to process resume: {str(e)}"}]},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -3372,8 +3373,8 @@ class JobPostViewSet(BaseSAViewSet):
     def applications(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(Application.objects.filter(job_post_id=int(pk)))
-        data = [ApplicationSerializer().to_resource(a) for a in apps]
+        apps = list(JobApplication.objects.filter(job_post_id=int(pk)))
+        data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
     @extend_schema(
@@ -4222,9 +4223,9 @@ class CoverLetterViewSet(BaseSAViewSet):
         tags=["Job Applications"], summary="Delete a job application"
     ),
 )
-class ApplicationViewSet(BaseSAViewSet):
-    model = Application
-    serializer_class = ApplicationSerializer
+class JobApplicationViewSet(BaseSAViewSet):
+    model = JobApplication
+    serializer_class = JobApplicationSerializer
 
     def pre_save_payload(self, request, attrs, creating):
         """Automatically set user_id and company_id when creating applications"""
@@ -4248,7 +4249,7 @@ class ApplicationViewSet(BaseSAViewSet):
     )
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
-        if not Application.objects.filter(pk=int(pk)).exists():
+        if not JobApplication.objects.filter(pk=int(pk)).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = JobApplicationStatusSerializer()
         items = list(JobApplicationStatus.objects.filter(application_id=int(pk)))
@@ -4271,7 +4272,7 @@ class ApplicationViewSet(BaseSAViewSet):
     )
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
-        if not Application.objects.filter(pk=int(pk)).exists():
+        if not JobApplication.objects.filter(pk=int(pk)).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = QuestionSerializer()
         items = list(Question.objects.filter(application_id=int(pk)))

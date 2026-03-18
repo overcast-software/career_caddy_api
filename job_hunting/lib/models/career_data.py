@@ -37,7 +37,7 @@ class CareerData:
     # Applications linked to favorite questions
     @property
     def question_applications(self):
-        from job_hunting.models.application import Application
+        from job_hunting.models.application import JobApplication
         from job_hunting.models.question import Question
 
         app_ids = list(
@@ -47,7 +47,7 @@ class CareerData:
                 application_id__isnull=False,
             ).values_list("application_id", flat=True).distinct()
         )
-        return list(Application.objects.filter(pk__in=app_ids))
+        return list(JobApplication.objects.filter(pk__in=app_ids))
 
     # Shorter aliases for convenience
     @property

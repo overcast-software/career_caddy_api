@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from job_hunting.lib.models import BaseModel
-from job_hunting.models import Answer, Application, Company, CoverLetter, Question, Resume
+from job_hunting.models import Answer, JobApplication, Company, CoverLetter, Question, Resume
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -43,7 +43,7 @@ class AnswerService:
         application = None
         if getattr(question, "application_id", None):
             try:
-                application = Application.objects.select_related("resume").filter(
+                application = JobApplication.objects.select_related("resume").filter(
                     id=question.application_id
                 ).first()
             except Exception:

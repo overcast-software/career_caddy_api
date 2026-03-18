@@ -3,7 +3,7 @@ from django.db import models
 
 class JobApplicationStatus(models.Model):
     application = models.ForeignKey(
-        "Application",
+        "JobApplication",
         on_delete=models.CASCADE,
         related_name="application_statuses",
         db_column="application_id",
