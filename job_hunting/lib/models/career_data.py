@@ -37,7 +37,7 @@ class CareerData:
     # Applications linked to favorite questions
     @property
     def question_applications(self):
-        from job_hunting.models.application import JobApplication
+        from job_hunting.models.job_application import JobApplication
         from job_hunting.models.question import Question
 
         app_ids = list(

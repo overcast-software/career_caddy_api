@@ -16,7 +16,7 @@ from .scrape import Scrape as Scrape
 from .resume import Resume as Resume
 from .score import Score as Score
 from .cover_letter import CoverLetter as CoverLetter
-from .application import JobApplication as JobApplication
+from .job_application import JobApplication as JobApplication
 from .experience_description import ExperienceDescription as ExperienceDescription
 from .resume_experience import ResumeExperience as ResumeExperience
 from .resume_skill import ResumeSkill as ResumeSkill

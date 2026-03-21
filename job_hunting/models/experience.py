@@ -19,6 +19,29 @@ class Experience(models.Model):
     class Meta:
         db_table = "experience"
 
+    @property
+    def date_range(self):
+        start_date = self.start_date
+        end_date = self.end_date
+        if start_date and end_date:
+            return f"{start_date} \u2013 {end_date}"
+        elif start_date:
+            return f"{start_date} \u2013 Present"
+        return ""
+
+    @property
+    def descriptions(self):
+        from job_hunting.models.experience_description import ExperienceDescription
+        from job_hunting.models.description import Description
+
+        desc_ids = list(
+            ExperienceDescription.objects.filter(experience_id=self.id)
+            .order_by("order")
+            .values_list("description_id", flat=True)
+        )
+        desc_map = {d.id: d for d in Description.objects.filter(pk__in=desc_ids)}
+        return [desc_map[did] for did in desc_ids if did in desc_map]
+
     def to_export_dict(self) -> dict:
         exp_dict = {}
 

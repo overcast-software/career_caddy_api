@@ -50,6 +50,67 @@ class Resume(models.Model):
         return self.skills_by_type("Security")
 
     @property
+    def skills(self):
+        return self._get_django_skills()
+
+    @property
+    def experiences(self):
+        from job_hunting.models.resume_experience import ResumeExperience
+        from job_hunting.models.experience import Experience
+
+        exp_ids = list(
+            ResumeExperience.objects.filter(resume_id=self.id)
+            .order_by("order")
+            .values_list("experience_id", flat=True)
+        )
+        exp_map = {e.id: e for e in Experience.objects.filter(pk__in=exp_ids).select_related("company")}
+        return [exp_map[eid] for eid in exp_ids if eid in exp_map]
+
+    @property
+    def projects(self):
+        from job_hunting.models.resume_project import ResumeProject
+        from job_hunting.models.project import Project
+
+        proj_ids = list(
+            ResumeProject.objects.filter(resume_id=self.id)
+            .order_by("order")
+            .values_list("project_id", flat=True)
+        )
+        return list(Project.objects.filter(pk__in=proj_ids))
+
+    @property
+    def certifications(self):
+        from job_hunting.models.resume_certification import ResumeCertification
+        from job_hunting.models.certification import Certification
+
+        cert_ids = list(
+            ResumeCertification.objects.filter(resume_id=self.id)
+            .values_list("certification_id", flat=True)
+        )
+        return list(Certification.objects.filter(pk__in=cert_ids))
+
+    @property
+    def educations(self):
+        from job_hunting.models.resume_education import ResumeEducation
+        from job_hunting.models.education import Education
+
+        edu_ids = list(
+            ResumeEducation.objects.filter(resume_id=self.id)
+            .values_list("education_id", flat=True)
+        )
+        return list(Education.objects.filter(pk__in=edu_ids))
+
+    @property
+    def user_phone(self):
+        from job_hunting.models.profile import Profile
+
+        try:
+            prof = Profile.objects.filter(user_id=self.user_id).first()
+            return prof.phone or "" if prof else ""
+        except Exception:
+            return ""
+
+    @property
     def active_summary(self):
         from job_hunting.models.summary import Summary
         from job_hunting.models.resume_summary import ResumeSummary

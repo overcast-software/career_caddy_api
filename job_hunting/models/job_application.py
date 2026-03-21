@@ -44,4 +44,4 @@ class JobApplication(models.Model):
     notes = models.TextField(null=True, blank=True)
 
     class Meta:
-        db_table = "application"
+        db_table = "job_application"

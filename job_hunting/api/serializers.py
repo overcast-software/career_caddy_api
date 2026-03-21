@@ -10,6 +10,7 @@ from job_hunting.models import (
     Company, ApiKey, Question, JobPost,
     Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
+    Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
 )
 
 
@@ -114,24 +115,27 @@ class BaseSASerializer:
                     target = None
                 
                 if uselist:
-                    # Handle Django Managers (reverse FK / M2M) by calling .all()
-                    if hasattr(target, "all"):
-                        try:
-                            target = target.all()
-                        except Exception:
-                            target = []
-                    data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
                     # Map relationship name to URL segment for special cases
                     rel_segment = (
                         "job-applications" if rel_name == "applications" else rel_name
                     )
-                    rel_out[rel_name] = {
-                        "data": data,
-                        "links": {
-                            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
-                            "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
-                        },
+                    links = {
+                        "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                        "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
                     }
+                    if target is None:
+                        # Per JSON:API spec: omit `data` when not loaded so clients
+                        # treat this as "not yet fetched" and follow the link.
+                        rel_out[rel_name] = {"links": links}
+                    else:
+                        # target is a manager or iterable — resolve and emit linkage
+                        if hasattr(target, "all"):
+                            try:
+                                target = target.all()
+                            except Exception:
+                                target = []
+                        data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
+                        rel_out[rel_name] = {"data": data, "links": links}
                 else:
                     # Determine target_id with FK fallback
                     target_id = None
@@ -335,11 +339,17 @@ class ResumeSerializer(BaseSASerializer):
             "uselist": True,
         },
         "skills": {"attr": "skills", "type": "skill", "uselist": True},
+        "projects": {"attr": "projects", "type": "project", "uselist": True},
     }
     relationship_fks = {"user": "user_id"}
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
+        # Embed active summary content as a convenience attribute
+        try:
+            res.setdefault("attributes", {})["summary"] = obj.active_summary_content()
+        except Exception:
+            pass
         # Ensure user relationship linkage points to Django user
         # Handle both Django and SA Resume models
         user_id = None
@@ -361,6 +371,20 @@ class ResumeSerializer(BaseSASerializer):
             except Exception:
                 # User doesn't exist or error checking - skip relationship
                 pass
+
+        # Populate relationship linkage data for join-table relationships
+        # (base to_resource uses getattr which returns None for these on Django models)
+        join_table_rels = ["experiences", "educations", "skills", "summaries", "projects", "certifications"]
+        for rel_name in join_table_rels:
+            if rel_name not in res.get("relationships", {}):
+                continue
+            try:
+                rel_type, targets = self.get_related(obj, rel_name)
+                res["relationships"][rel_name]["data"] = [
+                    {"type": rel_type, "id": str(t.id)} for t in targets
+                ]
+            except Exception:
+                pass
         
         # Convenience link to related summaries collection
         res.setdefault("links", {})[
@@ -376,20 +400,44 @@ class ResumeSerializer(BaseSASerializer):
                 return "user", [user]
             except User.DoesNotExist:
                 return "user", []
-        elif rel_name == "company":
-            # Try direct company relationship first
-            if hasattr(obj, "company") and obj.company:
-                return "company", [obj.company]
-            # Fallback to job_post.company
-            elif (
-                hasattr(obj, "job_post")
-                and obj.job_post
-                and hasattr(obj.job_post, "company")
-                and obj.job_post.company
-            ):
-                return "company", [obj.job_post.company]
-            else:
-                return "company", []
+        elif rel_name == "experiences":
+            exp_ids = list(
+                ResumeExperience.objects.filter(resume_id=obj.id)
+                .order_by("order")
+                .values_list("experience_id", flat=True)
+            )
+            return "experience", list(Experience.objects.filter(pk__in=exp_ids))
+        elif rel_name == "educations":
+            edu_ids = list(
+                ResumeEducation.objects.filter(resume_id=obj.id)
+                .values_list("education_id", flat=True)
+            )
+            return "education", list(Education.objects.filter(pk__in=edu_ids))
+        elif rel_name == "skills":
+            skill_ids = list(
+                ResumeSkill.objects.filter(resume_id=obj.id)
+                .values_list("skill_id", flat=True)
+            )
+            return "skill", list(Skill.objects.filter(pk__in=skill_ids))
+        elif rel_name == "summaries":
+            summary_ids = list(
+                ResumeSummary.objects.filter(resume_id=obj.id)
+                .values_list("summary_id", flat=True)
+            )
+            return "summary", list(Summary.objects.filter(pk__in=summary_ids))
+        elif rel_name == "projects":
+            project_ids = list(
+                ResumeProject.objects.filter(resume_id=obj.id)
+                .order_by("order")
+                .values_list("project_id", flat=True)
+            )
+            return "project", list(Project.objects.filter(pk__in=project_ids))
+        elif rel_name == "certifications":
+            cert_ids = list(
+                ResumeCertification.objects.filter(resume_id=obj.id)
+                .values_list("certification_id", flat=True)
+            )
+            return "certification", list(Certification.objects.filter(pk__in=cert_ids))
         return super().get_related(obj, rel_name)
 
 
@@ -1051,6 +1099,16 @@ class QuestionSerializer(BaseSASerializer):
         return out
 
 
+class ProjectSerializer(BaseSASerializer):
+    type = "project"
+    model = Project
+    attributes = ["title", "description", "start_date", "end_date", "is_active", "created_at", "updated_at"]
+    relationships = {
+        "user": {"attr": "user", "type": "user", "uselist": False},
+    }
+    relationship_fks = {"user": "user_id"}
+
+
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
     "api-key": ApiKeySerializer,
@@ -1073,4 +1131,5 @@ TYPE_TO_SERIALIZER = {
     "job-application-status": JobApplicationStatusSerializer,
     "question": QuestionSerializer,
     "answer": AnswerSerializer,
+    "project": ProjectSerializer,
 }

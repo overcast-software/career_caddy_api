@@ -20,3 +20,15 @@ class Project(models.Model):
 
     class Meta:
         db_table = "project"
+
+    @property
+    def descriptions(self):
+        from job_hunting.models.project_description import ProjectDescription
+        from job_hunting.models.description import Description
+
+        desc_ids = list(
+            ProjectDescription.objects.filter(project_id=self.id)
+            .order_by("order")
+            .values_list("description_id", flat=True)
+        )
+        return list(Description.objects.filter(pk__in=desc_ids))

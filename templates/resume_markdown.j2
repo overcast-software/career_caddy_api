@@ -1,7 +1,7 @@
-## {{ resume.user.name }}
+## {{ resume.user.get_full_name() or resume.user.username }}
 ## {{resume.title }}
 ## Email: {{resume.user.email}}
-## Phone: {{resume.user.phone}}
+## Phone: {{resume.user_phone}}
 {% if resume.active_summary %}
     ### Summary
     {{ resume.active_summary.content }}

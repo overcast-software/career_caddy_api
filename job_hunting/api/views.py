@@ -79,6 +79,7 @@ from .serializers import (
     JobApplicationStatusSerializer,
     QuestionSerializer,
     AnswerSerializer,
+    ProjectSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
     _resource_base_path,

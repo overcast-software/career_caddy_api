@@ -125,8 +125,8 @@ class ParsedResume(BaseModel):
     summary: Optional[SummaryOut] = None
     skills: list[SkillOut] = Field(default_factory=list)
     experiences: list[ExperienceOut] = Field(default_factory=list)
-    education: list[EducationOut] = Field(default_factory=list)
-    projects: list[ProjectOut] = Field(default_factory=list)
+    education: Optional[list[EducationOut]] = Field(default_factory=list)
+    projects: Optional[list[ProjectOut]] = Field(default_factory=list)
     certifications: list[CertificationsOut] = Field(default_factory=list)
     name: str
     phone: Optional[str]
@@ -416,7 +416,7 @@ class IngestResume:
             return self.agent
         try:
             if os.getenv("OPENAI_API_KEY"):
-                openai_model = OpenAIModel("gpt-4o")
+                openai_model = OpenAIModel("gpt-5")
                 return Agent(openai_model, output_type=ParsedResume)
         except Exception:
             # Fall back to Ollama if OpenAI model initialization fails for any reason
