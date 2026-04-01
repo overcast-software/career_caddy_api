@@ -1,7 +1,8 @@
 from django.db import models
+from .base import GetMixin
 
 
-class Company(models.Model):
+class Company(GetMixin, models.Model):
     name = models.CharField(max_length=255)
     display_name = models.CharField(max_length=255, null=True, blank=True)
     notes = models.TextField(null=True, blank=True)

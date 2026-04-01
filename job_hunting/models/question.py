@@ -1,8 +1,9 @@
 from django.conf import settings
+from .base import GetMixin
 from django.db import models
 
 
-class Question(models.Model):
+class Question(GetMixin, models.Model):
     application = models.ForeignKey(
         "JobApplication",
         on_delete=models.SET_NULL,

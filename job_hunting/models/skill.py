@@ -1,7 +1,8 @@
 from django.db import models
+from .base import GetMixin
 
 
-class Skill(models.Model):
+class Skill(GetMixin, models.Model):
     text = models.CharField(max_length=255, null=True, blank=True)
     skill_type = models.CharField(max_length=255, null=True, blank=True)
 

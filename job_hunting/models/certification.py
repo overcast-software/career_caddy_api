@@ -1,7 +1,8 @@
 from django.db import models
+from .base import GetMixin
 
 
-class Certification(models.Model):
+class Certification(GetMixin, models.Model):
     issuer = models.CharField(max_length=255, null=True, blank=True)
     title = models.CharField(max_length=255, null=True, blank=True)
     issue_date = models.DateField(null=True, blank=True)

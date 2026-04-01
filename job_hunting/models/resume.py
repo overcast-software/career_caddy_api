@@ -1,8 +1,9 @@
 from django.conf import settings
 from django.db import models
+from .base import GetMixin
 
 
-class Resume(models.Model):
+class Resume(GetMixin, models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

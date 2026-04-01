@@ -1,8 +1,9 @@
 from django.conf import settings
+from .base import GetMixin
 from django.db import models
 
 
-class CoverLetter(models.Model):
+class CoverLetter(GetMixin, models.Model):
     content = models.TextField(null=True, blank=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -33,6 +34,7 @@ class CoverLetter(models.Model):
         related_name="cover_letters",
     )
     favorite = models.BooleanField(default=False)
+    status = models.CharField(max_length=50, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -1,5 +1,7 @@
 import dateparser
+import math
 import os
+from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -322,6 +324,43 @@ _PAGE_PARAMS = [
     ),
     _INCLUDE_PARAM,
 ]
+
+_SORT_PARAM = OpenApiParameter(
+    "sort",
+    OpenApiTypes.STR,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Comma-separated sort fields. Prefix with '-' for descending (e.g., '-created_at' for newest first).",
+)
+
+_FILTER_QUERY_PARAM = OpenApiParameter(
+    "filter[query]",
+    OpenApiTypes.STR,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Search across title, description, company name, and company display_name (case-insensitive OR).",
+)
+_FILTER_COMPANY_PARAM = OpenApiParameter(
+    "filter[company]",
+    OpenApiTypes.STR,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Filter by company name (case-insensitive contains).",
+)
+_FILTER_COMPANY_ID_PARAM = OpenApiParameter(
+    "filter[company_id]",
+    OpenApiTypes.INT,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Filter by exact company ID.",
+)
+_FILTER_TITLE_PARAM = OpenApiParameter(
+    "filter[title]",
+    OpenApiTypes.STR,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Filter by job post title (case-insensitive contains).",
+)
 
 _JSONAPI_LIST = OpenApiResponse(
     description="JSON:API list",
@@ -661,15 +700,24 @@ class BaseSAViewSet(viewsets.ViewSet):
 
         return included
 
-    def paginate(self, items):
+    def _page_params(self):
+        """Return (page_number, page_size) parsed from request, supporting both
+        page[number]/page[size] (JSON:API) and page/per_page (simple) styles."""
+        qp = self.request.query_params
         try:
-            page_number = int(self.request.query_params.get("page[number]", 1))
+            page_number = int(qp.get("page[number]") or qp.get("page") or 1)
         except Exception:
             page_number = 1
         try:
-            page_size = int(self.request.query_params.get("page[size]", 50))
+            page_size = int(qp.get("page[size]") or qp.get("per_page") or 50)
         except Exception:
             page_size = 50
+        page_number = max(1, page_number)
+        page_size = max(1, min(page_size, 200))
+        return page_number, page_size
+
+    def paginate(self, items):
+        page_number, page_size = self._page_params()
         start = (page_number - 1) * page_size
         end = start + page_size
         return items[start:end]
@@ -3194,7 +3242,17 @@ class ScoreViewSet(BaseSAViewSet):
 
 
 @extend_schema_view(
-    list=extend_schema(tags=["Job Posts"], summary="List job posts"),
+    list=extend_schema(
+        tags=["Job Posts"],
+        summary="List job posts",
+        parameters=_PAGE_PARAMS + [
+            _SORT_PARAM,
+            _FILTER_QUERY_PARAM,
+            _FILTER_COMPANY_PARAM,
+            _FILTER_COMPANY_ID_PARAM,
+            _FILTER_TITLE_PARAM,
+        ],
+    ),
     retrieve=extend_schema(tags=["Job Posts"], summary="Retrieve a job post"),
     create=extend_schema(
         tags=["Job Posts"],
@@ -3246,11 +3304,72 @@ class JobPostViewSet(BaseSAViewSet):
         return errors
 
     def list(self, request):
-        items = list(JobPost.objects.all())
-        items = self.paginate(items)
+        qs = JobPost.objects
+        link_filter = request.query_params.get("filter[link]")
+        if link_filter is not None:
+            qs = qs.filter(link=link_filter)
+
+        company_id_filter = request.query_params.get("filter[company_id]")
+        if company_id_filter is not None:
+            qs = qs.filter(company_id=company_id_filter)
+
+        company_filter = request.query_params.get("filter[company]")
+        if company_filter is not None:
+            qs = qs.filter(company__name__icontains=company_filter)
+
+        title_filter = request.query_params.get("filter[title]")
+        if title_filter is not None:
+            qs = qs.filter(title__icontains=title_filter)
+
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter is not None:
+            qs = qs.filter(
+                Q(title__icontains=query_filter)
+                | Q(description__icontains=query_filter)
+                | Q(company__name__icontains=query_filter)
+                | Q(company__display_name__icontains=query_filter)
+            ).distinct()
+
+        sort_param = request.query_params.get("sort")
+        if sort_param:
+            sort_fields = []
+            for field in sort_param.split(","):
+                field = field.strip()
+                if field.startswith("-"):
+                    sort_fields.append(f"-{field[1:]}")
+                else:
+                    sort_fields.append(field)
+            if sort_fields:
+                qs = qs.order_by(*sort_fields)
+
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset: offset + page_size])
+
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
-        payload = {"data": data}
+        payload = {
+            "data": data,
+            "meta": {
+                "total": total,
+                "page": page_number,
+                "per_page": page_size,
+                "total_pages": total_pages,
+            },
+        }
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            # Preserve existing query params, overriding page
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            next_url = base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())
+            payload["links"] = {"next": next_url}
+        else:
+            payload["links"] = {"next": None}
+
         include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
@@ -3280,6 +3399,9 @@ class JobPostViewSet(BaseSAViewSet):
             return Response(
                 {"errors": [{"detail": v} for v in date_errors.values()]}, status=400
             )
+        if not attrs.get("posted_date"):
+            from datetime import date
+            attrs["posted_date"] = date.today()
         obj = JobPost(**attrs)
         obj.save()
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
@@ -3424,7 +3546,7 @@ class JobPostViewSet(BaseSAViewSet):
                 )
 
             try:
-                resume = Resume.get(int(resume_id))
+                resume = Resume.objects.filter(pk=int(resume_id)).first()
             except (TypeError, ValueError):
                 resume = None
 
@@ -3553,7 +3675,7 @@ class ScrapeViewSet(BaseSAViewSet):
 
         # If there's an existing scrape that's pending or completed, return it
         if existing_scrape:
-            if existing_scrape.state in ("pending", "processing"):
+            if existing_scrape.status in ("pending", "processing"):
                 # Return the existing pending/processing scrape
                 scr_ser = self.get_serializer()
                 scrape_resource = scr_ser.to_resource(existing_scrape)
@@ -3564,7 +3686,7 @@ class ScrapeViewSet(BaseSAViewSet):
                     },
                     status=status.HTTP_200_OK,
                 )
-            elif existing_scrape.state == "completed":
+            elif existing_scrape.status == "completed":
                 # Return the existing completed scrape
                 scr_ser = self.get_serializer()
                 scrape_resource = scr_ser.to_resource(existing_scrape)
@@ -3579,50 +3701,11 @@ class ScrapeViewSet(BaseSAViewSet):
                 )
             # If failed, we'll create a new scrape below
 
-        # Create a pending scrape record
         scrape = Scrape.objects.create(url=url, state="pending")
 
-        # Start the scraping process in the background
-        import threading
+        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3001")
+        Scraper(browser_service_url, url, scrape_id=scrape.id).dispatch()
 
-        # Capture the scrape_id to avoid session issues
-        scrape_id = scrape.id
-
-        def run_scraper_background():
-            try:
-                # Create a new session for the background thread
-                from job_hunting.lib.models.base import BaseModel
-
-                BaseModel.clear_session()
-
-                browser_service_url = getattr(
-                    settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
-                )
-                scraper = Scraper(browser_service_url, url, scrape_id=scrape_id)
-                scraper.process()
-
-                # Update scrape record with success state
-                # The browser service should handle updating the scrape record
-                # but we can add a fallback here if needed
-            except Exception as e:
-                # Update scrape record with error state
-                try:
-                    import django
-
-                    django.db.close_old_connections()
-                    scrape_obj = Scrape.objects.filter(pk=scrape_id).first()
-                    if scrape_obj:
-                        scrape_obj.state = "failed"
-                        scrape_obj.error_message = str(e)
-                        scrape_obj.save()
-                except Exception:
-                    pass
-
-        # Start background thread
-        thread = threading.Thread(target=run_scraper_background, daemon=True)
-        thread.start()
-
-        # Return the pending scrape immediately
         scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(scrape)
         return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
@@ -3652,54 +3735,17 @@ class ScrapeViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         # Don't allow redo if already pending or processing
-        if obj.state in ("pending", "processing"):
+        if obj.status in ("pending", "processing"):
             return Response(
-                {"errors": [{"detail": f"Scrape is already {obj.state}"}]},
+                {"errors": [{"detail": f"Scrape is already {obj.status}"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Reset the scrape state
-        obj.state = "pending"
-        obj.error_message = None
+        obj.status = "pending"
         obj.save()
 
-        # Start the scraping process in the background
-        import threading
-
-        # Capture the scrape_id to avoid session issues
-        scrape_id = obj.id
-        url = obj.url
-
-        def run_scraper_background():
-            try:
-                # Create a new session for the background thread
-                from job_hunting.lib.models.base import BaseModel
-
-                BaseModel.clear_session()
-
-                browser_service_url = getattr(
-                    settings, "BROWSER_SERVICE_URL", "http://localhost:3001"
-                )
-                scraper = Scraper(browser_service_url, url, scrape_id=scrape_id)
-                scraper.process()
-
-            except Exception as e:
-                # Update scrape record with error state
-                try:
-                    import django
-
-                    django.db.close_old_connections()
-                    scrape_obj = Scrape.objects.filter(pk=scrape_id).first()
-                    if scrape_obj:
-                        scrape_obj.state = "failed"
-                        scrape_obj.error_message = str(e)
-                        scrape_obj.save()
-                except Exception:
-                    pass
-
-        # Start background thread
-        thread = threading.Thread(target=run_scraper_background, daemon=True)
-        thread.start()
+        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3001")
+        Scraper(browser_service_url, obj.url, scrape_id=obj.id).dispatch()
 
         # Return the updated scrape
         scr_ser = self.get_serializer()
@@ -3728,16 +3774,24 @@ class CompanyViewSet(BaseSAViewSet):
         return BaseModel.get_session()
 
     def list(self, request):
-        qs = Company.objects.all()
+        qs = list(Company.objects.all())
         ser = self.get_serializer()
-        return Response({"data": [ser.to_resource(obj) for obj in qs]})
+        payload = {"data": [ser.to_resource(obj) for obj in qs]}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(qs, include_rels, request)
+        return Response(payload)
 
     def retrieve(self, request, pk=None):
         obj = Company.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
-        return Response({"data": ser.to_resource(obj)})
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
 
     def create(self, request):
         data = request.data.get("data", {})
@@ -3784,6 +3838,19 @@ class CompanyViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         posts = list(JobPost.objects.filter(company_id=int(pk)))
         data = [JobPostSerializer().to_resource(j) for j in posts]
+        return Response({"data": data})
+
+    @extend_schema(
+        tags=["Companies"],
+        summary="List job applications for a company",
+        responses={200: _JSONAPI_LIST},
+    )
+    @action(detail=True, methods=["get"], url_path="job-applications")
+    def applications(self, request, pk=None):
+        if not Company.objects.filter(pk=pk).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        apps = list(JobApplication.objects.filter(company_id=int(pk)))
+        data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
     @extend_schema(
@@ -3914,6 +3981,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         request=_JSONAPI_WRITE,
         responses={
             201: _JSONAPI_ITEM,
+            202: OpenApiResponse(description="AI generation started — poll the returned resource for state changes"),
             400: OpenApiResponse(description="Missing/invalid resume or job-post"),
             403: OpenApiResponse(description="Resume not owned by user"),
             503: OpenApiResponse(description="AI client not configured"),
@@ -4055,53 +4123,71 @@ class CoverLetterViewSet(BaseSAViewSet):
                 company_id=(company.id if company else None),
             )
             cover_letter.save()
-        else:
-            # Require both resume and job_post when generating content automatically
-            if resume is None:
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": "Provide 'relationships.resume' when generating content without providing attributes.content"
-                            }
-                        ]
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
+            payload = {"data": ser.to_resource(cover_letter)}
+            include_rels = self._parse_include(request)
+            if include_rels:
+                payload["included"] = self._build_included(
+                    [cover_letter], include_rels, request
                 )
+            return Response(payload, status=status.HTTP_201_CREATED)
 
-            if job_post is None:
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": "Provide 'relationships.job-post' when generating content without providing attributes.content"
-                            }
-                        ]
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            client = get_client(required=False)
-            if client is None:
-                return Response(
-                    {
-                        "errors": [
-                            {"detail": "AI client not configured. Set OPENAI_API_KEY."}
-                        ]
-                    },
-                    status=503,
-                )
-
-            cl_service = CoverLetterService(client, job_post, resume)
-            cover_letter = cl_service.generate_cover_letter()
-
-        payload = {"data": ser.to_resource(cover_letter)}
-        include_rels = self._parse_include(request)
-        if include_rels:
-            payload["included"] = self._build_included(
-                [cover_letter], include_rels, request
+        # AI generation path — create a pending record and dispatch async
+        if resume is None:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": "Provide 'relationships.resume' when generating content without providing attributes.content"
+                        }
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        return Response(payload, status=status.HTTP_201_CREATED)
+
+        if job_post is None:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": "Provide 'relationships.job-post' when generating content without providing attributes.content"
+                        }
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        client = get_client(required=False)
+        if client is None:
+            return Response(
+                {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
+                status=503,
+            )
+
+        cover_letter = CoverLetter.objects.create(
+            user_id=user_id,
+            resume_id=resume.id,
+            job_post_id=job_post.id,
+            company_id=(company.id if company else None),
+            status="pending",
+        )
+        cl_id = cover_letter.id
+
+        def _generate():
+            import django
+            django.db.close_old_connections()
+            try:
+                cl_service = CoverLetterService(client, job_post, resume)
+                result = cl_service.generate_cover_letter()
+                CoverLetter.objects.filter(pk=cl_id).update(
+                    content=result.content, status="completed"
+                )
+            except Exception as e:
+                CoverLetter.objects.filter(pk=cl_id).update(status="failed")
+
+        import threading
+        threading.Thread(target=_generate, daemon=True).start()
+
+        return Response({"data": ser.to_resource(cover_letter)}, status=status.HTTP_202_ACCEPTED)
 
     @extend_schema(
         tags=["Cover Letters"],
@@ -4208,7 +4294,11 @@ class CoverLetterViewSet(BaseSAViewSet):
 
 
 @extend_schema_view(
-    list=extend_schema(tags=["Job Applications"], summary="List job applications"),
+    list=extend_schema(
+        tags=["Job Applications"],
+        summary="List job applications",
+        parameters=_PAGE_PARAMS + [_SORT_PARAM],
+    ),
     retrieve=extend_schema(
         tags=["Job Applications"], summary="Retrieve a job application"
     ),
@@ -4227,6 +4317,34 @@ class CoverLetterViewSet(BaseSAViewSet):
 class JobApplicationViewSet(BaseSAViewSet):
     model = JobApplication
     serializer_class = JobApplicationSerializer
+
+    def list(self, request):
+        qs = JobApplication.objects
+        
+        # Handle sorting
+        sort_param = request.query_params.get("sort")
+        if sort_param:
+            sort_fields = []
+            for field in sort_param.split(","):
+                field = field.strip()
+                if field.startswith("-"):
+                    # Descending order
+                    sort_fields.append(f"-{field[1:]}")
+                else:
+                    # Ascending order
+                    sort_fields.append(field)
+            if sort_fields:
+                qs = qs.order_by(*sort_fields)
+        
+        items = list(qs.all())
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
 
     def pre_save_payload(self, request, attrs, creating):
         """Automatically set user_id and company_id when creating applications"""
@@ -4533,8 +4651,8 @@ class AnswerViewSet(BaseSAViewSet):
         ),
         responses={
             201: _JSONAPI_ITEM,
+            202: OpenApiResponse(description="AI generation started — poll the returned resource for state changes"),
             400: OpenApiResponse(description="Missing content or invalid question"),
-            502: OpenApiResponse(description="AI generation failed"),
             503: OpenApiResponse(description="AI client not configured"),
         },
     )
@@ -4625,76 +4743,54 @@ class AnswerViewSet(BaseSAViewSet):
 
         ai_assist = _to_bool(ai_flag_raw)
 
-        generated_obj = None
         if not content and ai_assist:
+            # AI generation — create a pending record and dispatch async
             client = get_client(required=False)
             if client is None:
                 return Response(
-                    {
-                        "errors": [
-                            {"detail": "AI client not configured. Set OPENAI_API_KEY."}
-                        ]
-                    },
+                    {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
                     status=503,
                 )
-            try:
-                svc = AnswerService(client)
-                if hasattr(svc, "generate_answer"):
-                    # Try to call with save=True and injected_prompt if supported
-                    try:
-                        result = svc.generate_answer(
-                            question=question,
-                            save=True,
-                            injected_prompt=injected_prompt,
-                        )
-                    except TypeError:
-                        # Fallback for older signature without injected_prompt
-                        try:
-                            result = svc.generate_answer(question=question, save=True)
-                        except TypeError:
-                            result = svc.generate_answer(question=question)
-                elif hasattr(svc, "answer_question"):
-                    result = svc.answer_question(question)
-                else:
-                    result = svc(question)
 
-                # Handle different return types from the service
-                if isinstance(result, Answer):
-                    generated_obj = result
-                elif isinstance(result, dict) and "content" in result:
-                    content = str(result["content"] or "").strip()
-                elif isinstance(result, str):
-                    content = result.strip()
-                else:
-                    content = ""
+            obj = Answer.objects.create(question_id=question.id, status="pending")
+            ans_id = obj.id
+            captured_prompt = injected_prompt
 
-            except Exception as e:
-                return Response(
-                    {"errors": [{"detail": f"AI assist failed: {str(e)}"}]},
-                    status=status.HTTP_502_BAD_GATEWAY,
-                )
+            def _generate():
+                import django
+                django.db.close_old_connections()
+                try:
+                    svc = AnswerService(client)
+                    result = svc.generate_answer(
+                        question=question,
+                        save=False,
+                        injected_prompt=captured_prompt,
+                    )
+                    generated_content = result.content if isinstance(result, Answer) else str(result or "")
+                    Answer.objects.filter(pk=ans_id).update(
+                        content=generated_content, status="completed"
+                    )
+                except Exception:
+                    Answer.objects.filter(pk=ans_id).update(status="failed")
 
-        if generated_obj:
-            # Use the generated Answer object (may already be saved by AnswerService)
-            obj = generated_obj
-            if not getattr(obj, "question_id", None):
-                obj.question_id = question.id
-            if not getattr(obj, "pk", None) and not getattr(obj, "id", None):
-                obj.save()
-        else:
-            # Create new Answer with provided or generated content
-            if not content:
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": "content is required when ai_assist is not true or generation failed"
-                            }
-                        ]
-                    },
-                    status=400,
-                )
-            obj = Answer.objects.create(question_id=question.id, content=content)
+            import threading
+            threading.Thread(target=_generate, daemon=True).start()
+
+            return Response({"data": ser.to_resource(obj)}, status=status.HTTP_202_ACCEPTED)
+
+        # Synchronous path — content provided directly
+        if not content:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": "content is required when ai_assist is not true"
+                        }
+                    ]
+                },
+                status=400,
+            )
+        obj = Answer.objects.create(question_id=question.id, content=content)
 
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)

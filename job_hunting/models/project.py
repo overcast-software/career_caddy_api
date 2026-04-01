@@ -1,8 +1,9 @@
 from django.conf import settings
+from .base import GetMixin
 from django.db import models
 
 
-class Project(models.Model):
+class Project(GetMixin, models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

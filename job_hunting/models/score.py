@@ -1,8 +1,9 @@
 from django.conf import settings
+from .base import GetMixin
 from django.db import models
 
 
-class Score(models.Model):
+class Score(GetMixin, models.Model):
     score = models.IntegerField(null=True, blank=True)
     explanation = models.TextField(null=True, blank=True)
     resume = models.ForeignKey(

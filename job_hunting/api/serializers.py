@@ -516,6 +516,10 @@ class JobPostSerializer(BaseSASerializer):
         "extraction_date",
         "created_at",
         "link",
+        "salary_min",
+        "salary_max",
+        "location",
+        "remote",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
@@ -546,7 +550,7 @@ class ScrapeSerializer(BaseSASerializer):
         "external_link",
         "parse_method",
         "scraped_at",
-        "state",
+        "status",
         "html",
     ]
     relationships = {
@@ -559,25 +563,28 @@ class ScrapeSerializer(BaseSASerializer):
 class CompanySerializer(BaseSASerializer):
     type = "company"
     model = Company
-    attributes = ["name", "display_name"]
-    relationships = {}
+    attributes = ["name", "display_name", "notes"]
+    relationships = {
+        "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
+        "job-applications": {
+            "attr": "job_applications",
+            "type": "job-application",
+            "uselist": True,
+        },
+    }
 
-    def to_resource(self, obj):
-        return {
-            "type": self.type,
-            "id": str(obj.id),
-            "attributes": {
-                "name": getattr(obj, "name", None),
-                "display_name": getattr(obj, "display_name", None),
-            },
-            "relationships": {},
-        }
+    def get_related(self, obj, rel_name):
+        if rel_name == "job-posts":
+            return "job-post", list(JobPost.objects.filter(company_id=obj.id))
+        elif rel_name == "job-applications":
+            return "job-application", list(JobApplication.objects.filter(company_id=obj.id))
+        return None, []
 
 
 class CoverLetterSerializer(BaseSASerializer):
     type = "cover-letter"
     model = CoverLetter
-    attributes = ["content", "created_at", "favorite"]
+    attributes = ["content", "created_at", "favorite", "status"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
@@ -718,7 +725,7 @@ class JobApplicationSerializer(BaseSASerializer):
 class SummarySerializer(BaseSASerializer):
     type = "summary"
     model = Summary
-    attributes = ["content"]
+    attributes = ["content", "status"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "job-post": {"attr": "job_post_id", "type": "job-post", "uselist": False},
@@ -958,7 +965,7 @@ class JobApplicationStatusSerializer(BaseSASerializer):
 class AnswerSerializer(BaseSASerializer):
     type = "answer"
     model = Answer
-    attributes = ["content", "created_at", "favorite"]
+    attributes = ["content", "created_at", "favorite", "status"]
     relationships = {
         "question": {"attr": "question", "type": "question", "uselist": False},
     }

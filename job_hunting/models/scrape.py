@@ -1,8 +1,9 @@
 from django.db import models
+from .base import GetMixin
 from urllib.parse import urlparse
 
 
-class Scrape(models.Model):
+class Scrape(GetMixin, models.Model):
     url = models.CharField(max_length=2000, null=True, blank=True)
     company = models.ForeignKey(
         "Company",
@@ -23,7 +24,7 @@ class Scrape(models.Model):
     external_link = models.CharField(max_length=2000, null=True, blank=True)
     parse_method = models.CharField(max_length=100, null=True, blank=True)
     scraped_at = models.DateTimeField(null=True, blank=True)
-    state = models.CharField(max_length=50, null=True, blank=True)
+    status = models.CharField(max_length=50, null=True, blank=True)
     source_scrape = models.ForeignKey(
         "self",
         on_delete=models.SET_NULL,

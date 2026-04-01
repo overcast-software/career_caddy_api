@@ -1,8 +1,9 @@
 from django.conf import settings
+from .base import GetMixin
 from django.db import models
 
 
-class JobPost(models.Model):
+class JobPost(GetMixin, models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -23,7 +24,11 @@ class JobPost(models.Model):
     )
     posted_date = models.DateField(null=True, blank=True)
     extraction_date = models.DateField(null=True, blank=True)
-    link = models.CharField(max_length=1000, null=True, blank=True)
+    link = models.CharField(max_length=1000, null=True, blank=True, unique=True)
+    salary_min = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    salary_max = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    location = models.CharField(max_length=255, null=True, blank=True)
+    remote = models.BooleanField(null=True, blank=True)
 
     class Meta:
         db_table = "job_post"

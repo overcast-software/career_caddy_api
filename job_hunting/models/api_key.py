@@ -4,11 +4,12 @@ import json
 from datetime import timedelta
 
 from django.conf import settings
+from .base import GetMixin
 from django.db import models
 from django.utils import timezone
 
 
-class ApiKey(models.Model):
+class ApiKey(GetMixin, models.Model):
     name = models.CharField(max_length=255, null=True, blank=True)
     key_hash = models.CharField(max_length=255, null=True, blank=True, unique=True)
     key_prefix = models.CharField(max_length=20, null=True, blank=True)

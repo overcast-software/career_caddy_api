@@ -1,7 +1,8 @@
 from django.db import models
+from .base import GetMixin
 
 
-class Description(models.Model):
+class Description(GetMixin, models.Model):
     content = models.TextField(null=True, blank=True)
 
     class Meta:

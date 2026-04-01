@@ -1,10 +1,7 @@
+import os
+import threading
 import requests
 from typing import Optional
-
-
-"""Shared Pydantic models for job and company data."""
-
-from job_hunting.lib.validations.job_post_data import JobPostData
 
 
 class Scraper:
@@ -13,34 +10,55 @@ class Scraper:
         self.browser_service_url = browser_service_url
         self.scrape_id = scrape_id
 
-    def process(self, url: Optional[str] = None) -> JobPostData:
+    def dispatch(self) -> None:
         """
-        Scrape a job posting URL and return structured job data.
+        Fire-and-forget: send the scrape request to the browser service in a
+        background thread and return immediately.  The browser service is
+        responsible for updating the scrape record (via scrape_id) when it
+        finishes.
 
-        Args:
-            url: The job posting URL to scrape. If not provided, uses self.url.
-
-        Returns:
-            JobPostData: Structured job posting data
-
-        Raises:
-            requests.RequestException: If the HTTP request fails
-            ValueError: If the response cannot be parsed into JobPostData
+        If USE_A2A_BROWSER_AGENT=True, delegates to the A2A browser agent
+        (BROWSER_AGENT_URL, default http://localhost:3012) instead.
         """
-        target_url = url or self.url
+        if os.getenv("USE_A2A_BROWSER_AGENT", "").lower() in ("1", "true", "yes"):
+            self._dispatch_a2a()
+        else:
+            self._dispatch_legacy()
 
-        # Include scrape_id in the request if available
-        payload = {"url": target_url}
+    def _dispatch_legacy(self) -> None:
+        payload = {"url": self.url}
         if self.scrape_id is not None:
             payload["scrape_id"] = self.scrape_id
-        
-        response = requests.post(
-            f"{self.browser_service_url}/scrape_job",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=300,
-        )
-        response.raise_for_status()
-        jpd = JobPostData(**response.json())
-        print(jpd)
-        return jpd
+
+        def _send():
+            try:
+                requests.post(
+                    f"{self.browser_service_url}/scrape_job",
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=300,
+                )
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()
+
+    def _dispatch_a2a(self) -> None:
+        from job_hunting.lib.a2a_client import get_browser_agent_client
+
+        url = self.url
+        scrape_id = self.scrape_id
+
+        def _send():
+            try:
+                client = get_browser_agent_client()
+                message = f"Scrape this job posting URL and return the content as markdown: {url}"
+                if scrape_id is not None:
+                    message += f" (scrape_id: {scrape_id})"
+                client.send(message)
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=_send, daemon=True)
+        thread.start()

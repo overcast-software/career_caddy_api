@@ -1,7 +1,8 @@
 from django.db import models
+from .base import GetMixin
 
 
-class JobApplicationStatus(models.Model):
+class JobApplicationStatus(GetMixin, models.Model):
     application = models.ForeignKey(
         "JobApplication",
         on_delete=models.CASCADE,

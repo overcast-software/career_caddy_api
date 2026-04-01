@@ -1,7 +1,8 @@
 from django.db import models
+from .base import GetMixin
 
 
-class Education(models.Model):
+class Education(GetMixin, models.Model):
     degree = models.CharField(max_length=255, null=True, blank=True)
     issue_date = models.DateField(null=True, blank=True)
     institution = models.CharField(max_length=255, null=True, blank=True)

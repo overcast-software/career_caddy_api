@@ -2,6 +2,7 @@ import json
 
 from django.conf import settings
 from django.db import models
+from .base import GetMixin
 
 
 class SafeJSONField(models.JSONField):
@@ -15,7 +16,7 @@ class SafeJSONField(models.JSONField):
         return value
 
 
-class Profile(models.Model):
+class Profile(GetMixin, models.Model):
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
