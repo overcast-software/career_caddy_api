@@ -1,13 +1,13 @@
 ---
 services:
   db:
-    image: postgres:15
+    image: postgres:18
     environment:
       POSTGRES_DB: ${DB_NAME:-job_hunting}
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     ports:
       - "127.0.0.1:5432:5432"
       - "${TAILSCALE_IP}:5432:5432"

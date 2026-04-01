@@ -1,0 +1,61 @@
+[project]
+name = "career-caddy-api"
+version = "0.1.0"
+description = "Django REST Framework API for job hunting management"
+requires-python = ">=3.11"
+dependencies = [
+    # Django core
+    "Django>=4.0.10",
+    "djangorestframework>=3.12.4",
+    "djangorestframework-simplejwt>=5.3.1",
+    "djangorestframework-jsonapi>=4.3.0",
+    "django-cors-headers>=4.5.0",
+    "drf-spectacular>=0.28.0",
+    "whitenoise>=6.11.0",
+    "dj-database-url>=2.2.0",
+    # Database
+    "psycopg2-binary>=2.9.11",
+    "SQLAlchemy>=2.0.44",
+    # AI / LLM
+    "openai>=2.15.0",
+    "pydantic-ai>=1.41.0",
+    # Data validation
+    "pydantic>=2.12.5",
+    # Templating
+    "Jinja2>=3.1.6",
+    # Document processing
+    "python-docx>=1.2.0",
+    "docxtpl>=0.20.1",
+    "docxcompose>=1.4.0",
+    # HTTP / scraping
+    "httpx>=0.28.1",
+    "requests>=2.32.5",
+    "aiohttp>=3.13.3",
+    "beautifulsoup4>=4.14.3",
+    "markdownify>=1.2.0",
+    # Date parsing
+    "dateparser>=1.2.2",
+    # Production server
+    "gunicorn>=21.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.3",
+    "bandit>=1.8.6",
+    "black>=25.12.0",
+    "pylint>=4.0.4",
+    "flake8>=7.1.2",
+    "isort>=7.0.0",
+    "autopep8>=2.0.4",
+]
+scraping = [
+    "playwright>=1.40.0",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
