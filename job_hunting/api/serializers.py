@@ -573,6 +573,20 @@ class CompanySerializer(BaseSASerializer):
         },
     }
 
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # `job_applications` attr doesn't exist as a Django reverse accessor
+        # (it's `applications`), so base to_resource emits only links. Populate
+        # the data array explicitly via get_related.
+        try:
+            rel_type, targets = self.get_related(obj, "job-applications")
+            res.setdefault("relationships", {}).setdefault("job-applications", {})["data"] = [
+                {"type": rel_type, "id": str(t.id)} for t in targets
+            ]
+        except Exception:
+            pass
+        return res
+
     def get_related(self, obj, rel_name):
         if rel_name == "job-posts":
             return "job-post", list(JobPost.objects.filter(company_id=obj.id))

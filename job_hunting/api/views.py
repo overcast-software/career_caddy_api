@@ -1,7 +1,7 @@
 import dateparser
 import math
 import os
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -3617,6 +3617,27 @@ class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
+    def _sync_associations(self, pk):
+        """After an update, ensure company_id mirrors the job post's company."""
+        scrape = Scrape.objects.filter(pk=int(pk)).first()
+        if not scrape:
+            return
+        if scrape.job_post_id and not scrape.company_id:
+            jp = JobPost.objects.filter(pk=scrape.job_post_id).first()
+            if jp and jp.company_id:
+                scrape.company_id = jp.company_id
+                scrape.save(update_fields=["company_id"])
+
+    def update(self, request, pk=None):
+        response = super().update(request, pk=pk)
+        self._sync_associations(pk)
+        return response
+
+    def partial_update(self, request, pk=None):
+        response = super().partial_update(request, pk=pk)
+        self._sync_associations(pk)
+        return response
+
     @extend_schema(
         tags=["Scrapes"],
         summary="Get the current status of a scrape",
@@ -3703,6 +3724,13 @@ class ScrapeViewSet(BaseSAViewSet):
 
         scrape = Scrape.objects.create(url=url, state="pending")
 
+        # Associate with an existing job post (and its company) if the URL matches
+        existing_jp = JobPost.objects.filter(link=url).first()
+        if existing_jp:
+            scrape.job_post = existing_jp
+            scrape.company_id = existing_jp.company_id
+            scrape.save()
+
         browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3001")
         Scraper(browser_service_url, url, scrape_id=scrape.id).dispatch()
 
@@ -3774,12 +3802,58 @@ class CompanyViewSet(BaseSAViewSet):
         return BaseModel.get_session()
 
     def list(self, request):
-        qs = list(Company.objects.all())
+        qs = Company.objects
+
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter is not None:
+            qs = qs.filter(
+                Q(name__icontains=query_filter) | Q(display_name__icontains=query_filter)
+            ).distinct()
+
+        sort_param = request.query_params.get("sort", "relevant")
+        if sort_param in ("relevant", "-relevant"):
+            qs = qs.annotate(
+                latest_job_post=Max("job_posts__created_at")
+            ).order_by("-latest_job_post")
+        elif sort_param:
+            sort_fields = []
+            for field in sort_param.split(","):
+                field = field.strip()
+                if field.startswith("-"):
+                    sort_fields.append(f"-{field[1:]}")
+                else:
+                    sort_fields.append(field)
+            if sort_fields:
+                qs = qs.order_by(*sort_fields)
+
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset: offset + page_size])
+
         ser = self.get_serializer()
-        payload = {"data": [ser.to_resource(obj) for obj in qs]}
+        payload = {
+            "data": [ser.to_resource(obj) for obj in items],
+            "meta": {
+                "total": total,
+                "page": page_number,
+                "per_page": page_size,
+                "total_pages": total_pages,
+            },
+        }
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"] = {"next": base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())}
+        else:
+            payload["links"] = {"next": None}
+
         include_rels = self._parse_include(request)
         if include_rels:
-            payload["included"] = self._build_included(qs, include_rels, request)
+            payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
