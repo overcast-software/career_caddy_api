@@ -979,6 +979,65 @@ class SummaryViewSet(BaseSAViewSet):
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
 
+    def update(self, request, pk=None):
+        return self._update_summary(request, pk)
+
+    def partial_update(self, request, pk=None):
+        return self._update_summary(request, pk)
+
+    def _update_summary(self, request, pk):
+        obj = Summary.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
+
+        # Update Summary fields
+        if "content" in attrs:
+            obj.content = attrs["content"]
+        if "status" in attrs:
+            obj.status = attrs["status"]
+        obj.save()
+
+        # Update ResumeSummary.active if provided
+        if "active" in attrs:
+            active_val = bool(attrs["active"])
+
+            # Resolve resume_id: from relationship or flat attribute
+            resume_id = attrs.get("resume_id")
+            if resume_id is None:
+                resume_rel = relationships.get("resume") or relationships.get("resumes")
+                if isinstance(resume_rel, dict):
+                    rel_data = resume_rel.get("data")
+                    if isinstance(rel_data, dict):
+                        resume_id = rel_data.get("id")
+
+            if resume_id is not None:
+                try:
+                    resume_id = int(resume_id)
+                except (TypeError, ValueError):
+                    resume_id = None
+
+            # Fall back to the single linked resume if unambiguous
+            if resume_id is None:
+                linked = list(ResumeSummary.objects.filter(summary_id=obj.id).values_list("resume_id", flat=True))
+                if len(linked) == 1:
+                    resume_id = linked[0]
+
+            if resume_id is not None:
+                ResumeSummary.objects.get_or_create(resume_id=resume_id, summary_id=obj.id)
+                if active_val:
+                    ResumeSummary.objects.filter(resume_id=resume_id).update(active=False)
+                    ResumeSummary.objects.filter(resume_id=resume_id, summary_id=obj.id).update(active=True)
+                else:
+                    ResumeSummary.objects.filter(resume_id=resume_id, summary_id=obj.id).update(active=False)
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
     def destroy(self, request, pk=None):
         obj = Summary.objects.filter(pk=pk).first()
         if not obj:
@@ -1753,6 +1812,10 @@ class ResumeViewSet(BaseSAViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
         attrs_node = node.get("attributes") or {}
+        # Merge relationships from both the standard location and the nested "data" block
+        # (some clients send a nested data.data.relationships for sub-relationships)
+        nested_rels = (node.get("data") or {}).get("relationships") or {}
+        rels_node = {**(node.get("relationships") or {}), **nested_rels}
 
         # Optional: update active summary content if attributes.summary is provided
         incoming_summary = attrs_node.get("summary")
@@ -2075,12 +2138,14 @@ class ResumeViewSet(BaseSAViewSet):
                         link.active = bool(desired_active)
                         link.save()
 
-        # Summaries: reconcile join set if provided (preserve current active if still present)
-        summaries_in = node.get("summaries") or data.get("summaries")
+        # Summaries: reconcile join set if provided
+        # Accept from node["summaries"], data["summaries"], or relationships.summaries.data
+        _rel_summaries = (rels_node.get("summaries") or {}).get("data")
+        summaries_in = node.get("summaries") or data.get("summaries") or _rel_summaries
         if summaries_in is not None:
-            desired_ids = set()
+            desired_ids_ordered = []  # preserve order — last item becomes active
             invalid = []
-            desired_active_sid = None
+            desired_active_sid = None  # explicit active=true flag wins
             for item in summaries_in or []:
                 s_node = (item or {}).get("data") or item or {}
                 sid = _int_or_none(s_node.get("id"))
@@ -2089,64 +2154,42 @@ class ResumeViewSet(BaseSAViewSet):
                 if not Summary.objects.filter(pk=sid).exists():
                     invalid.append(sid)
                 else:
-                    desired_ids.add(sid)
-                    # Check for explicit active flag
+                    if sid not in desired_ids_ordered:
+                        desired_ids_ordered.append(sid)
                     active_flag = (s_node.get("attributes") or {}).get("active")
-                    if active_flag is not None and active_flag:
+                    if active_flag:
                         desired_active_sid = sid
             if invalid:
                 return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": f"Invalid summary ID(s): {', '.join(map(str, invalid))}"
-                            }
-                        ]
-                    },
+                    {"errors": [{"detail": f"Invalid summary ID(s): {', '.join(map(str, invalid))}"}]},
                     status=400,
                 )
+
+            desired_ids = set(desired_ids_ordered)
             existing_links = list(ResumeSummary.objects.filter(resume_id=obj.id))
             existing_ids = {lnk.summary_id for lnk in existing_links}
-            active_by_id = {lnk.summary_id: lnk.active for lnk in existing_links}
 
             to_add = desired_ids - existing_ids
             to_remove = existing_ids - desired_ids
 
             for sid in to_add:
-                ResumeSummary.objects.create(
-                    resume_id=obj.id, summary_id=sid, active=False
-                )
+                ResumeSummary.objects.create(resume_id=obj.id, summary_id=sid, active=False)
             if to_remove:
                 ResumeSummary.objects.filter(
-                    resume_id=obj.id,
-                    summary_id__in=list(to_remove),
+                    resume_id=obj.id, summary_id__in=list(to_remove)
                 ).delete()
 
-            # Update active flag if explicitly requested, otherwise preserve existing active
-            if desired_active_sid is not None:
-                # Set requested summary as active and deactivate all others
+            # Determine which summary should be active:
+            # 1. explicit active=true flag on an item, else
+            # 2. last item in the provided list
+            active_sid = desired_active_sid or (desired_ids_ordered[-1] if desired_ids_ordered else None)
+            if active_sid:
                 ResumeSummary.objects.filter(resume_id=obj.id).update(active=False)
                 ResumeSummary.objects.filter(
-                    resume_id=obj.id, summary_id=desired_active_sid
+                    resume_id=obj.id, summary_id=active_sid
                 ).update(active=True)
-            else:
-                # Preserve active on the one that remains, otherwise none active
-                still_existing = desired_ids
-                if still_existing:
-                    # If there is exactly one active that remains, re-assert it and clear others
-                    active_remaining = [
-                        sid for sid in still_existing if active_by_id.get(sid)
-                    ]
-                    if active_remaining:
-                        keep_sid = active_remaining[0]
-                        ResumeSummary.objects.filter(resume_id=obj.id).update(
-                            active=False
-                        )
-                        ResumeSummary.objects.filter(
-                            resume_id=obj.id, summary_id=keep_sid
-                        ).update(active=True)
 
-        # Enforce exactly one active summary if any exist
+        # Always enforce exactly one active summary
         ResumeSummary.ensure_single_active_for_resume(obj.id)
 
         payload = {"data": ser.to_resource(obj)}
