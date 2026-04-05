@@ -1,9 +1,8 @@
 name: Deploy
 
+# DISABLED: superseded by root-level .github/workflows/deploy.yml (Dagger-based)
+# Delete this file once the root-level CI/CD is confirmed working on your repo.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 env:

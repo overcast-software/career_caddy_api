@@ -123,14 +123,10 @@ class BaseSASerializer:
                         "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                         "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
                     }
-                    # Always include resource linkage so clients can resolve sideloaded records.
-                    # Route through get_related() so subclass overrides apply.
-                    try:
-                        _, items = self.get_related(obj, rel_name)
-                        linkage_data = [{"type": rel_type, "id": str(item.id)} for item in items]
-                    except Exception:
-                        linkage_data = []
-                    rel_out[rel_name] = {"data": linkage_data, "links": links}
+                    # Per JSON:API spec: only emit `links` for to-many relationships.
+                    # Emitting `data: []` falsely asserts zero items; full objects
+                    # come through `included` when explicitly requested.
+                    rel_out[rel_name] = {"links": links}
                 else:
                     # Determine target_id with FK fallback
                     target_id = None
