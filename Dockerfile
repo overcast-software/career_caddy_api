@@ -29,11 +29,13 @@ RUN uv sync --frozen --no-dev
 
 # Set environment for Django management commands
 ENV DJANGO_SETTINGS_MODULE=job_hunting.settings \
-    SECRET_KEY=build-time-dummy-secret \
     DEBUG=False
 
+# Build-time only secret (not persisted in image layers)
+ARG SECRET_KEY=build-time-dummy-secret
+
 # Collect static (ignore if not configured)
-RUN python manage.py collectstatic --noinput || true
+RUN SECRET_KEY=${SECRET_KEY} python manage.py collectstatic --noinput || true
 
 # Create non-root user and data directory
 RUN useradd -m appuser && \
