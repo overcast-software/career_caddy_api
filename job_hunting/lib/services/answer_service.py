@@ -299,13 +299,21 @@ class AnswerService:
 
         return ""
 
-    def generate_answer(self, question: Question, save=True, injected_prompt=None) -> Answer:
+    def generate_answer(self, question: Question, save=True, injected_prompt=None, career_markdown: str = None) -> Answer:
         self.question = question
         context = self._load_context()
-        
+
+        if career_markdown and career_markdown.strip():
+            # Use the provided career data instead of context-loaded resumes
+            context["resumes"] = []
+            context["resume"] = None
+
         # Build the base prompt
         base_prompt = self.prompt_builder.build(context)
-        
+
+        if career_markdown and career_markdown.strip():
+            base_prompt = f"## Career Profile\n{career_markdown}\n\n{base_prompt}"
+
         # If there's an injected prompt, append it to the base prompt
         if injected_prompt and isinstance(injected_prompt, str):
             injected_prompt = injected_prompt.strip()

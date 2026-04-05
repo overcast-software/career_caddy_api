@@ -317,6 +317,8 @@ ALLOW_BOOTSTRAP_SUPERUSER = (
 )
 BOOTSTRAP_TOKEN = os.environ.get("BOOTSTRAP_TOKEN", "")
 SCRAPING_ENABLED = os.environ.get("SCRAPING_ENABLED", "False") == "True"
+CADDY_AGENT_URL = os.environ.get("CADDY_AGENT_URL", "http://localhost:3011")
+USE_CADDY_AGENT_EXTRACTION = os.environ.get("USE_CADDY_AGENT_EXTRACTION", "").lower() in ("1", "true", "yes")
 
 # Logging configuration
 LOGGING = {
@@ -347,6 +349,11 @@ LOGGING = {
         "django.server": {
             "handlers": ["console"],
             "level": "INFO",
+            "propagate": False,
+        },
+        "job_hunting": {
+            "handlers": ["console"],
+            "level": "DEBUG" if DEBUG else "INFO",
             "propagate": False,
         },
     },

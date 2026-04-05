@@ -5,6 +5,7 @@ from django.db import models
 
 class Score(GetMixin, models.Model):
     score = models.IntegerField(null=True, blank=True)
+    status = models.CharField(max_length=50, null=True, blank=True)
     explanation = models.TextField(null=True, blank=True)
     resume = models.ForeignKey(
         "Resume",

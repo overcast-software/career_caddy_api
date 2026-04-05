@@ -1,56 +1,63 @@
-from job_hunting.models import Scrape, JobPost
-from job_hunting.models import Company
 import os
+import threading
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Optional
-from pydantic import BaseModel, Field, validator
+
+from pydantic import BaseModel, Field, field_validator
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.ollama import OllamaProvider
+
+from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
-from markdownify import markdownify as md
-from bs4 import BeautifulSoup
+from job_hunting.models import Company, JobPost, Scrape
 
 
 class ParsedJobData(BaseModel):
-    """Pydantic model for validating parsed job data structure."""
+    """Pydantic model for structured extraction from scraped job content."""
 
     title: str = Field(..., min_length=1, max_length=500, description="Job title")
-    company_name: str = Field(
-        ..., min_length=1, max_length=200, description="Company name"
-    )
-    company_display_name: Optional[str] = Field(
-        None, max_length=200, description="Company display name"
-    )
-    description: Optional[str] = Field(None, description="Job description")
-    posted_date: Optional[datetime] = Field(None, description="Job posting date")
-    extraction_date: Optional[datetime] = Field(
-        None, description="Data extraction date"
-    )
+    company_name: str = Field(..., min_length=1, max_length=200, description="Company name")
+    company_display_name: Optional[str] = Field(None, max_length=200, description="Company display name if different from name")
+    description: Optional[str] = Field(None, description="Full job description / responsibilities / qualifications")
+    posted_date: Optional[datetime] = Field(None, description="Date the job was posted")
+    extraction_date: Optional[datetime] = Field(None, description="Date the data was extracted")
+    salary_min: Optional[float] = Field(None, description="Minimum annual salary in USD (e.g. 175000 for $175K)")
+    salary_max: Optional[float] = Field(None, description="Maximum annual salary in USD (e.g. 205000 for $205K)")
+    location: Optional[str] = Field(None, max_length=255, description="Job location (city, state, country)")
+    remote: Optional[bool] = Field(None, description="True if the role is remote or hybrid-remote")
+    link: Optional[str] = Field(None, max_length=1000, description="Canonical URL / apply link for the job posting")
 
-    @validator("title")
+    @field_validator("title")
+    @classmethod
     def validate_title(cls, v):
         if not v or not v.strip():
             raise ValueError("Job title cannot be empty")
         return v.strip()
 
-    @validator("company_name")
+    @field_validator("company_name")
+    @classmethod
     def validate_company_name(cls, v):
         if not v or not v.strip():
             raise ValueError("Company name cannot be empty")
         return v.strip()
 
-    @validator("company_display_name")
-    def validate_company_display_name(cls, v):
+    @field_validator("company_display_name", "description", "location", "link")
+    @classmethod
+    def strip_optional_str(cls, v):
         if v is not None:
             return v.strip() if v.strip() else None
         return v
 
-    @validator("description")
-    def validate_description(cls, v):
-        if v is not None:
-            return v.strip() if v.strip() else None
-        return v
+
+def _to_decimal(value) -> Optional[Decimal]:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        return None
 
 
 class GenericParser:
@@ -59,22 +66,19 @@ class GenericParser:
         self.agent = None
 
     def parse(self, scrape: Scrape):
-        validated_data = self.analyze_html_with_ai(scrape)
+        validated_data = self.analyze_with_ai(scrape)
         self.process_evaluation(scrape, validated_data)
 
     def get_agent(self):
-        """Get or create a Pydantic AI agent for structured job data extraction."""
         if self.agent:
             return self.agent
 
-        # Prefer OpenAI if available; otherwise fall back to local Ollama
-        try:
-            if os.getenv("OPENAI_API_KEY"):
+        if os.getenv("OPENAI_API_KEY"):
+            try:
                 openai_model = OpenAIResponsesModel("gpt-4o")
                 return Agent(openai_model, output_type=ParsedJobData)
-        except Exception:
-            # Fall back to Ollama if OpenAI model initialization fails
-            pass
+            except Exception:
+                pass
 
         ollama_model = OpenAIChatModel(
             model_name="qwen3-coder",
@@ -82,90 +86,82 @@ class GenericParser:
         )
         return Agent(ollama_model, output_type=ParsedJobData)
 
-    def process_evaluation(self, scrape, validated_data: ParsedJobData):
-        """
-        Process validated job data and save to database
-        """
-        try:
-            print("*" * 88)
-            print("save off validated data")
-            print("*" * 88)
+    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData):
+        # Find or create company
+        company, _ = Company.objects.get_or_create(
+            name=validated_data.company_name,
+            defaults={"display_name": validated_data.company_display_name},
+        )
 
-            # Create or find company using validated data
-            company, _ = Company.objects.get_or_create(
-                name=validated_data.company_name,
-                defaults={"display_name": validated_data.company_display_name},
-            )
-            print(f"company id: {company.id}")
+        job_defaults = {}
+        if validated_data.description:
+            job_defaults["description"] = validated_data.description
+        if validated_data.posted_date:
+            job_defaults["posted_date"] = validated_data.posted_date
+        if validated_data.extraction_date:
+            job_defaults["extraction_date"] = validated_data.extraction_date
+        if validated_data.salary_min is not None:
+            job_defaults["salary_min"] = _to_decimal(validated_data.salary_min)
+        if validated_data.salary_max is not None:
+            job_defaults["salary_max"] = _to_decimal(validated_data.salary_max)
+        if validated_data.location:
+            job_defaults["location"] = validated_data.location
+        if validated_data.remote is not None:
+            job_defaults["remote"] = validated_data.remote
 
-            # Prepare job post defaults with validated data
-            job_defaults = {}
-            if validated_data.description:
-                job_defaults["description"] = validated_data.description
-            if validated_data.posted_date:
-                job_defaults["posted_date"] = validated_data.posted_date
-            if validated_data.extraction_date:
-                job_defaults["extraction_date"] = validated_data.extraction_date
-
-            # Create or find job post using validated data
+        # Prefer link-based lookup since link is unique
+        job = None
+        if validated_data.link:
+            job = JobPost.objects.filter(link=validated_data.link).first()
+        if job is None:
             job, _ = JobPost.objects.get_or_create(
                 title=validated_data.title,
-                company_id=company.id,
-                defaults=job_defaults,
+                company=company,
+                defaults={**job_defaults, "link": validated_data.link},
             )
-            print(f"job post id: {job.id}")
+        else:
+            # Update fields that may have been missing on a prior pass
+            update_fields = []
+            for field, value in job_defaults.items():
+                if value is not None and getattr(job, field) is None:
+                    setattr(job, field, value)
+                    update_fields.append(field)
+            if update_fields:
+                job.save(update_fields=update_fields)
 
-            # Link scrape to job post
+        # Link scrape → job_post and company
+        update_fields = []
+        if not scrape.job_post_id:
             scrape.job_post_id = job.id
-            scrape.save()
+            update_fields.append("job_post_id")
+        if not scrape.company_id and job.company_id:
+            scrape.company_id = job.company_id
+            update_fields.append("company_id")
+        if update_fields:
+            scrape.save(update_fields=update_fields)
 
-            print(
-                f"Successfully processed job: {validated_data.title} at {validated_data.company_name}"
-            )
+    def analyze_with_ai(self, scrape: Scrape) -> ParsedJobData:
+        content = scrape.job_content or ""
+        if not content and scrape.html:
+            content = clean_html_to_markdown(scrape.html)
 
-        except Exception as e:
-            print(f"Error processing validated evaluation: {e}")
-            print(f"Validated data: {validated_data.dict()}")
-            raise
+        prompt = f"""Extract job posting information from the content below and return structured data.
 
-    def analyze_html_with_ai(self, scrape: Scrape) -> ParsedJobData:
-        # Determine content to analyze - use job_content if HTML is too large
-        max_html_size = 50000  # Adjust this threshold as needed
-        content_to_analyze = scrape.html or ""
+Fields to extract:
+- title: job title
+- company_name: company name (canonical, e.g. "Nav Technologies, Inc.")
+- company_display_name: shorter display name if different (e.g. "Nav")
+- description: full description including responsibilities and qualifications
+- posted_date: ISO date the job was posted (null if unknown)
+- extraction_date: today's date/time
+- salary_min: minimum annual salary as a plain number in USD (e.g. 175000 for $175K/yr; null if not stated)
+- salary_max: maximum annual salary as a plain number in USD (null if not stated)
+- location: city/state/country (e.g. "United States" or "Austin, TX")
+- remote: true if role is remote or hybrid, false if fully on-site, null if unknown
+- link: the job application or posting URL if present (null otherwise)
 
-        if len(content_to_analyze) > max_html_size and scrape.job_content:
-            print(
-                f"HTML too large ({len(content_to_analyze)} chars), using job_content instead"
-            )
-            content_to_analyze = scrape.job_content
-
-        # Create a direct prompt for the agent
-        soup = BeautifulSoup(scrape.html)
-        for script in soup.find_all("script"):
-            script.extract()
-
-        for code in soup.find_all("code"):
-            code.extract()
-
-        for img in soup.find_all("img"):
-            img.extract()
-
-        cleaned_html = str(soup)
-        scrape.job_content = md(cleaned_html)
-        content_to_analyze = scrape.job_content
-        prompt = f"""
-Extract job posting information from the following content and return structured data.
-
-Please extract:
-- Job title
-- Company name
-- Company display name (if different from name)
-- Job description
-- Posted date (if available)
-- Extraction date (current date/time)
-
-Content to analyze:
-{content_to_analyze}
+Content:
+{content}
 """
 
         write_prompt_to_file(
@@ -177,15 +173,36 @@ Content to analyze:
             },
         )
 
-        # Get or create the agent
         if self.agent is None:
             self.agent = self.get_agent()
 
-        try:
-            # Use the Pydantic AI agent to get structured output
-            result = self.agent.run_sync(prompt)
-            return result.output
+        result = self.agent.run_sync(prompt)
+        return result.output
 
-        except Exception as e:
-            print(f"Error analyzing with AI agent: {e}")
-            raise
+
+def extract_job_from_scrape(scrape: Scrape) -> None:
+    """
+    Fire-and-forget: parse job_content on a completed scrape and create/update
+    the JobPost and Company records.  Safe to call even if already extracted —
+    bails out if job_post_id is already set.
+    """
+    if not (scrape.job_content and scrape.status == "completed" and not scrape.job_post_id):
+        return
+
+    scrape_id = scrape.id
+
+    def _run():
+        try:
+            from job_hunting.models.scrape import Scrape as ScrapeModel
+            s = ScrapeModel.objects.filter(pk=scrape_id).first()
+            if not s or s.job_post_id:
+                return
+            parser = GenericParser()
+            parser.parse(s)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "extract_job_from_scrape failed scrape_id=%s", scrape_id
+            )
+
+    threading.Thread(target=_run, daemon=True).start()

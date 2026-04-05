@@ -42,6 +42,7 @@ from job_hunting.api.views import (
     QuestionViewSet,
     AnswerViewSet,
     ApiKeyViewSet,
+    ProjectViewSet,
     healthcheck,
     initialize,
     profile,
@@ -68,6 +69,7 @@ router.register(r"job-application-statuses", JobApplicationStatusViewSet, basena
 router.register(r"questions", QuestionViewSet, basename="questions")
 router.register(r"answers", AnswerViewSet, basename="answers")
 router.register(r"api-keys", ApiKeyViewSet, basename="api-keys")
+router.register(r"projects", ProjectViewSet, basename="projects")
 
 urlpatterns = [
     path("admin/", admin.site.urls),

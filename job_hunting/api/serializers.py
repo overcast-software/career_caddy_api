@@ -123,19 +123,14 @@ class BaseSASerializer:
                         "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                         "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
                     }
-                    if target is None:
-                        # Per JSON:API spec: omit `data` when not loaded so clients
-                        # treat this as "not yet fetched" and follow the link.
-                        rel_out[rel_name] = {"links": links}
-                    else:
-                        # target is a manager or iterable — resolve and emit linkage
-                        if hasattr(target, "all"):
-                            try:
-                                target = target.all()
-                            except Exception:
-                                target = []
-                        data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
-                        rel_out[rel_name] = {"data": data, "links": links}
+                    # Always include resource linkage so clients can resolve sideloaded records.
+                    # Route through get_related() so subclass overrides apply.
+                    try:
+                        _, items = self.get_related(obj, rel_name)
+                        linkage_data = [{"type": rel_type, "id": str(item.id)} for item in items]
+                    except Exception:
+                        linkage_data = []
+                    rel_out[rel_name] = {"data": linkage_data, "links": links}
                 else:
                     # Determine target_id with FK fallback
                     target_id = None
@@ -237,39 +232,29 @@ class DjangoUserSerializer:
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
 
-        # Add relationships structure
-        res["relationships"] = {
-            "resumes": {
+        # Build relationships with resource linkage so clients can resolve sideloaded records.
+        rel_defs = [
+            ("resumes", "resume", "resumes"),
+            ("scores", "score", "scores"),
+            ("cover-letters", "cover-letter", "cover-letters"),
+            ("applications", "job-application", "job-applications"),
+            ("summaries", "summary", "summaries"),
+        ]
+        relationships = {}
+        for rel_name, rel_type, url_segment in rel_defs:
+            try:
+                _, items = self.get_related(obj, rel_name)
+                linkage_data = [{"type": rel_type, "id": str(item.id)} for item in items]
+            except Exception:
+                linkage_data = []
+            relationships[rel_name] = {
+                "data": linkage_data,
                 "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/resumes",
-                    "related": f"{_resource_base_path(self.type)}/{obj.id}/resumes",
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/{url_segment}",
                 },
-            },
-            "scores": {
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/scores",
-                    "related": f"{_resource_base_path(self.type)}/{obj.id}/scores",
-                },
-            },
-            "cover-letters": {
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/cover-letters",
-                    "related": f"{_resource_base_path(self.type)}/{obj.id}/cover-letters",
-                },
-            },
-            "applications": {
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/applications",
-                    "related": f"{_resource_base_path(self.type)}/{obj.id}/job-applications",
-                },
-            },
-            "summaries": {
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/summaries",
-                    "related": f"{_resource_base_path(self.type)}/{obj.id}/summaries",
-                },
-            },
-        }
+            }
+        res["relationships"] = relationships
         return res
 
     def get_related(self, obj, rel_name):
@@ -350,6 +335,131 @@ class ResumeSerializer(BaseSASerializer):
             res.setdefault("attributes", {})["summary"] = obj.active_summary_content()
         except Exception:
             pass
+        # Embed all skills inline — intrinsic to the record, never paginated
+        try:
+            rs_qs = ResumeSkill.objects.select_related("skill").filter(resume_id=obj.id)
+            res["attributes"]["skills"] = [
+                {
+                    "id": rs.skill.id,
+                    "text": rs.skill.text,
+                    "skill_type": rs.skill.skill_type,
+                    "active": rs.active,
+                }
+                for rs in rs_qs
+            ]
+        except Exception:
+            res["attributes"]["skills"] = []
+
+        # Embed experiences with their descriptions
+        try:
+            re_qs = (
+                ResumeExperience.objects.select_related("experience", "experience__company")
+                .filter(resume_id=obj.id)
+                .order_by("order")
+            )
+            exp_ids = [re.experience_id for re in re_qs]
+            # Batch-fetch all descriptions for these experiences
+            ed_rows = (
+                ExperienceDescription.objects.select_related("description")
+                .filter(experience_id__in=exp_ids)
+                .order_by("order")
+            )
+            descs_by_exp = {}
+            for ed in ed_rows:
+                descs_by_exp.setdefault(ed.experience_id, []).append(
+                    {"id": ed.description.id, "content": ed.description.content}
+                )
+            res["attributes"]["experiences"] = [
+                {
+                    "id": re.experience.id,
+                    "title": re.experience.title,
+                    "start_date": _to_primitive(re.experience.start_date),
+                    "end_date": _to_primitive(re.experience.end_date),
+                    "content": re.experience.content,
+                    "location": re.experience.location,
+                    "summary": re.experience.summary,
+                    "company_id": re.experience.company_id,
+                    "company": re.experience.company.name if re.experience.company_id else None,
+                    "order": re.order,
+                    "descriptions": descs_by_exp.get(re.experience_id, []),
+                }
+                for re in re_qs
+            ]
+        except Exception:
+            res["attributes"]["experiences"] = []
+
+        # Embed projects
+        try:
+            rp_qs = (
+                ResumeProject.objects.select_related("project")
+                .filter(resume_id=obj.id)
+                .order_by("order")
+            )
+            res["attributes"]["projects"] = [
+                {
+                    "id": rp.project.id,
+                    "title": rp.project.title,
+                    "description": rp.project.description,
+                    "start_date": _to_primitive(rp.project.start_date),
+                    "end_date": _to_primitive(rp.project.end_date),
+                    "is_active": rp.project.is_active,
+                    "order": rp.order,
+                }
+                for rp in rp_qs
+            ]
+        except Exception:
+            res["attributes"]["projects"] = []
+
+        # Embed educations — join table fields override base model when set
+        try:
+            red_qs = ResumeEducation.objects.select_related("education").filter(resume_id=obj.id)
+            res["attributes"]["educations"] = [
+                {
+                    "id": red.education.id,
+                    "degree": red.degree or red.education.degree,
+                    "institution": red.institution or red.education.institution,
+                    "issue_date": _to_primitive(red.issue_date or red.education.issue_date),
+                    "major": red.education.major,
+                    "minor": red.education.minor,
+                    "content": red.content,
+                }
+                for red in red_qs
+            ]
+        except Exception:
+            res["attributes"]["educations"] = []
+
+        # Embed certifications — join table fields override base model when set
+        try:
+            rc_qs = ResumeCertification.objects.select_related("certification").filter(resume_id=obj.id)
+            res["attributes"]["certifications"] = [
+                {
+                    "id": rc.certification.id,
+                    "title": rc.title or rc.certification.title,
+                    "issuer": rc.issuer or rc.certification.issuer,
+                    "issue_date": _to_primitive(rc.issue_date or rc.certification.issue_date),
+                    "content": rc.content or rc.certification.content,
+                }
+                for rc in rc_qs
+            ]
+        except Exception:
+            res["attributes"]["certifications"] = []
+
+        # Embed summaries
+        try:
+            rsm_qs = ResumeSummary.objects.select_related("summary").filter(resume_id=obj.id)
+            res["attributes"]["summaries"] = [
+                {
+                    "id": rsm.summary.id,
+                    "content": rsm.summary.content,
+                    "status": rsm.summary.status,
+                    "job_post_id": rsm.summary.job_post_id,
+                    "active": rsm.active,
+                }
+                for rsm in rsm_qs
+            ]
+        except Exception:
+            res["attributes"]["summaries"] = []
+
         # Ensure user relationship linkage points to Django user
         # Handle both Django and SA Resume models
         user_id = None
@@ -372,20 +482,6 @@ class ResumeSerializer(BaseSASerializer):
                 # User doesn't exist or error checking - skip relationship
                 pass
 
-        # Populate relationship linkage data for join-table relationships
-        # (base to_resource uses getattr which returns None for these on Django models)
-        join_table_rels = ["experiences", "educations", "skills", "summaries", "projects", "certifications"]
-        for rel_name in join_table_rels:
-            if rel_name not in res.get("relationships", {}):
-                continue
-            try:
-                rel_type, targets = self.get_related(obj, rel_name)
-                res["relationships"][rel_name]["data"] = [
-                    {"type": rel_type, "id": str(t.id)} for t in targets
-                ]
-            except Exception:
-                pass
-        
         # Convenience link to related summaries collection
         res.setdefault("links", {})[
             "summaries"
@@ -444,7 +540,7 @@ class ResumeSerializer(BaseSASerializer):
 class ScoreSerializer(BaseSASerializer):
     type = "score"
     model = Score
-    attributes = ["score", "explanation"]
+    attributes = ["score", "status", "explanation"]
     relationships = {
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
@@ -520,6 +616,7 @@ class JobPostSerializer(BaseSASerializer):
         "salary_max",
         "location",
         "remote",
+        "top_score",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
@@ -536,6 +633,7 @@ class JobPostSerializer(BaseSASerializer):
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
         "questions": {"attr": "questions", "type": "question", "uselist": True},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
+        "top-score": {"attr": "top_score_record", "type": "score", "uselist": False},
     }
     relationship_fks = {"company": "company_id"}
 
@@ -572,20 +670,6 @@ class CompanySerializer(BaseSASerializer):
             "uselist": True,
         },
     }
-
-    def to_resource(self, obj):
-        res = super().to_resource(obj)
-        # `job_applications` attr doesn't exist as a Django reverse accessor
-        # (it's `applications`), so base to_resource emits only links. Populate
-        # the data array explicitly via get_related.
-        try:
-            rel_type, targets = self.get_related(obj, "job-applications")
-            res.setdefault("relationships", {}).setdefault("job-applications", {})["data"] = [
-                {"type": rel_type, "id": str(t.id)} for t in targets
-            ]
-        except Exception:
-            pass
-        return res
 
     def get_related(self, obj, rel_name):
         if rel_name == "job-posts":
@@ -684,6 +768,11 @@ class JobApplicationSerializer(BaseSASerializer):
             "uselist": False,
         },
         "questions": {"attr": "questions", "type": "question", "uselist": True},
+        "application-statuses": {
+            "attr": "application_statuses",
+            "type": "job-application-status",
+            "uselist": True,
+        },
     }
     relationship_fks = {
         "user": "user_id",
@@ -960,7 +1049,7 @@ class StatusSerializer(serializers.ModelSerializer):
 class JobApplicationStatusSerializer(BaseSASerializer):
     type = "job-application-status"
     model = JobApplicationStatus
-    attributes = ["created_at", "note"]
+    attributes = ["created_at", "logged_at", "note"]
     relationships = {
         "application": {
             "attr": "application",
@@ -974,6 +1063,18 @@ class JobApplicationStatusSerializer(BaseSASerializer):
         "application": "application_id",
         "status": "status_id",
     }
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # Inline the status label so timeline consumers don't need ?include=status
+        try:
+            status_obj = obj.status
+            if status_obj is not None:
+                res["attributes"]["status"] = status_obj.status
+                res["attributes"]["status_type"] = status_obj.status_type
+        except Exception:
+            pass
+        return res
 
 
 class AnswerSerializer(BaseSASerializer):
@@ -1126,6 +1227,7 @@ class ProjectSerializer(BaseSASerializer):
     attributes = ["title", "description", "start_date", "end_date", "is_active", "created_at", "updated_at"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
+        "descriptions": {"attr": "descriptions", "type": "description", "uselist": True},
     }
     relationship_fks = {"user": "user_id"}
 

@@ -1,4 +1,5 @@
 import dateparser
+import logging
 import math
 import os
 from django.db.models import Max, Q
@@ -57,8 +58,11 @@ from job_hunting.models import (
     ResumeCertification,
     ResumeSummary,
     ResumeExperience,
+    ResumeProject,
     ResumeSkill,
     JobApplicationStatus,
+    Project,
+    ProjectDescription,
 )
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
@@ -86,6 +90,8 @@ from .serializers import (
     _parse_date,
     _resource_base_path,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @extend_schema(
@@ -179,7 +185,7 @@ def healthcheck(request):
             ),
         ),
         400: OpenApiResponse(description="Bad request / user creation failed"),
-        403: OpenApiResponse(description="Already initialized"),
+        409: OpenApiResponse(description="Already initialized — superuser already exists"),
     },
 )
 @csrf_exempt
@@ -221,7 +227,7 @@ def initialize(request):
         # Only allow initialization when no users exist
         if user_count is not None and user_count > 0:
             return JsonResponse(
-                {"errors": [{"detail": "Application already initialized"}]}, status=403
+                {"errors": [{"detail": "Application already initialized"}]}, status=409
             )
 
         # Parse request data
@@ -362,6 +368,21 @@ _FILTER_TITLE_PARAM = OpenApiParameter(
     description="Filter by job post title (case-insensitive contains).",
 )
 
+_FILTER_APP_QUERY_PARAM = OpenApiParameter(
+    "filter[query]",
+    OpenApiTypes.STR,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Search across job post title, company name, company display_name, status, and notes (case-insensitive OR).",
+)
+_FILTER_APP_STATUS_PARAM = OpenApiParameter(
+    "filter[status]",
+    OpenApiTypes.STR,
+    OpenApiParameter.QUERY,
+    required=False,
+    description="Filter by application status (case-insensitive contains).",
+)
+
 _JSONAPI_LIST = OpenApiResponse(
     description="JSON:API list",
     response=inline_serializer(
@@ -454,23 +475,6 @@ class BaseSAViewSet(viewsets.ViewSet):
         ):
             return []
         return super().get_throttles()
-
-    def dispatch(self, request, *args, **kwargs):
-        """Override dispatch to ensure proper SQLAlchemy session cleanup."""
-        try:
-            return super().dispatch(request, *args, **kwargs)
-        except Exception:
-            BaseModel.cleanup_session_on_exception()
-            raise
-        finally:
-            # Best-effort cleanup even if middleware is disabled in tests
-            BaseModel.clear_session()
-            try:
-                sess = getattr(self.model, "get_session", lambda: None)()
-                if hasattr(sess, "remove"):
-                    sess.remove()
-            except Exception:
-                pass
 
     def _is_django_model(self):
         """Return True if self.model is a Django ORM model."""
@@ -692,6 +696,11 @@ class BaseSAViewSet(viewsets.ViewSet):
                             exp_child_ser.set_parent_context("experience", t.id, None)
                         for child_rel in ("descriptions", "company"):
                             _include_recursive([t], [child_rel], exp_child_ser)
+
+                    # Auto-include descriptions for projects
+                    if effective_type == "project" and not remaining_segments:
+                        proj_child_ser = ProjectSerializer()
+                        _include_recursive([t], ["descriptions"], proj_child_ser)
 
         # Process each include path
         for include_path in include_rels:
@@ -968,9 +977,33 @@ class SummaryViewSet(BaseSAViewSet):
         return BaseModel.get_session()
 
     def list(self, request):
-        qs = Summary.objects.all()
+        qs = Summary.objects
+
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter:
+            qs = qs.filter(content__icontains=query_filter)
+
+        qs = qs.order_by("-id")
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset: offset + page_size])
+
         ser = self.get_serializer()
-        return Response({"data": [ser.to_resource(obj) for obj in qs]})
+        payload = {
+            "data": [ser.to_resource(obj) for obj in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        }
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"] = {"next": base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())}
+        else:
+            payload["links"] = {"next": None}
+        return Response(payload)
 
     def retrieve(self, request, pk=None):
         obj = Summary.objects.filter(pk=pk).first()
@@ -1090,41 +1123,34 @@ class SummaryViewSet(BaseSAViewSet):
         )
         user_id = _rel_id("user", "users")
 
-        if resume_id is None:
-            return Response(
-                {"errors": [{"detail": "Missing required relationship: resume"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            resume = Resume.objects.filter(pk=int(resume_id)).first()
-        except (TypeError, ValueError):
-            resume = None
-        if not resume:
-            return Response(
-                {"errors": [{"detail": "Invalid resume ID"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Resume is optional — omitting it or passing id=0 falls back to career-data
+        resume = None
+        if resume_id is not None:
+            try:
+                rid = int(resume_id)
+            except (TypeError, ValueError):
+                rid = None
+            if rid:  # 0 → treated as "no resume" → career-data fallback
+                resume = Resume.objects.filter(pk=rid).first()
+                if not resume:
+                    return Response(
+                        {"errors": [{"detail": "Invalid resume ID"}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         job_post = None
         if job_post_id is not None:
             try:
                 job_post = JobPost.objects.filter(pk=int(job_post_id)).first()
             except (TypeError, ValueError):
-                job_post = None
+                pass
             if not job_post:
                 return Response(
                     {"errors": [{"detail": "Invalid job-post ID"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Resolve user_id; default to resume.user_id if not provided or invalid
-        try:
-            user_id = int(user_id) if user_id is not None else None
-        except (TypeError, ValueError):
-            user_id = None
-        if user_id is None:
-            user_id = getattr(resume, "user_id", None)
+        user_id = request.user.id
 
         content = attrs.get("content")
 
@@ -1158,18 +1184,32 @@ class SummaryViewSet(BaseSAViewSet):
                     status=503,
                 )
 
-            summary_service = SummaryService(client, job=job_post, resume=resume)
+            if resume is None:
+                # No resume — use the user's full career data
+                career_data = CareerData.for_user(user_id)
+                prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+                career_markdown = prompt_builder.build_from_career_data(career_data)
+                if not career_markdown.strip():
+                    return Response(
+                        {"errors": [{"detail": "No career data found for this user. Add favorite resumes or provide a resume relationship."}]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                summary_service = SummaryService(client, job=job_post, resume_markdown=career_markdown, user_id=user_id)
+            else:
+                summary_service = SummaryService(client, job=job_post, resume=resume)
+
             summary = summary_service.generate_summary()
 
-        # Deactivate existing links, then create new active link
-        ResumeSummary.objects.filter(resume_id=resume.id).update(active=False)
-        ResumeSummary.objects.get_or_create(
-            resume_id=resume.id, summary_id=summary.id, defaults={"active": True}
-        )[0]
-        ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).update(
-            active=True
-        )
-        ResumeSummary.ensure_single_active_for_resume(resume.id)
+        # Link to resume when one was provided
+        if resume is not None:
+            ResumeSummary.objects.filter(resume_id=resume.id).update(active=False)
+            ResumeSummary.objects.get_or_create(
+                resume_id=resume.id, summary_id=summary.id, defaults={"active": True}
+            )
+            ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).update(
+                active=True
+            )
+            ResumeSummary.ensure_single_active_for_resume(resume.id)
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(summary)}
@@ -3027,6 +3067,69 @@ class ResumeViewSet(BaseSAViewSet):
 
     @extend_schema(
         tags=["Resumes"],
+        summary="Clone a resume and all its relationships",
+        responses={
+            201: _JSONAPI_ITEM,
+            404: OpenApiResponse(description="Not found"),
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="clone")
+    def clone(self, request, pk=None):
+        obj = Resume.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        new_resume = Resume.objects.create(
+            user_id=obj.user_id,
+            file_path=obj.file_path,
+            title=f"{obj.title} (clone)" if obj.title else None,
+            name=f"{obj.name} (clone)" if obj.name else None,
+            notes=obj.notes,
+            favorite=obj.favorite,
+        )
+
+        for rs in ResumeSkill.objects.filter(resume_id=obj.id):
+            ResumeSkill.objects.create(resume_id=new_resume.id, skill_id=rs.skill_id, active=rs.active)
+
+        for re in ResumeExperience.objects.filter(resume_id=obj.id):
+            ResumeExperience.objects.create(resume_id=new_resume.id, experience_id=re.experience_id, order=re.order)
+
+        for rp in ResumeProject.objects.filter(resume_id=obj.id):
+            ResumeProject.objects.create(resume_id=new_resume.id, project_id=rp.project_id, order=rp.order)
+
+        for rc in ResumeCertification.objects.filter(resume_id=obj.id):
+            ResumeCertification.objects.create(
+                resume_id=new_resume.id,
+                certification_id=rc.certification_id,
+                issuer=rc.issuer,
+                title=rc.title,
+                issue_date=rc.issue_date,
+                content=rc.content,
+            )
+
+        for red in ResumeEducation.objects.filter(resume_id=obj.id):
+            ResumeEducation.objects.create(
+                resume_id=new_resume.id,
+                education_id=red.education_id,
+                institution=red.institution,
+                degree=red.degree,
+                issue_date=red.issue_date,
+                content=red.content,
+            )
+
+        for rsm in ResumeSummary.objects.filter(resume_id=obj.id):
+            ResumeSummary.objects.create(resume_id=new_resume.id, summary_id=rsm.summary_id, active=rsm.active)
+
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(new_resume)}
+        ser_rels = list(getattr(ser, "relationships", {}).keys())
+        include_rels = self._parse_include(request) or ser_rels
+        if include_rels:
+            payload["included"] = self._build_included([new_resume], include_rels, request)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        tags=["Resumes"],
         summary="Ingest a resume from an uploaded DOCX file",
         request=inline_serializer(
             name="IngestResumeRequest",
@@ -3152,12 +3255,11 @@ class ScoreViewSet(BaseSAViewSet):
 
     @extend_schema(
         tags=["Scores"],
-        summary="AI-score a job post against a resume (requires user, job-post, and resume relationships)",
+        summary="AI-score a job post against a resume — returns immediately with status=pending; poll for status=completed",
         request=_JSONAPI_WRITE,
         responses={
-            201: _JSONAPI_ITEM,
-            400: OpenApiResponse(description="Missing required relationships"),
-            502: OpenApiResponse(description="AI scoring failed"),
+            202: _JSONAPI_ITEM,
+            400: OpenApiResponse(description="Missing required relationships or no career data"),
             503: OpenApiResponse(description="AI client not configured"),
         },
     )
@@ -3207,54 +3309,94 @@ class ScoreViewSet(BaseSAViewSet):
         user_id = _rel_id("user", "users")
         resume_id = _rel_id("resume", "resumes")
 
-        if job_post_id is None or user_id is None or resume_id is None:
+        if job_post_id is None:
             return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": "Missing required relationships: user, job-post, resume"
-                        }
-                    ]
-                },
+                {"errors": [{"detail": "Missing required relationship: job-post"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         job_post_id = int(job_post_id)
-        user_id = int(user_id)
-        resume_id = int(resume_id)
+        # Infer user from auth token; relationship is optional
+        user_id = int(user_id) if user_id is not None else request.user.id
+        # Missing or null resume defaults to career-data scoring (equivalent to resume_id=0)
+        resume_id = int(resume_id) if resume_id is not None else 0
 
         jp = JobPost.objects.filter(pk=job_post_id).first()
-        resume = Resume.objects.filter(pk=resume_id).first()
-
-        # Export resume to markdown for improved scoring context
+        if not jp:
+            return Response(
+                {"errors": [{"detail": "Job post not found"}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if not jp.description or not jp.description.strip():
+            return Response(
+                {"errors": [{"detail": "Job post has no description to score against"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         exporter = DbExportService()
-        resume_markdown = exporter.resume_markdown_export(resume)
+
+        if resume_id == 0:
+            # Score against the user's full career data (all favorite resumes, cover letters, answers)
+            career_data = CareerData.for_user(user_id)
+            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+            resume_markdown = prompt_builder.build_from_career_data(career_data)
+            if not resume_markdown.strip():
+                return Response(
+                    {"errors": [{"detail": "No career data found for this user to score against"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            score_resume_id = None
+        else:
+            resume = Resume.objects.filter(pk=resume_id).first()
+            if not resume:
+                return Response(
+                    {"errors": [{"detail": "Resume not found"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            resume_markdown = exporter.resume_markdown_export(resume)
+            score_resume_id = resume_id
 
         myScore = Score.objects.filter(
-            job_post_id=job_post_id, resume_id=resume_id, user_id=user_id
+            job_post_id=job_post_id, resume_id=score_resume_id, user_id=user_id
         ).first()
-        if not myScore:
-            myScore = Score(
-                job_post_id=job_post_id, resume_id=resume_id, user_id=user_id
+        if myScore:
+            myScore.status = "pending"
+            myScore.score = None
+            myScore.explanation = None
+            myScore.save()
+        else:
+            myScore = Score.objects.create(
+                job_post_id=job_post_id,
+                resume_id=score_resume_id,
+                user_id=user_id,
+                status="pending",
             )
 
-        try:
-            result = myJobScorer.score_job_match(jp.description, resume_markdown)
-            myScore.score = result.score
-            myScore.explanation = result.evaluation
-            myScore.save()
-        except ValueError as e:
-            return Response(
-                {"errors": [{"detail": f"Unable to score: {str(e)}"}]},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        score_id = myScore.id
+        captured_description = jp.description
+        captured_resume_markdown = resume_markdown
+
+        def _score():
+            import django
+            django.db.close_old_connections()
+            try:
+                result = myJobScorer.score_job_match(captured_description, captured_resume_markdown)
+                Score.objects.filter(pk=score_id).update(
+                    score=result.score,
+                    explanation=result.evaluation,
+                    status="completed",
+                )
+            except Exception:
+                Score.objects.filter(pk=score_id).update(status="failed")
+
+        import threading
+        threading.Thread(target=_score, daemon=True).start()
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(myScore)}
         include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included([myScore], include_rels, request)
-        return Response(payload, status=status.HTTP_201_CREATED)
+        return Response(payload, status=status.HTTP_202_ACCEPTED)
 
     def _parse_eval(self, e):
         # Expect a structured result from JobScorer: dict or JSON string
@@ -3391,6 +3533,19 @@ class JobPostViewSet(BaseSAViewSet):
         offset = (page_number - 1) * page_size
         items = list(qs.all()[offset: offset + page_size])
 
+        # Attach the highest Score to each job post in one query
+        if items:
+            job_post_ids = [jp.id for jp in items]
+            all_scores = list(
+                Score.objects.filter(job_post_id__in=job_post_ids).order_by("job_post_id", "-score")
+            )
+            top_score_map = {}
+            for s in all_scores:
+                if s.job_post_id not in top_score_map:
+                    top_score_map[s.job_post_id] = s
+            for jp in items:
+                jp._top_score = top_score_map.get(jp.id)
+
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
         payload = {
@@ -3413,9 +3568,8 @@ class JobPostViewSet(BaseSAViewSet):
         else:
             payload["links"] = {"next": None}
 
-        include_rels = self._parse_include(request)
-        if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request)
+        include_rels = self._parse_include(request) or ["top-score"]
+        payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     def retrieve(self, request, pk=None):
@@ -3651,7 +3805,11 @@ class JobPostViewSet(BaseSAViewSet):
 
 
 @extend_schema_view(
-    list=extend_schema(tags=["Scrapes"], summary="List scrapes"),
+    list=extend_schema(
+        tags=["Scrapes"],
+        summary="List scrapes",
+        parameters=_PAGE_PARAMS + [_SORT_PARAM],
+    ),
     update=extend_schema(tags=["Scrapes"], summary="Update a scrape"),
     partial_update=extend_schema(tags=["Scrapes"], summary="Partially update a scrape"),
     destroy=extend_schema(tags=["Scrapes"], summary="Delete a scrape"),
@@ -3659,6 +3817,75 @@ class JobPostViewSet(BaseSAViewSet):
 class ScrapeViewSet(BaseSAViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
+
+    def list(self, request):
+        qs = Scrape.objects
+
+        # Sorting
+        sort_param = request.query_params.get("sort")
+        if sort_param:
+            sort_fields = []
+            for field in sort_param.split(","):
+                field = field.strip()
+                if field.startswith("-"):
+                    sort_fields.append(f"-{field[1:]}")
+                else:
+                    sort_fields.append(field)
+            if sort_fields:
+                qs = qs.order_by(*sort_fields)
+        else:
+            # Default: latest first
+            try:
+                Scrape._meta.get_field("created_at")
+                qs = qs.order_by("-created_at")
+            except Exception:
+                qs = qs.order_by("-id")
+
+        # Pagination
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset : offset + page_size])
+
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {
+            "data": data,
+            "meta": {
+                "total": total,
+                "page": page_number,
+                "per_page": page_size,
+                "total_pages": total_pages,
+            },
+        }
+
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"] = {"next": base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())}
+        else:
+            payload["links"] = {"next": None}
+
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def pre_save_payload(self, request, attrs, creating=False):
+        attrs = super().pre_save_payload(request, attrs, creating=creating)
+        if "html" in attrs and attrs["html"] and not attrs.get("job_content"):
+            from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
+            attrs["job_content"] = clean_html_to_markdown(attrs["html"])
+        if attrs.get("job_content"):
+            from job_hunting.lib.scrapers.html_cleaner import strip_agent_chat
+            attrs["job_content"] = strip_agent_chat(attrs["job_content"])
+        if attrs.get("status") == "completed" and not attrs.get("scraped_at"):
+            from django.utils import timezone
+            attrs["scraped_at"] = timezone.now()
+        return attrs
 
     def _sync_associations(self, pk):
         """After an update, ensure company_id mirrors the job post's company."""
@@ -3671,14 +3898,22 @@ class ScrapeViewSet(BaseSAViewSet):
                 scrape.company_id = jp.company_id
                 scrape.save(update_fields=["company_id"])
 
+    def _maybe_trigger_extraction(self, pk):
+        from job_hunting.lib.scraper import _maybe_caddy_extract
+        scrape = Scrape.objects.filter(pk=int(pk)).first()
+        if scrape:
+            _maybe_caddy_extract(scrape)
+
     def update(self, request, pk=None):
         response = super().update(request, pk=pk)
         self._sync_associations(pk)
+        self._maybe_trigger_extraction(pk)
         return response
 
     def partial_update(self, request, pk=None):
         response = super().partial_update(request, pk=pk)
         self._sync_associations(pk)
+        self._maybe_trigger_extraction(pk)
         return response
 
     @extend_schema(
@@ -3717,6 +3952,7 @@ class ScrapeViewSet(BaseSAViewSet):
 
         # Check if scraping is enabled
         if not getattr(settings, "SCRAPING_ENABLED", False):
+            logger.warning("ScrapeViewSet.create: SCRAPING_ENABLED=False, rejecting request")
             return Response(
                 {"errors": [{"detail": "Scraping functionality is disabled"}]},
                 status=status.HTTP_501_NOT_IMPLEMENTED,
@@ -3729,18 +3965,26 @@ class ScrapeViewSet(BaseSAViewSet):
             url = (data["data"].get("attributes") or {}).get("url")
 
         if not url:
+            logger.warning("ScrapeViewSet.create: missing url in request body")
             return Response(
                 {"errors": [{"detail": "URL is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        logger.info("ScrapeViewSet.create url=%s", url)
 
         # Check for existing scrape with the same URL
         existing_scrape = Scrape.objects.filter(url=url).first()
 
         # If there's an existing scrape that's pending or completed, return it
         if existing_scrape:
-            if existing_scrape.status in ("pending", "processing"):
-                # Return the existing pending/processing scrape
+            logger.info(
+                "ScrapeViewSet.create: existing scrape found id=%s status=%s",
+                existing_scrape.id,
+                existing_scrape.status,
+            )
+            if existing_scrape.status in ("pending", "processing", "running"):
+                # Return the existing pending/processing/running scrape
                 scr_ser = self.get_serializer()
                 scrape_resource = scr_ser.to_resource(existing_scrape)
                 return Response(
@@ -3764,8 +4008,10 @@ class ScrapeViewSet(BaseSAViewSet):
                     status=status.HTTP_200_OK,
                 )
             # If failed, we'll create a new scrape below
+            logger.info("ScrapeViewSet.create: existing scrape status=%s, creating new scrape", existing_scrape.status)
 
-        scrape = Scrape.objects.create(url=url, state="pending")
+        scrape = Scrape.objects.create(url=url, status="pending")
+        logger.info("ScrapeViewSet.create: created scrape id=%s", scrape.id)
 
         # Associate with an existing job post (and its company) if the URL matches
         existing_jp = JobPost.objects.filter(link=url).first()
@@ -3773,8 +4019,10 @@ class ScrapeViewSet(BaseSAViewSet):
             scrape.job_post = existing_jp
             scrape.company_id = existing_jp.company_id
             scrape.save()
+            logger.info("ScrapeViewSet.create: linked scrape id=%s to job_post id=%s company_id=%s", scrape.id, existing_jp.id, existing_jp.company_id)
 
-        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3001")
+        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3012")
+        logger.info("ScrapeViewSet.create: dispatching scraper browser_service_url=%s scrape_id=%s", browser_service_url, scrape.id)
         Scraper(browser_service_url, url, scrape_id=scrape.id).dispatch()
 
         scr_ser = self.get_serializer()
@@ -3792,10 +4040,11 @@ class ScrapeViewSet(BaseSAViewSet):
     )
     @action(detail=True, methods=["post"])
     def redo(self, request, pk=None):
-        """Redo a scrape - resets state to pending and starts a new scrape process"""
+        """Redo a scrape - resets status to pending and starts a new scrape process"""
 
         # Check if scraping is enabled
         if not getattr(settings, "SCRAPING_ENABLED", False):
+            logger.warning("ScrapeViewSet.redo: SCRAPING_ENABLED=False, rejecting request")
             return Response(
                 {"errors": [{"detail": "Scraping functionality is disabled"}]},
                 status=status.HTTP_501_NOT_IMPLEMENTED,
@@ -3805,17 +4054,20 @@ class ScrapeViewSet(BaseSAViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
+        logger.info("ScrapeViewSet.redo: id=%s previous_status=%s url=%s", obj.id, obj.status, obj.url)
+
         # Don't allow redo if already pending or processing
-        if obj.status in ("pending", "processing"):
-            return Response(
-                {"errors": [{"detail": f"Scrape is already {obj.status}"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # if obj.status in ("pending", "processing"):
+        #     return Response(
+        #         {"errors": [{"detail": f"Scrape is already {obj.status}"}]},
+        #         status=status.HTTP_400_BAD_REQUEST,
+        #     )
 
         obj.status = "pending"
         obj.save()
 
-        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3001")
+        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3012")
+        logger.info("ScrapeViewSet.redo: dispatching browser_service_url=%s scrape_id=%s", browser_service_url, obj.id)
         Scraper(browser_service_url, obj.url, scrape_id=obj.id).dispatch()
 
         # Return the updated scrape
@@ -3825,6 +4077,46 @@ class ScrapeViewSet(BaseSAViewSet):
             {"data": scrape_resource, "meta": {"message": "Scrape restarted"}},
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @extend_schema(
+        tags=["Scrapes"],
+        summary="Parse scrape content into a JobPost and Company",
+        responses={
+            200: OpenApiResponse(description="Parsed successfully"),
+            404: OpenApiResponse(description="Not found"),
+            422: OpenApiResponse(description="No content to parse"),
+        },
+    )
+    @action(detail=True, methods=["post"])
+    def parse(self, request, pk=None):
+        """Parse a completed scrape's content and create/update the JobPost and Company."""
+        obj = Scrape.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        if not (obj.job_content or obj.html):
+            return Response(
+                {"errors": [{"detail": "Scrape has no content to parse"}]},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        logger.info("ScrapeViewSet.parse: id=%s", obj.id)
+
+        from job_hunting.lib.parsers.generic_parser import GenericParser
+        try:
+            GenericParser().parse(obj)
+        except Exception:
+            logger.exception("ScrapeViewSet.parse: failed id=%s", obj.id)
+            return Response(
+                {"errors": [{"detail": "Parsing failed"}]},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # Reload to pick up updated job_post_id / company_id
+        obj = Scrape.objects.filter(pk=int(pk)).first()
+        scr_ser = self.get_serializer()
+        scrape_resource = scr_ser.to_resource(obj)
+        return Response({"data": scrape_resource})
 
 
 @extend_schema_view(
@@ -4188,6 +4480,9 @@ class CoverLetterViewSet(BaseSAViewSet):
                 {"errors": [{"detail": "Invalid resume, job-post, or company ID"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # id=0 means "no resume" → career-data fallback
+        if resume_id == 0:
+            resume_id = None
 
         resume = Resume.get(resume_id) if resume_id is not None else None
         job_post = (
@@ -4249,18 +4544,6 @@ class CoverLetterViewSet(BaseSAViewSet):
             return Response(payload, status=status.HTTP_201_CREATED)
 
         # AI generation path — create a pending record and dispatch async
-        if resume is None:
-            return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": "Provide 'relationships.resume' when generating content without providing attributes.content"
-                        }
-                    ]
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         if job_post is None:
             return Response(
                 {
@@ -4273,6 +4556,18 @@ class CoverLetterViewSet(BaseSAViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Build career markdown when no resume provided (mirrors score career-data path)
+        career_markdown = None
+        if resume is None:
+            career_data = CareerData.for_user(user_id)
+            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+            career_markdown = prompt_builder.build_from_career_data(career_data)
+            if not career_markdown.strip():
+                return Response(
+                    {"errors": [{"detail": "No career data found for this user. Add favorite resumes or provide a resume relationship."}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         client = get_client(required=False)
         if client is None:
             return Response(
@@ -4282,7 +4577,7 @@ class CoverLetterViewSet(BaseSAViewSet):
 
         cover_letter = CoverLetter.objects.create(
             user_id=user_id,
-            resume_id=resume.id,
+            resume_id=(resume.id if resume else None),
             job_post_id=job_post.id,
             company_id=(company.id if company else None),
             status="pending",
@@ -4293,7 +4588,9 @@ class CoverLetterViewSet(BaseSAViewSet):
             import django
             django.db.close_old_connections()
             try:
-                cl_service = CoverLetterService(client, job_post, resume)
+                cl_service = CoverLetterService(
+                    client, job_post, resume=resume, resume_markdown=career_markdown, user_id=user_id
+                )
                 result = cl_service.generate_cover_letter()
                 CoverLetter.objects.filter(pk=cl_id).update(
                     content=result.content, status="completed"
@@ -4414,7 +4711,13 @@ class CoverLetterViewSet(BaseSAViewSet):
     list=extend_schema(
         tags=["Job Applications"],
         summary="List job applications",
-        parameters=_PAGE_PARAMS + [_SORT_PARAM],
+        parameters=_PAGE_PARAMS + [
+            _SORT_PARAM,
+            _FILTER_APP_QUERY_PARAM,
+            _FILTER_APP_STATUS_PARAM,
+            _FILTER_COMPANY_PARAM,
+            _FILTER_COMPANY_ID_PARAM,
+        ],
     ),
     retrieve=extend_schema(
         tags=["Job Applications"], summary="Retrieve a job application"
@@ -4437,7 +4740,29 @@ class JobApplicationViewSet(BaseSAViewSet):
 
     def list(self, request):
         qs = JobApplication.objects
-        
+
+        company_id_filter = request.query_params.get("filter[company_id]")
+        if company_id_filter is not None:
+            qs = qs.filter(company_id=company_id_filter)
+
+        company_filter = request.query_params.get("filter[company]")
+        if company_filter is not None:
+            qs = qs.filter(company__name__icontains=company_filter)
+
+        status_filter = request.query_params.get("filter[status]")
+        if status_filter is not None:
+            qs = qs.filter(status__icontains=status_filter)
+
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter is not None:
+            qs = qs.filter(
+                Q(job_post__title__icontains=query_filter)
+                | Q(company__name__icontains=query_filter)
+                | Q(company__display_name__icontains=query_filter)
+                | Q(status__icontains=query_filter)
+                | Q(notes__icontains=query_filter)
+            ).distinct()
+
         # Handle sorting
         sort_param = request.query_params.get("sort")
         if sort_param:
@@ -4452,7 +4777,7 @@ class JobApplicationViewSet(BaseSAViewSet):
                     sort_fields.append(field)
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
-        
+
         items = list(qs.all())
         items = self.paginate(items)
         ser = self.get_serializer()
@@ -4462,6 +4787,39 @@ class JobApplicationViewSet(BaseSAViewSet):
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = self._get_obj(pk)
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        # Always include statuses; merge with any additional ?include= rels
+        include_rels = list({*self._parse_include(request), "application-statuses"})
+        payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def create(self, request):
+        response = super().create(request)
+        # Auto-create the initial JobApplicationStatus so every application
+        # has at least one status entry from the moment it is created.
+        if response.status_code == 201:
+            app_id = (response.data.get("data") or {}).get("id")
+            if app_id:
+                app = JobApplication.objects.filter(pk=int(app_id)).first()
+                if app and not JobApplicationStatus.objects.filter(application_id=app.id).exists():
+                    status_label = app.status or "Unvetted"
+                    status_obj, _ = Status.objects.get_or_create(
+                        status=status_label,
+                        defaults={"status_type": "application"},
+                    )
+                    from django.utils import timezone
+                    JobApplicationStatus.objects.create(
+                        application=app,
+                        status=status_obj,
+                        logged_at=timezone.now(),
+                    )
+        return response
 
     def pre_save_payload(self, request, attrs, creating):
         """Automatically set user_id and company_id when creating applications"""
@@ -4539,6 +4897,73 @@ class StatusViewSet(viewsets.ModelViewSet):
     queryset = Status.objects.all()
     serializer_class = StatusSerializer
 
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
+
+        # If a job_application relationship is present, create a JobApplicationStatus
+        app_rel = relationships.get("job_application") or relationships.get("job-application")
+        app_rel_data = (app_rel or {}).get("data") or {}
+        application_id = app_rel_data.get("id")
+
+        if application_id is not None:
+            try:
+                application_id = int(application_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {"errors": [{"detail": "Invalid job_application id"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            application = JobApplication.objects.filter(pk=application_id).first()
+            if not application:
+                return Response(
+                    {"errors": [{"detail": "Job application not found"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            status_label = attrs.get("status", "").strip()
+            if not status_label:
+                return Response(
+                    {"errors": [{"detail": "attributes.status is required"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            status_obj, _ = Status.objects.get_or_create(
+                status=status_label,
+                defaults={"status_type": "application"},
+            )
+
+            from django.utils import timezone
+            note = attrs.get("note")
+            logged_at_raw = attrs.get("logged_at")
+            if logged_at_raw:
+                try:
+                    from dateutil import parser as dateutil_parser
+                    logged_at = dateutil_parser.parse(str(logged_at_raw))
+                except (ValueError, TypeError):
+                    logged_at = timezone.now()
+            else:
+                logged_at = timezone.now()
+
+            app_status = JobApplicationStatus.objects.create(
+                application=application,
+                status=status_obj,
+                note=note,
+                logged_at=logged_at,
+            )
+
+            ser = JobApplicationStatusSerializer()
+            return Response(
+                {"data": ser.to_resource(app_status)},
+                status=status.HTTP_201_CREATED,
+            )
+
+        # No job_application relationship — create a plain Status lookup record
+        return super().create(request)
+
 
 @extend_schema_view(
     list=extend_schema(
@@ -4565,6 +4990,82 @@ class JobApplicationStatusViewSet(BaseSAViewSet):
     model = JobApplicationStatus
     serializer_class = JobApplicationStatusSerializer
 
+    def create(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        relationships = node.get("relationships") or {}
+
+        # Resolve application FK
+        app_rel = (
+            relationships.get("application")
+            or relationships.get("job_application")
+            or relationships.get("job-application")
+        )
+        app_rel_data = (app_rel or {}).get("data") or {}
+        application_id = app_rel_data.get("id")
+        if application_id is None:
+            return Response(
+                {"errors": [{"detail": "relationships.application is required"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            application_id = int(application_id)
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "Invalid application id"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        application = JobApplication.objects.filter(pk=application_id).first()
+        if not application:
+            return Response(
+                {"errors": [{"detail": "Job application not found"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Resolve status: prefer relationship FK, fall back to text label in attributes
+        status_rel = relationships.get("status") or {}
+        status_rel_data = (status_rel or {}).get("data") or {}
+        status_rel_id = status_rel_data.get("id")
+
+        if status_rel_id is not None:
+            status_obj = Status.objects.filter(pk=int(status_rel_id)).first()
+        else:
+            status_label = (attrs.get("status") or "").strip()
+            if not status_label:
+                return Response(
+                    {"errors": [{"detail": "attributes.status or relationships.status is required"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            status_obj, _ = Status.objects.get_or_create(
+                status=status_label,
+                defaults={"status_type": "application"},
+            )
+
+        from django.utils import timezone
+        note = attrs.get("note")
+        logged_at_raw = attrs.get("logged_at")
+        if logged_at_raw:
+            try:
+                from dateutil import parser as dateutil_parser
+                logged_at = dateutil_parser.parse(str(logged_at_raw))
+            except (ValueError, TypeError):
+                logged_at = timezone.now()
+        else:
+            logged_at = timezone.now()
+
+        app_status = JobApplicationStatus.objects.create(
+            application=application,
+            status=status_obj,
+            note=note,
+            logged_at=logged_at,
+        )
+        ser = JobApplicationStatusSerializer()
+        return Response(
+            {"data": ser.to_resource(app_status)},
+            status=status.HTTP_201_CREATED,
+        )
+
 
 @extend_schema_view(
     update=extend_schema(tags=["Questions"], summary="Update a question"),
@@ -4588,11 +5089,33 @@ class QuestionViewSet(BaseSAViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        items = list(Question.objects.all())
-        items = self.paginate(items)
+        qs = Question.objects
+
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter:
+            qs = qs.filter(content__icontains=query_filter)
+
+        qs = qs.order_by("-id")
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset: offset + page_size])
+
         ser = self.get_serializer()
-        data = [ser.to_resource(o) for o in items]
-        payload = {"data": data}
+        payload = {
+            "data": [ser.to_resource(o) for o in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        }
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"] = {"next": base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())}
+        else:
+            payload["links"] = {"next": None}
+
         include_rels = self._parse_include(request) or ["company"]
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
@@ -4745,6 +5268,48 @@ class AnswerViewSet(BaseSAViewSet):
 
     @extend_schema(
         tags=["Answers"],
+        summary="List answers",
+        parameters=_PAGE_PARAMS,
+        responses={200: _JSONAPI_LIST},
+    )
+    def list(self, request):
+        qs = Answer.objects
+
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter:
+            qs = qs.filter(
+                Q(content__icontains=query_filter) |
+                Q(question__content__icontains=query_filter)
+            ).distinct()
+
+        qs = qs.order_by("-id")
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset: offset + page_size])
+
+        ser = self.get_serializer()
+        payload = {
+            "data": [ser.to_resource(o) for o in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        }
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"] = {"next": base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())}
+        else:
+            payload["links"] = {"next": None}
+
+        include_rels = self._parse_include(request) or ["question"]
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    @extend_schema(
+        tags=["Answers"],
         summary="Create an answer (set ai_assist=true to auto-generate content via AI)",
         request=inline_serializer(
             name="AnswerCreateRequest",
@@ -4860,6 +5425,29 @@ class AnswerViewSet(BaseSAViewSet):
 
         ai_assist = _to_bool(ai_flag_raw)
 
+        # Resolve optional resume_id — 0 or absent means use career-data
+        resume_id_raw = (
+            attrs.get("resume_id")
+            or _first_id(relationships.get("resume") or relationships.get("resumes"))
+            or attrs_node.get("resume_id") or attrs_node.get("resumeId")
+            or node.get("resume_id") or data.get("resume_id")
+        )
+        try:
+            resume_id_int = int(resume_id_raw) if resume_id_raw is not None else 0
+        except (TypeError, ValueError):
+            resume_id_int = 0
+
+        answer_career_markdown = None
+        if resume_id_int:
+            answer_resume = Resume.objects.filter(pk=resume_id_int).first()
+            if not answer_resume:
+                return Response({"errors": [{"detail": "Resume not found"}]}, status=400)
+            answer_career_markdown = DbExportService().resume_markdown_export(answer_resume)
+        else:
+            career_data = CareerData.for_user(request.user.id)
+            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+            answer_career_markdown = prompt_builder.build_from_career_data(career_data) or None
+
         if not content and ai_assist:
             # AI generation — create a pending record and dispatch async
             client = get_client(required=False)
@@ -4872,22 +5460,30 @@ class AnswerViewSet(BaseSAViewSet):
             obj = Answer.objects.create(question_id=question.id, status="pending")
             ans_id = obj.id
             captured_prompt = injected_prompt
+            captured_career_markdown = answer_career_markdown
 
             def _generate():
                 import django
                 django.db.close_old_connections()
+                logger.info("AnswerViewSet._generate: start ans_id=%s question_id=%s", ans_id, question.id)
                 try:
                     svc = AnswerService(client)
+                    logger.info("AnswerViewSet._generate: calling generate_answer ans_id=%s injected_prompt=%r", ans_id, captured_prompt)
                     result = svc.generate_answer(
                         question=question,
                         save=False,
                         injected_prompt=captured_prompt,
+                        career_markdown=captured_career_markdown,
                     )
+                    logger.info("AnswerViewSet._generate: got result type=%s ans_id=%s", type(result).__name__, ans_id)
                     generated_content = result.content if isinstance(result, Answer) else str(result or "")
+                    logger.info("AnswerViewSet._generate: saving content len=%s ans_id=%s", len(generated_content) if generated_content else 0, ans_id)
                     Answer.objects.filter(pk=ans_id).update(
                         content=generated_content, status="completed"
                     )
+                    logger.info("AnswerViewSet._generate: completed ans_id=%s", ans_id)
                 except Exception:
+                    logger.exception("AnswerViewSet._generate: failed ans_id=%s", ans_id)
                     Answer.objects.filter(pk=ans_id).update(status="failed")
 
             import threading
@@ -5774,6 +6370,41 @@ class ApiKeyViewSet(BaseSAViewSet):
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         return Response(payload)
+
+
+@extend_schema_view(
+    list=extend_schema(tags=["Projects"], summary="List projects"),
+    retrieve=extend_schema(tags=["Projects"], summary="Retrieve a project"),
+    create=extend_schema(tags=["Projects"], summary="Create a project"),
+    update=extend_schema(tags=["Projects"], summary="Update a project"),
+    partial_update=extend_schema(tags=["Projects"], summary="Partial update a project"),
+    destroy=extend_schema(tags=["Projects"], summary="Delete a project"),
+)
+class ProjectViewSet(BaseSAViewSet):
+    model = Project
+    serializer_class = ProjectSerializer
+
+    @extend_schema(
+        tags=["Projects"],
+        summary="List descriptions for a project",
+        responses={200: _JSONAPI_LIST},
+    )
+    @action(detail=True, methods=["get"])
+    def descriptions(self, request, pk=None):
+        obj = Project.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = DescriptionSerializer()
+        ser.set_parent_context("project", obj.id, "descriptions")
+        desc_ids = list(
+            ProjectDescription.objects.filter(project_id=obj.id)
+            .order_by("order")
+            .values_list("description_id", flat=True)
+        )
+        desc_map = {d.id: d for d in Description.objects.filter(pk__in=desc_ids)}
+        items = [desc_map[did] for did in desc_ids if did in desc_map]
+        data = [ser.to_resource(d) for d in items]
+        return Response({"data": data})
 
 
 @extend_schema(

@@ -18,6 +18,7 @@ class JobApplicationStatus(GetMixin, models.Model):
         db_column="status_id",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    logged_at = models.DateTimeField(null=True, blank=True)
     note = models.TextField(null=True, blank=True)
 
     class Meta:

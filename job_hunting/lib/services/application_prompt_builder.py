@@ -123,13 +123,16 @@ class ApplicationPromptBuilder:
 
         return "\n".join(lines).strip()
 
-    def _qas_text(self, answer):
-        if not answer:
+    def _qas_text(self, qas):
+        if not qas:
             return ""
         lines = []
-        lines.append(f"Q: {answer.question.content}")
-        lines.append(f"A: {answer.content}")
-        lines.append("")  # Empty line between Q&A pairs
+        for qa in qas:
+            q_text = qa.get("question", "") if isinstance(qa, dict) else getattr(getattr(qa, "question", None), "content", "")
+            a_text = qa.get("answer", "") if isinstance(qa, dict) else getattr(qa, "content", "")
+            lines.append(f"Q: {q_text}")
+            lines.append(f"A: {a_text}")
+            lines.append("")
         return "\n".join(lines).strip()
 
     def _questions_text(self, questions):
@@ -169,8 +172,7 @@ class ApplicationPromptBuilder:
             sections.append(self._resume_text(resume))
 
         sections.append("#Prior Questions and Answers")
-        for answer in context.answers:
-            sections.append(self._qas_text(answer))
+        sections.append(self._qas_text(context.answers))
 
         sections.append("#Coverletters")
         for cover_letter in context.cover_letters:
@@ -218,9 +220,11 @@ class ApplicationPromptBuilder:
                     sections.append(f"## Resumes Summary\n{rts}")
         else:
             # Fallback to single resume if provided
-            rt = self._resume_text(context.get("resume"))
-            if rt:
-                sections.append(f"## Resume Summary\n{rt}")
+            single_resume = context.get("resume")
+            if single_resume:
+                rt = self._resume_text(single_resume)
+                if rt:
+                    sections.append(f"## Resume Summary\n{rt}")
 
         # Cover Letters
         cover_letters_text = self._cover_letters_text(context["cover_letters"])

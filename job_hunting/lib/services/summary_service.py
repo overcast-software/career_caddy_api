@@ -8,32 +8,40 @@ from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 class SummaryService:
 
-    def __init__(self, ai_client, job: JobPost, resume: Resume):
+    def __init__(self, ai_client, job: JobPost, resume: Resume = None, resume_markdown: str = None, user_id: int = None):
         self.job = job
         self.resume = resume
+        self._resume_markdown = resume_markdown
+        self._user_id = user_id
         self.env = Environment(loader=FileSystemLoader("templates"))
         self.ai_client = ai_client
 
     def generate_summary(self) -> Summary:
-        exporter = DbExportService()
-        resume_markdown = exporter.resume_markdown_export(self.resume)
+        if self._resume_markdown is not None:
+            resume_markdown = self._resume_markdown
+        else:
+            exporter = DbExportService()
+            resume_markdown = exporter.resume_markdown_export(self.resume)
+
+        user_id = self._user_id or (self.resume.user_id if self.resume else None)
+        resume_id = self.resume.id if self.resume else None
 
         template = self.env.get_template("summary_service_prompt.j2")
 
         prompt = template.render(
             job_description=self.job.description, resume=resume_markdown
         )
-        
+
         write_prompt_to_file(
             prompt,
             kind="summary",
             identifiers={
                 "job_post_id": self.job.id,
-                "resume_id": self.resume.id,
-                "user_id": self.resume.user_id,
+                "resume_id": resume_id,
+                "user_id": user_id,
             },
         )
-        
+
         response = self.ai_client.chat.completions.create(
             model="gpt-5",
             messages=[
@@ -51,6 +59,6 @@ class SummaryService:
         content = response.choices[0].message.content.strip()
         return Summary.objects.create(
             job_post_id=self.job.id,
-            user_id=self.resume.user_id,
+            user_id=user_id,
             content=content,
         )

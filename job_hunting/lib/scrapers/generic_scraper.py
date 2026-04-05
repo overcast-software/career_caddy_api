@@ -1,6 +1,5 @@
-# DO we want?
 from job_hunting.models import Scrape
-from markdownify import markdownify as md
+from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 
 
 class GenericScraper:
@@ -25,8 +24,6 @@ class GenericScraper:
                 wait_until="domcontentloaded",
             )
 
-        # convert that shit to markdown
-        markdown_text = md(html_content)
-        scrape.job_content = markdown_text
+        scrape.job_content = clean_html_to_markdown(html_content)
         scrape.save()
         return scrape

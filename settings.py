@@ -165,3 +165,17 @@ elif "DATABASES" not in globals():
 # Allow overriding DEBUG from env even if base settings defined it
 if "DEBUG" in os.environ:
     DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
+
+# Browser service configuration
+BROWSER_SERVICE_URL = (
+    os.getenv("BROWSER_SERVICE_URL")
+    or globals().get("BROWSER_SERVICE_URL")
+    or "http://localhost:3001"
+)
+
+SCRAPING_ENABLED = (
+    (os.getenv("SCRAPING_ENABLED") or str(globals().get("SCRAPING_ENABLED", "true")))
+    .strip()
+    .lower()
+    in ("1", "true", "yes", "y", "on")
+)

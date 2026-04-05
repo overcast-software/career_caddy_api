@@ -5,16 +5,23 @@ from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
 class CoverLetterService:
-    def __init__(self, ai_client, job_post, resume):
+    def __init__(self, ai_client, job_post, resume=None, resume_markdown=None, user_id=None):
         self.job_post = job_post
         self.resume = resume
         self.ai_client = ai_client
+        self._resume_markdown = resume_markdown
+        self._user_id = user_id
 
     def generate_cover_letter(self):
         env = Environment(loader=FileSystemLoader("templates"))
         tmpl = env.get_template("cover_letter_prompt.j2")
-        exporter = DbExportService()
-        resume_markdown = exporter.resume_markdown_export(self.resume)
+
+        if self._resume_markdown is not None:
+            resume_markdown = self._resume_markdown
+        else:
+            exporter = DbExportService()
+            resume_markdown = exporter.resume_markdown_export(self.resume)
+
         prompt = tmpl.render(
             job_title=self.job_post.title,
             company_name=getattr(self.job_post.company, "name", ""),
@@ -22,13 +29,16 @@ class CoverLetterService:
             resume=resume_markdown,
         )
 
+        user_id = self._user_id or (self.resume.user.id if self.resume else None)
+        resume_id = self.resume.id if self.resume else None
+
         write_prompt_to_file(
             prompt,
             kind="cover_letter",
             identifiers={
                 "job_post_id": self.job_post.id,
-                "resume_id": self.resume.id,
-                "user_id": self.resume.user.id,
+                "resume_id": resume_id,
+                "user_id": user_id,
             },
         )
 
@@ -47,8 +57,8 @@ class CoverLetterService:
 
         cover_letter, created = CoverLetter.objects.get_or_create(
             content=cover_letter_content,
-            user_id=self.resume.user.id,
-            resume_id=self.resume.id,
+            user_id=user_id,
+            resume_id=resume_id,
             job_post_id=self.job_post.id,
         )
         return cover_letter

@@ -33,6 +33,17 @@ class JobPost(GetMixin, models.Model):
     class Meta:
         db_table = "job_post"
 
+    @property
+    def top_score(self):
+        """Highest integer score value for this job post, or None."""
+        best = getattr(self, "_top_score", None) or self.scores.order_by("-score").first()
+        return best.score if best is not None else None
+
+    @property
+    def top_score_record(self):
+        """Score object with the highest score value."""
+        return getattr(self, "_top_score", None) or self.scores.order_by("-score").first()
+
     @classmethod
     def from_json(cls, job_dict, **kwargs):
         """Create or retrieve a JobPost from a parsed job dict."""
