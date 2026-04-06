@@ -320,6 +320,7 @@ ALLOW_BOOTSTRAP_SUPERUSER = (
 )
 BOOTSTRAP_TOKEN = os.environ.get("BOOTSTRAP_TOKEN", "")
 SCRAPING_ENABLED = os.environ.get("SCRAPING_ENABLED", "False") == "True"
+BROWSER_SERVICE_URL = os.environ.get("BROWSER_SERVICE_URL", "http://localhost:3012")
 CADDY_AGENT_URL = os.environ.get("CADDY_AGENT_URL", "http://localhost:3011")
 USE_CADDY_AGENT_EXTRACTION = os.environ.get("USE_CADDY_AGENT_EXTRACTION", "").lower() in ("1", "true", "yes")
 

@@ -90,9 +90,11 @@ class MCPClient:
                     raise ValueError("MCP create_tab did not return a tab_id")
 
                 logger.info("MCP flow: navigate_and_snapshot tab_id=%s url=%s", tab_id, url)
+                nav_res = None
                 try:
                     # 2) navigate_and_snapshot
-                    await session.call_tool(self.nav_snapshot_tool, {"tab_id": tab_id, "url": url})
+                    nav_res = await session.call_tool(self.nav_snapshot_tool, {"tab_id": tab_id, "url": url})
+                    logger.debug("MCP navigate_and_snapshot result=%s", self._summarize_result(nav_res))
                 finally:
                     # 3) close_tab (best-effort)
                     logger.info("MCP flow: close_tab tab_id=%s", tab_id)
@@ -101,8 +103,22 @@ class MCPClient:
                     except Exception:
                         logger.exception("MCP flow: close_tab failed (tab_id=%s)", tab_id)
                 logger.info("MCP flow: completed url=%s tab_id=%s", url, tab_id)
-                # Fire-and-forget semantics for callers
-                return True
+                return self._extract_content(nav_res) if nav_res is not None else None
+
+    def _extract_content(self, result: Any) -> Optional[str]:
+        """Extract job content from navigate_and_snapshot result.
+        The tool returns JSON: {"title": ..., "url": ..., "status": ..., "content": "page text"}.
+        Falls back to raw text if JSON parsing fails.
+        """
+        import json as _json
+        raw = self._first_text(result)
+        if not raw:
+            return None
+        try:
+            data = _json.loads(raw)
+            return data.get("content") or raw
+        except Exception:
+            return raw
 
     def _first_text(self, result: Any) -> Optional[str]:
         content = getattr(result, "content", None)

@@ -93,8 +93,29 @@ class Scraper:
                 sse_url = os.getenv("BROWSER_MCP_SSE_URL", "http://0.0.0.0:3004/sse")
                 logger.info("MCP dispatch -> SSE %s (url=%s, scrape_id=%s)", sse_url, url, scrape_id)
                 client = get_browser_mcp_client()
-                client.scrape(url, scrape_id)
-                logger.info("MCP dispatch submitted successfully (url=%s, scrape_id=%s)", url, scrape_id)
+                job_content = client.scrape(url, scrape_id)
+                logger.info("MCP dispatch received response len=%s url=%s scrape_id=%s", len(job_content) if job_content else 0, url, scrape_id)
+                if job_content:
+                    from job_hunting.lib.scrapers.html_cleaner import strip_agent_chat
+                    job_content = strip_agent_chat(job_content)
+                    logger.info("MCP dispatch stripped response len=%s url=%s scrape_id=%s", len(job_content), url, scrape_id)
+                if scrape_id is not None and job_content:
+                    try:
+                        from django.utils import timezone
+                        from job_hunting.models.scrape import Scrape
+                        scrape = Scrape.objects.filter(pk=scrape_id).first()
+                        if scrape:
+                            scrape.job_content = job_content
+                            scrape.status = "completed"
+                            scrape.scraped_at = timezone.now()
+                            scrape.save(update_fields=["job_content", "status", "scraped_at"])
+                            logger.info("MCP dispatch: stored job_content on scrape id=%s", scrape_id)
+                            _maybe_caddy_extract(scrape)
+                    except Exception:
+                        logger.exception("MCP dispatch: failed to store job_content scrape_id=%s", scrape_id)
+                elif scrape_id is not None:
+                    _set_scrape_status(scrape_id, "failed")
+                    logger.warning("MCP dispatch: no content returned url=%s scrape_id=%s", url, scrape_id)
             except Exception:
                 logger.exception("MCP dispatch failed")
 
