@@ -4869,6 +4869,27 @@ class JobApplicationViewSet(BaseSAViewSet):
                     )
         return response
 
+    def _upsert(self, request, pk, partial=False):
+        obj = self._get_obj(pk)
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        old_status = obj.status
+        response = super()._upsert(request, pk, partial=partial)
+        if response.status_code == 200:
+            obj.refresh_from_db()
+            if obj.status and obj.status != old_status:
+                from django.utils import timezone
+                status_obj, _ = Status.objects.get_or_create(
+                    status=obj.status,
+                    defaults={"status_type": "application"},
+                )
+                JobApplicationStatus.objects.create(
+                    application=obj,
+                    status=status_obj,
+                    logged_at=timezone.now(),
+                )
+        return response
+
     def pre_save_payload(self, request, attrs, creating):
         """Automatically set user_id and company_id when creating applications"""
         if creating:
