@@ -3700,6 +3700,54 @@ class JobPostViewSet(BaseSAViewSet):
     @extend_schema(
         methods=["GET"],
         tags=["Job Posts"],
+        summary="List questions for a job post",
+        responses={200: _JSONAPI_LIST},
+    )
+    @extend_schema(
+        methods=["POST"],
+        tags=["Job Posts"],
+        summary="Create a question for a job post (company auto-set from job post)",
+        request=_JSONAPI_WRITE,
+        responses={201: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")},
+    )
+    @action(detail=True, methods=["get", "post"])
+    def questions(self, request, pk=None):
+        job_post = JobPost.objects.filter(pk=int(pk)).first()
+        if not job_post:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        ser = QuestionSerializer()
+
+        if request.method.lower() == "post":
+            try:
+                attrs = ser.parse_payload(request.data)
+            except ValueError as e:
+                return Response({"errors": [{"detail": str(e)}]}, status=400)
+            attrs["created_by_id"] = request.user.id
+            attrs.setdefault("company_id", job_post.company_id)
+            attrs.setdefault("job_post_id", job_post.id)
+            safe_attrs = {
+                k: v
+                for k, v in attrs.items()
+                if k in ("content", "favorite", "application_id", "company_id", "created_by_id")
+            }
+            obj = Question.objects.create(**safe_attrs)
+            include_rels = self._parse_include(request)
+            payload = {"data": ser.to_resource(obj)}
+            if include_rels:
+                payload["included"] = self._build_included([obj], include_rels, request, primary_serializer=ser)
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        items = list(Question.objects.filter(application__job_post_id=int(pk)))
+        include_rels = self._parse_include(request)
+        payload = {"data": [ser.to_resource(i) for i in items]}
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request, primary_serializer=ser)
+        return Response(payload)
+
+    @extend_schema(
+        methods=["GET"],
+        tags=["Job Posts"],
         summary="List summaries for a job post",
         responses={200: _JSONAPI_LIST},
     )
@@ -5156,12 +5204,20 @@ class QuestionViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
         attrs = self.pre_save_payload(request, attrs, creating=True)
+        # Backfill company_id and job_post_id from the application if not supplied
+        if attrs.get("application_id") and (
+            not attrs.get("company_id") or not attrs.get("job_post_id")
+        ):
+            app = JobApplication.objects.filter(pk=attrs["application_id"]).first()
+            if app:
+                attrs.setdefault("company_id", app.company_id)
+                attrs.setdefault("job_post_id", app.job_post_id)
         # Remove SA-incompatible attrs; keep only model field names
         safe_attrs = {
             k: v
             for k, v in attrs.items()
             if k
-            in ("content", "favorite", "application_id", "company_id", "created_by_id")
+            in ("content", "favorite", "application_id", "company_id", "created_by_id", "job_post_id")
         }
         obj = Question.objects.create(**safe_attrs)
 

@@ -27,20 +27,16 @@ class Question(GetMixin, models.Model):
         db_column="created_by_id",
         related_name="questions",
     )
+    job_post = models.ForeignKey(
+        "JobPost",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="direct_questions",
+    )
     content = models.TextField(null=True, blank=True)
     favorite = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "question"
-
-    @property
-    def job_post(self):
-        """Get the job post for this question through application."""
-        if self.application_id:
-            try:
-                if self.application and self.application.job_post_id:
-                    return self.application.job_post
-            except Exception:
-                pass
-        return None

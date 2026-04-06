@@ -1153,6 +1153,8 @@ class QuestionSerializer(BaseSASerializer):
         "job_applications": "application_id",
         "company": "company_id",
         "user": "created_by_id",
+        "job-post": "job_post_id",
+        "job_post": "job_post_id",
     }
 
     def to_resource(self, obj):
