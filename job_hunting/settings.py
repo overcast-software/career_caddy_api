@@ -96,14 +96,18 @@ ROOT_URLCONF = "job_hunting.urls"
 
 # Database configuration with dj-database-url
 DATABASE_URL = os.environ.get("DATABASE_URL")
+# Persistent DB connections avoid the overhead of opening a new connection per
+# request. 60s is a safe default; set CONN_MAX_AGE=0 to disable.
+_conn_max_age = int(os.environ.get("CONN_MAX_AGE", "60"))
 if DATABASE_URL:
-    DATABASES = {"default": dj_database_url.parse(DATABASE_URL)}
+    DATABASES = {"default": dj_database_url.parse(DATABASE_URL, conn_max_age=_conn_max_age)}
 else:
     # Default to localhost Postgres in development
     if DEBUG:
         DATABASES = {
             "default": dj_database_url.parse(
-                "postgresql://postgres:postgres@localhost:5432/job_hunting"
+                "postgresql://postgres:postgres@localhost:5432/job_hunting",
+                conn_max_age=_conn_max_age,
             )
         }
     else:
