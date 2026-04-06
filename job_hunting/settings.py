@@ -1,5 +1,8 @@
 import os
 import sys
+from datetime import timedelta
+
+import dj_database_url
 from corsheaders.defaults import default_headers, default_methods
 from django.core.exceptions import ImproperlyConfigured
 
@@ -92,8 +95,6 @@ INSTALLED_APPS = [
 ROOT_URLCONF = "job_hunting.urls"
 
 # Database configuration with dj-database-url
-import dj_database_url
-
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
     DATABASES = {"default": dj_database_url.parse(DATABASE_URL)}
@@ -297,8 +298,6 @@ else:
         CSRF_COOKIE_SECURE = False
 
 # SimpleJWT Configuration
-from datetime import timedelta
-
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(
         minutes=int(os.environ.get("JWT_ACCESS_TOKEN_LIFETIME_MINUTES", "60"))

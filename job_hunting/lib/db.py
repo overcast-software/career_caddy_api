@@ -142,7 +142,7 @@ def init_sqlalchemy():
             from sqlalchemy.engine.url import make_url
             parsed_url = make_url(db_url)
             drivername = parsed_url.drivername or "unknown"
-        except:
+        except Exception:
             pass
         
         error_msg = f"Failed to initialize SQLAlchemy (dialect: {drivername}): {e}"

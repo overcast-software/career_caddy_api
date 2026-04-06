@@ -12,7 +12,7 @@ class JobScorer:
     def __init__(self, client=None, agent=None):
         self.client = client
         self.agent = agent
-        self.env = Environment(loader=FileSystemLoader("templates"))
+        self.env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
 
     def get_agent(self) -> Agent:
         if self.agent:

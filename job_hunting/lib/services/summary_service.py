@@ -13,7 +13,7 @@ class SummaryService:
         self.resume = resume
         self._resume_markdown = resume_markdown
         self._user_id = user_id
-        self.env = Environment(loader=FileSystemLoader("templates"))
+        self.env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         self.ai_client = ai_client
 
     def generate_summary(self) -> Summary:

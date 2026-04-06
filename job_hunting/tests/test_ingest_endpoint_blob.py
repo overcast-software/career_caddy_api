@@ -49,7 +49,7 @@ class TestIngestEndpointBlob(APITestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
         # Create a test resume
-        self.resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/test.docx")
+        self.resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/test.docx")  # nosec B108 - dummy path stored in DB, not a real file op
 
     def _obtain_jwt(self, username, password):
         resp = self.client.post(

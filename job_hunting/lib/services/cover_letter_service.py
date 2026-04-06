@@ -13,7 +13,7 @@ class CoverLetterService:
         self._user_id = user_id
 
     def generate_cover_letter(self):
-        env = Environment(loader=FileSystemLoader("templates"))
+        env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         tmpl = env.get_template("cover_letter_prompt.j2")
 
         if self._resume_markdown is not None:

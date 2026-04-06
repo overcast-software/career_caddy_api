@@ -29,7 +29,7 @@ class ApplicationPromptBuilder:
         return str(val).strip()
 
     def _resume_text(self, resume):
-        env = Environment(loader=FileSystemLoader("templates"))
+        env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         template = env.get_template("resume_markdown.j2")
         if not resume:
             raise ValueError("Resume cannot be None")

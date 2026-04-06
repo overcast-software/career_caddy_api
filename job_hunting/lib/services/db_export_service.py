@@ -11,7 +11,7 @@ class DbExportService:
     """
 
     def __init__(self):
-        self.env = Environment(loader=FileSystemLoader("templates"))
+        self.env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
 
     def _build_skills_list(self, resume):
         """Build a normalized list of skills for the resume, preferring active skills."""

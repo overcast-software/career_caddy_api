@@ -97,7 +97,7 @@ class JSONAPITests(APITransactionTestCase):
         payload = {
             "data": {
                 "type": "resumes",
-                "attributes": {"file_path": "/tmp/r.txt"},
+                "attributes": {"file_path": "/tmp/r.txt"},  # nosec B108 - dummy path stored in DB, not a real file op
                 "relationships": {
                     "user": {"data": {"type": "users", "id": str(self.user.id)}}
                 },
@@ -144,7 +144,7 @@ class JSONAPITests(APITransactionTestCase):
         company = Company.objects.create(name="Globex", display_name="Globex Inc")
 
         # Resume owned by authenticated Django user
-        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/eve.txt")
+        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/eve.txt")  # nosec B108 - dummy path stored in DB, not a real file op
 
         job = JobPost.objects.create(title="Analyst", description="Analyze", company=company, created_by=self.user)
 
@@ -218,7 +218,7 @@ class JSONAPITests(APITransactionTestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_resume_scoped_cover_letters_and_applications(self):
-        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/dana.txt")
+        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/dana.txt")  # nosec B108 - dummy path stored in DB, not a real file op
 
         company = Company.objects.create(name="Umbrella", display_name="Umbrella Corp")
         job = JobPost.objects.create(title="Security", description="Keep safe", company=company, created_by=self.user)
@@ -251,7 +251,7 @@ class JSONAPITests(APITransactionTestCase):
         self.assertEqual(resp.data["data"][0]["type"], "job-application")
 
     def test_user_scoped_scores(self):
-        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/r.txt")
+        resume = Resume.objects.create(user_id=self.user.id, file_path="/tmp/r.txt")  # nosec B108 - dummy path stored in DB, not a real file op
 
         company = Company.objects.create(name="Hooli", display_name="Hooli Inc")
         job = JobPost.objects.create(title="Dev", description="Code", company=company, created_by=self.user)

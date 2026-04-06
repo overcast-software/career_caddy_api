@@ -4595,7 +4595,7 @@ class CoverLetterViewSet(BaseSAViewSet):
                 CoverLetter.objects.filter(pk=cl_id).update(
                     content=result.content, status="completed"
                 )
-            except Exception as e:
+            except Exception:
                 CoverLetter.objects.filter(pk=cl_id).update(status="failed")
 
         import threading
