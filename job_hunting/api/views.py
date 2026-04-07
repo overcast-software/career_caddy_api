@@ -666,6 +666,7 @@ class BaseSAViewSet(viewsets.ViewSet):
                     continue
 
                 rel_ser = ser_cls()
+                rel_ser.request = request
                 # Provide parent context so serializers can customize included resources
                 if hasattr(rel_ser, "set_parent_context"):
                     rel_ser.set_parent_context(
@@ -4250,7 +4251,10 @@ class CompanyViewSet(BaseSAViewSet):
         sort_param = request.query_params.get("sort", "relevant")
         if sort_param in ("relevant", "-relevant"):
             qs = qs.annotate(
-                latest_job_post=Max("job_posts__created_at")
+                latest_job_post=Max(
+                    "job_posts__created_at",
+                    filter=Q(job_posts__created_by_id=request.user.id),
+                )
             ).order_by("-latest_job_post")
         elif sort_param:
             sort_fields = []
@@ -4347,7 +4351,13 @@ class CompanyViewSet(BaseSAViewSet):
     def job_posts(self, request, pk=None):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        posts = list(JobPost.objects.filter(company_id=int(pk)))
+        posts = list(
+            JobPost.objects.filter(company_id=int(pk)).filter(
+                Q(created_by_id=request.user.id) |
+                Q(applications__user_id=request.user.id) |
+                Q(scores__user_id=request.user.id)
+            ).distinct()
+        )
         data = [JobPostSerializer().to_resource(j) for j in posts]
         return Response({"data": data})
 
@@ -4360,7 +4370,7 @@ class CompanyViewSet(BaseSAViewSet):
     def applications(self, request, pk=None):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(JobApplication.objects.filter(company_id=int(pk)))
+        apps = list(JobApplication.objects.filter(company_id=int(pk), user_id=request.user.id))
         data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 

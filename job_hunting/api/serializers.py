@@ -3,6 +3,7 @@ from typing import Any, Dict, List
 
 import dateparser
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from rest_framework import serializers
 
 from job_hunting.models import (
@@ -687,10 +688,22 @@ class CompanySerializer(BaseSASerializer):
     }
 
     def get_related(self, obj, rel_name):
+        request = getattr(self, "request", None)
+        user_id = getattr(getattr(request, "user", None), "id", None) if request else None
         if rel_name == "job-posts":
-            return "job-post", list(JobPost.objects.filter(company_id=obj.id))
+            qs = JobPost.objects.filter(company_id=obj.id)
+            if user_id:
+                qs = qs.filter(
+                    Q(created_by_id=user_id) |
+                    Q(applications__user_id=user_id) |
+                    Q(scores__user_id=user_id)
+                ).distinct()
+            return "job-post", list(qs)
         elif rel_name == "job-applications":
-            return "job-application", list(JobApplication.objects.filter(company_id=obj.id))
+            qs = JobApplication.objects.filter(company_id=obj.id)
+            if user_id:
+                qs = qs.filter(user_id=user_id)
+            return "job-application", list(qs)
         return None, []
 
 
