@@ -3596,11 +3596,11 @@ class JobPostViewSet(BaseSAViewSet):
             return Response(
                 {"errors": [{"detail": v} for v in date_errors.values()]}, status=400
             )
-        if not attrs.get("posted_date"):
-            from datetime import date
-            attrs["posted_date"] = date.today()
         obj = JobPost(**attrs)
         obj.save()
+        if not obj.posted_date:
+            obj.posted_date = obj.created_at.date()
+            obj.save(update_fields=["posted_date"])
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
@@ -5164,11 +5164,25 @@ class QuestionViewSet(BaseSAViewSet):
         if query_filter:
             qs = qs.filter(content__icontains=query_filter)
 
+        job_post_filter = request.query_params.get("filter[job_post_id]")
+        if job_post_filter:
+            qs = qs.filter(job_post_id=job_post_filter)
+
+        application_filter = request.query_params.get("filter[application_id]")
+        if application_filter:
+            qs = qs.filter(application_id=application_filter)
+
         qs = qs.order_by("-id")
         total = qs.count()
         page_number, page_size = self._page_params()
         total_pages = math.ceil(total / page_size) if page_size else 1
         offset = (page_number - 1) * page_size
+
+        include_rels = self._parse_include(request) or ["company"]
+        # Prefetch answers in-bulk to avoid N+1 when include=answers is requested
+        if "answers" in include_rels or "answer" in include_rels:
+            qs = qs.prefetch_related("answers")
+
         items = list(qs.all()[offset: offset + page_size])
 
         ser = self.get_serializer()
@@ -5185,7 +5199,6 @@ class QuestionViewSet(BaseSAViewSet):
         else:
             payload["links"] = {"next": None}
 
-        include_rels = self._parse_include(request) or ["company"]
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
@@ -5197,12 +5210,15 @@ class QuestionViewSet(BaseSAViewSet):
         responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")},
     )
     def retrieve(self, request, pk=None):
-        obj = Question.objects.filter(pk=pk).first()
+        include_rels = self._parse_include(request) or ["company"]
+        qs = Question.objects
+        if "answers" in include_rels or "answer" in include_rels:
+            qs = qs.prefetch_related("answers")
+        obj = qs.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
-        include_rels = self._parse_include(request) or ["company"]
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
@@ -5358,6 +5374,10 @@ class AnswerViewSet(BaseSAViewSet):
                 Q(content__icontains=query_filter) |
                 Q(question__content__icontains=query_filter)
             ).distinct()
+
+        question_filter = request.query_params.get("filter[question_id]")
+        if question_filter:
+            qs = qs.filter(question_id=question_filter)
 
         qs = qs.order_by("-id")
         total = qs.count()
