@@ -297,7 +297,7 @@ class IngestResume:
                 ResumeSummary.ensure_single_active_for_resume(self.db_resume.id)
 
         print("Creating experiences...")
-        for exp_data in parsed_resume.experiences:
+        for exp_data in (parsed_resume.experiences or []):
             # exp_data.company may be a CompanyOut pydantic model, a dict, or a plain string.
             comp = getattr(exp_data, "company", None)
             company_name = None
@@ -334,7 +334,7 @@ class IngestResume:
             print("*" * 88)
 
             # Create experience descriptions
-            for bullet in exp_data.bullets:
+            for bullet in (exp_data.bullets or []):
                 print(bullet)
                 desc, _ = Description.objects.get_or_create(content=bullet)
                 ExperienceDescription.objects.get_or_create(
@@ -342,7 +342,7 @@ class IngestResume:
                 )
 
         print("Creating education...")
-        for edu_data in parsed_resume.education:
+        for edu_data in (parsed_resume.education or []):
             education = Education.objects.create(
                 institution=edu_data.institution,
                 degree=edu_data.degree,
@@ -354,7 +354,7 @@ class IngestResume:
             )
 
         print("Creating projects...")
-        for idx, proj_data in enumerate(parsed_resume.projects):
+        for idx, proj_data in enumerate(parsed_resume.projects or []):
             project = Project(
                 title=proj_data.title,
                 start_date=self.parse_date(proj_data.start_date),
@@ -371,14 +371,14 @@ class IngestResume:
             )
 
             # Create project descriptions
-            for bullet in proj_data.bullets:
+            for bullet in (proj_data.bullets or []):
                 desc, _ = Description.objects.get_or_create(content=bullet)
                 ProjectDescription.objects.get_or_create(
                     project_id=project.id, description_id=desc.id
                 )
 
         print("Creating certifications...")
-        for cert_data in parsed_resume.certifications:
+        for cert_data in (parsed_resume.certifications or []):
             certification = Certification.objects.create(
                 title=cert_data.title,
                 issuer=cert_data.issuer,
@@ -390,7 +390,7 @@ class IngestResume:
             )
 
         print("Creating skills...")
-        for skill_out in parsed_resume.skills:
+        for skill_out in (parsed_resume.skills or []):
             skill_model, _ = Skill.objects.get_or_create(
                 text=skill_out.text,
                 defaults={
