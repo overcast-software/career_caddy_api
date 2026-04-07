@@ -80,6 +80,10 @@ class BaseSASerializer:
     attributes: List[str] = []
     relationships: Dict[str, Dict[str, Any]] = {}
     relationship_fks: Dict[str, str] = {}
+    # Subclasses can declare which attributes to expose when slim=True.
+    # Defaults to ["name"] — override per serializer as needed.
+    slim_attributes: List[str] = ["name"]
+    slim: bool = False
 
     def set_parent_context(self, parent_type: str, parent_id: int, rel_name: str):
         self._parent_context = {
@@ -91,7 +95,19 @@ class BaseSASerializer:
     def accepted_types(self):
         return {self.type, _pluralize_type(self.type)}
 
+    def to_slim_resource(self, obj) -> Dict[str, Any]:
+        """Return a minimal representation suitable for dropdown lists."""
+        return {
+            "type": self.type,
+            "id": str(obj.id),
+            "attributes": {
+                k: _to_primitive(getattr(obj, k, None)) for k in self.slim_attributes
+            },
+        }
+
     def to_resource(self, obj) -> Dict[str, Any]:
+        if self.slim:
+            return self.to_slim_resource(obj)
         res = {
             "type": self.type,
             "id": str(obj.id),
@@ -294,6 +310,7 @@ class ResumeSerializer(BaseSASerializer):
     type = "resume"
     model = Resume
     attributes = ["file_path", "title", "name", "notes", "user_id", "favorite"]
+    slim_attributes = ["name", "title"]
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -326,6 +343,8 @@ class ResumeSerializer(BaseSASerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
+        if self.slim:
+            return res
         # Embed active summary content as a convenience attribute
         try:
             res.setdefault("attributes", {})["summary"] = obj.active_summary_content()

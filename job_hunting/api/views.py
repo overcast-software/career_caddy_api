@@ -498,8 +498,13 @@ class BaseSAViewSet(viewsets.ViewSet):
             return BaseModel.get_session()
         return self.model.get_session()
 
-    def get_serializer(self, *args, **kwargs):
-        return self.serializer_class()
+    def get_serializer(self, *args, slim=False, **kwargs):
+        ser = self.serializer_class()
+        ser.slim = slim
+        return ser
+
+    def _is_slim_request(self, request) -> bool:
+        return bool(request.query_params.get("slim"))
 
     def pre_save_payload(self, request, attrs: dict, creating: bool) -> dict:
         """Hook for subclasses to adjust/force attributes before persistence."""
@@ -1804,14 +1809,14 @@ class ResumeViewSet(BaseSAViewSet):
     def list(self, request):
         items = list(self.model.objects.all())
         items = self.paginate(items)
-        ser = self.get_serializer()
+        slim = self._is_slim_request(request)
+        ser = self.get_serializer(slim=slim)
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
-        # Default to include all resume relationships if none specified
-        ser_rels = list(getattr(ser, "relationships", {}).keys())
-        include_rels = self._parse_include(request) or ser_rels
-        if include_rels:
-            payload["included"] = self._build_included(items, include_rels, request)
+        if not slim:
+            include_rels = self._parse_include(request)
+            if include_rels:
+                payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     @extend_schema(
@@ -1826,9 +1831,7 @@ class ResumeViewSet(BaseSAViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
-        # Default to include all resume relationships if none specified
-        ser_rels = list(getattr(ser, "relationships", {}).keys())
-        include_rels = self._parse_include(request) or ser_rels
+        include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
