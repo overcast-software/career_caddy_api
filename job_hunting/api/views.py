@@ -677,9 +677,9 @@ class BaseSAViewSet(viewsets.ViewSet):
                     already_seen = key in seen
 
                     if not already_seen:
-                        # Filter cover-letter resources to only include those owned by authenticated user
+                        # Filter user-owned resources to only include those owned by authenticated user
                         if (
-                            effective_type == "cover-letter"
+                            effective_type in ("cover-letter", "score", "summary", "job-application")
                             and request
                             and hasattr(request, "user")
                             and request.user.is_authenticated
@@ -982,7 +982,7 @@ class SummaryViewSet(BaseSAViewSet):
         return BaseModel.get_session()
 
     def list(self, request):
-        qs = Summary.objects
+        qs = Summary.objects.filter(user_id=request.user.id)
 
         query_filter = request.query_params.get("filter[query]")
         if query_filter:
@@ -1012,7 +1012,7 @@ class SummaryViewSet(BaseSAViewSet):
 
     def retrieve(self, request, pk=None):
         obj = Summary.objects.filter(pk=pk).first()
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
@@ -1025,7 +1025,7 @@ class SummaryViewSet(BaseSAViewSet):
 
     def _update_summary(self, request, pk):
         obj = Summary.objects.filter(pk=pk).first()
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         data = request.data if isinstance(request.data, dict) else {}
@@ -1078,7 +1078,7 @@ class SummaryViewSet(BaseSAViewSet):
 
     def destroy(self, request, pk=None):
         obj = Summary.objects.filter(pk=pk).first()
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         obj.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -1807,7 +1807,7 @@ class ResumeViewSet(BaseSAViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        items = list(self.model.objects.all())
+        items = list(self.model.objects.filter(user_id=request.user.id))
         items = self.paginate(items)
         slim = self._is_slim_request(request)
         ser = self.get_serializer(slim=slim)
@@ -1827,7 +1827,7 @@ class ResumeViewSet(BaseSAViewSet):
     )
     def retrieve(self, request, pk=None):
         obj = self.model.objects.filter(pk=int(pk)).first()
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
@@ -1838,7 +1838,7 @@ class ResumeViewSet(BaseSAViewSet):
 
     def _upsert(self, request, pk, partial=False):
         obj = Resume.objects.filter(pk=int(pk)).first()
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         ser = self.get_serializer()
@@ -3428,6 +3428,33 @@ class ScoreViewSet(BaseSAViewSet):
 
         return s_int, str(explanation or "").strip()
 
+    def list(self, request):
+        qs = Score.objects.filter(user_id=request.user.id).order_by("-id")
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs[offset: offset + page_size])
+        ser = self.get_serializer()
+        return Response({
+            "data": [ser.to_resource(o) for o in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        })
+
+    def retrieve(self, request, pk=None):
+        obj = Score.objects.filter(pk=pk).first()
+        if not obj or obj.user_id != request.user.id:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    def destroy(self, request, pk=None):
+        obj = Score.objects.filter(pk=pk).first()
+        if not obj or obj.user_id != request.user.id:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=204)
+
 
 @extend_schema_view(
     list=extend_schema(
@@ -3492,7 +3519,11 @@ class JobPostViewSet(BaseSAViewSet):
         return errors
 
     def list(self, request):
-        qs = JobPost.objects
+        qs = JobPost.objects.filter(
+            Q(created_by_id=request.user.id) |
+            Q(applications__user_id=request.user.id) |
+            Q(scores__user_id=request.user.id)
+        ).distinct()
         link_filter = request.query_params.get("filter[link]")
         if link_filter is not None:
             qs = qs.filter(link=link_filter)
@@ -3540,7 +3571,7 @@ class JobPostViewSet(BaseSAViewSet):
         if items:
             job_post_ids = [jp.id for jp in items]
             all_scores = list(
-                Score.objects.filter(job_post_id__in=job_post_ids).order_by("job_post_id", "-score")
+                Score.objects.filter(job_post_id__in=job_post_ids, user_id=request.user.id).order_by("job_post_id", "-score")
             )
             top_score_map = {}
             for s in all_scores:
@@ -3579,6 +3610,13 @@ class JobPostViewSet(BaseSAViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        has_access = (
+            obj.created_by_id == request.user.id or
+            obj.applications.filter(user_id=request.user.id).exists() or
+            obj.scores.filter(user_id=request.user.id).exists()
+        )
+        if not has_access:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -3616,6 +3654,8 @@ class JobPostViewSet(BaseSAViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         ser = self.get_serializer()
         try:
             attrs = ser.parse_payload(request.data)
@@ -3638,6 +3678,13 @@ class JobPostViewSet(BaseSAViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response(status=204)
+        if obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+        if obj.applications.exclude(user_id=request.user.id).exists():
+            return Response(
+                {"errors": [{"detail": "Cannot delete: other users have applications on this post"}]},
+                status=409,
+            )
         obj.delete()
         return Response(status=204)
 
@@ -3650,7 +3697,7 @@ class JobPostViewSet(BaseSAViewSet):
     def scores(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        scores = list(Score.objects.filter(job_post_id=int(pk)))
+        scores = list(Score.objects.filter(job_post_id=int(pk), user_id=request.user.id))
         data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
@@ -3696,7 +3743,7 @@ class JobPostViewSet(BaseSAViewSet):
     def applications(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(JobApplication.objects.filter(job_post_id=int(pk)))
+        apps = list(JobApplication.objects.filter(job_post_id=int(pk), user_id=request.user.id))
         data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
@@ -3741,7 +3788,7 @@ class JobPostViewSet(BaseSAViewSet):
                 payload["included"] = self._build_included([obj], include_rels, request, primary_serializer=ser)
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        items = list(Question.objects.filter(application__job_post_id=int(pk)))
+        items = list(Question.objects.filter(application__job_post_id=int(pk), created_by_id=request.user.id))
         include_rels = self._parse_include(request)
         payload = {"data": [ser.to_resource(i) for i in items]}
         if include_rels:
@@ -3850,7 +3897,7 @@ class JobPostViewSet(BaseSAViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        summaries = list(Summary.objects.filter(job_post_id=obj.id))
+        summaries = list(Summary.objects.filter(job_post_id=obj.id, user_id=request.user.id))
         data = [SummarySerializer().to_resource(s) for s in summaries]
         return Response({"data": data})
 
@@ -3870,7 +3917,9 @@ class ScrapeViewSet(BaseSAViewSet):
     serializer_class = ScrapeSerializer
 
     def list(self, request):
-        qs = Scrape.objects
+        qs = Scrape.objects.filter(
+            Q(job_post__created_by_id=request.user.id) | Q(job_post__isnull=True)
+        )
 
         # Sorting
         sort_param = request.query_params.get("sort")
@@ -3974,8 +4023,10 @@ class ScrapeViewSet(BaseSAViewSet):
     )
     def retrieve(self, request, pk=None):
         """Get the current status of a scrape"""
-        obj = self.model.get(int(pk))
+        obj = Scrape.objects.filter(pk=int(pk)).first()
         if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if obj.job_post_id and obj.job_post.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         ser = self.get_serializer()
@@ -4790,7 +4841,7 @@ class JobApplicationViewSet(BaseSAViewSet):
     serializer_class = JobApplicationSerializer
 
     def list(self, request):
-        qs = JobApplication.objects
+        qs = JobApplication.objects.filter(user_id=request.user.id)
 
         company_id_filter = request.query_params.get("filter[company_id]")
         if company_id_filter is not None:
@@ -4841,7 +4892,7 @@ class JobApplicationViewSet(BaseSAViewSet):
 
     def retrieve(self, request, pk=None):
         obj = self._get_obj(pk)
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
@@ -4874,7 +4925,7 @@ class JobApplicationViewSet(BaseSAViewSet):
 
     def _upsert(self, request, pk, partial=False):
         obj = self._get_obj(pk)
-        if not obj:
+        if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         old_status = obj.status
         response = super()._upsert(request, pk, partial=partial)
@@ -4915,7 +4966,8 @@ class JobApplicationViewSet(BaseSAViewSet):
     )
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
-        if not JobApplication.objects.filter(pk=int(pk)).exists():
+        app = JobApplication.objects.filter(pk=int(pk)).first()
+        if not app or app.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = JobApplicationStatusSerializer()
         items = list(JobApplicationStatus.objects.filter(application_id=int(pk)))
@@ -4938,7 +4990,8 @@ class JobApplicationViewSet(BaseSAViewSet):
     )
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
-        if not JobApplication.objects.filter(pk=int(pk)).exists():
+        app = JobApplication.objects.filter(pk=int(pk)).first()
+        if not app or app.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = QuestionSerializer()
         items = list(Question.objects.filter(application_id=int(pk)))
@@ -5161,7 +5214,7 @@ class QuestionViewSet(BaseSAViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        qs = Question.objects
+        qs = Question.objects.filter(created_by_id=request.user.id)
 
         query_filter = request.query_params.get("filter[query]")
         if query_filter:
@@ -5218,7 +5271,7 @@ class QuestionViewSet(BaseSAViewSet):
         if "answers" in include_rels or "answer" in include_rels:
             qs = qs.prefetch_related("answers")
         obj = qs.filter(pk=pk).first()
-        if not obj:
+        if not obj or obj.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
@@ -5281,7 +5334,7 @@ class QuestionViewSet(BaseSAViewSet):
 
     def _upsert(self, request, pk, partial=False):
         obj = Question.objects.filter(pk=pk).first()
-        if not obj:
+        if not obj or obj.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         try:
@@ -5320,7 +5373,7 @@ class QuestionViewSet(BaseSAViewSet):
 
     def destroy(self, request, pk=None):
         obj = Question.objects.filter(pk=pk).first()
-        if not obj:
+        if not obj or obj.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         obj.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -5369,7 +5422,7 @@ class AnswerViewSet(BaseSAViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        qs = Answer.objects
+        qs = Answer.objects.filter(question__created_by_id=request.user.id)
 
         query_filter = request.query_params.get("filter[query]")
         if query_filter:
@@ -5610,6 +5663,20 @@ class AnswerViewSet(BaseSAViewSet):
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload, status=status.HTTP_201_CREATED)
+
+    def retrieve(self, request, pk=None):
+        obj = Answer.objects.filter(pk=pk).select_related("question").first()
+        if not obj or obj.question.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    def destroy(self, request, pk=None):
+        obj = Answer.objects.filter(pk=pk).select_related("question").first()
+        if not obj or obj.question.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=204)
 
 
 @extend_schema_view(
