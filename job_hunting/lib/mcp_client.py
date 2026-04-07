@@ -108,6 +108,7 @@ class MCPClient:
     def _extract_content(self, result: Any) -> Optional[str]:
         """Extract job content from navigate_and_snapshot result.
         The tool returns JSON: {"title": ..., "url": ..., "status": ..., "content": "page text"}.
+        Raises ValueError if the tool returned an error payload.
         Falls back to raw text if JSON parsing fails.
         """
         import json as _json
@@ -116,7 +117,11 @@ class MCPClient:
             return None
         try:
             data = _json.loads(raw)
+            if isinstance(data, dict) and data.get("error"):
+                raise ValueError(f"Browser tool error: {data['error']}")
             return data.get("content") or raw
+        except ValueError:
+            raise
         except Exception:
             return raw
 
@@ -134,26 +139,18 @@ class MCPClient:
         return None
 
     def _extract_tab_id(self, result: Any) -> Optional[str]:
-        content = getattr(result, "content", None)
-        if not isinstance(content, list):
+        import json as _json
+        raw = self._first_text(result)
+        if not raw:
             return None
-        for item in content:
-            # JSON-like payload
-            json_val = getattr(item, "json", None)
-            if isinstance(item, dict):
-                json_val = json_val or item.get("json")
-            if isinstance(json_val, dict):
-                tab = json_val.get("tab_id") or json_val.get("tabId")
-                if isinstance(tab, str) and tab.strip():
-                    return tab.strip()
-            # Text fallback if it clearly looks like a tab id
-            text_val = getattr(item, "text", None)
-            if isinstance(item, dict):
-                text_val = text_val or item.get("text")
-            if isinstance(text_val, str) and text_val.strip():
-                s = text_val.strip().strip('"')
-                if s.lower().startswith("tab"):
-                    return s
+        try:
+            data = _json.loads(raw)
+            if isinstance(data, dict):
+                tab = data.get("tab_id") or data.get("tabId")
+                if tab is not None:
+                    return str(tab).strip()
+        except Exception:
+            pass
         return None
 
 
