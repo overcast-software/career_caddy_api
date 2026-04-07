@@ -25,6 +25,7 @@ class Profile(GetMixin, models.Model):
     phone = models.CharField(max_length=50, null=True, blank=True)
     address = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
+    is_guest = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     linkedin = models.CharField(max_length=255, null=True, blank=True)

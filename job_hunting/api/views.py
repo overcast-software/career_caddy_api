@@ -10,6 +10,7 @@ from django.conf import settings
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from job_hunting.api.permissions import IsGuestReadOnly
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser, MultiPartParser
 from drf_spectacular.utils import (
@@ -137,6 +138,26 @@ def healthcheck(request):
         return JsonResponse({"healthy": True})
 
     return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def guest_session(request):
+    """Return a JWT for the guest user — no credentials required."""
+    User = get_user_model()
+    try:
+        guest = User.objects.select_related('profile_obj').get(username='guest')
+        if not guest.profile_obj.is_guest:
+            return Response({'error': 'Guest account not configured.'}, status=400)
+    except User.DoesNotExist:
+        return Response({'error': 'Demo mode is not enabled on this server.'}, status=404)
+
+    from rest_framework_simplejwt.tokens import RefreshToken
+    refresh = RefreshToken.for_user(guest)
+    return Response({
+        'access': str(refresh.access_token),
+        'refresh': str(refresh),
+    })
 
 
 @extend_schema(
@@ -418,7 +439,7 @@ _JSONAPI_WRITE = inline_serializer(
 
 
 class BaseSAViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsGuestReadOnly]
     parser_classes = [MultiPartParser, VndApiJSONParser, JSONParser]
     model = None
     serializer_class = None

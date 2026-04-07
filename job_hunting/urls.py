@@ -44,6 +44,7 @@ from job_hunting.api.views import (
     ApiKeyViewSet,
     ProjectViewSet,
     healthcheck,
+    guest_session,
     initialize,
     profile,
     career_data,
@@ -75,6 +76,8 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/healthcheck$", healthcheck, name="healthcheck-noslash"),
+    path("api/v1/guest-session/", guest_session, name="guest-session"),
+    re_path(r"^api/v1/guest-session$", guest_session, name="guest-session-noslash"),
     path("api/v1/initialize/", initialize, name="initialize"),
     re_path(r"^api/v1/initialize$", initialize, name="initialize-noslash"),
     re_path(

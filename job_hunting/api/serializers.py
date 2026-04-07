@@ -222,13 +222,15 @@ class DjangoUserSerializer:
         return {self.type, _pluralize_type(self.type)}
 
     def to_resource(self, obj) -> Dict[str, Any]:
-        # Fetch phone from Django Profile
+        # Fetch phone and guest flag from Django Profile
         phone = ""
+        is_guest = False
         try:
             from job_hunting.models import Profile
             prof = Profile.objects.filter(user_id=obj.id).first()
-            if prof and getattr(prof, "phone", None):
+            if prof:
                 phone = prof.phone or ""
+                is_guest = bool(getattr(prof, "is_guest", False))
         except Exception:
             phone = ""
 
@@ -241,6 +243,7 @@ class DjangoUserSerializer:
                 "first_name": obj.first_name or "",
                 "last_name": obj.last_name or "",
                 "phone": phone or "",
+                "is-guest": is_guest,
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
