@@ -140,21 +140,23 @@ def healthcheck(request):
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
+@csrf_exempt
 def guest_session(request):
     """Return a JWT for the guest user — no credentials required."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'method not allowed'}, status=405)
+
     User = get_user_model()
     try:
         guest = User.objects.select_related('profile_obj').get(username='guest')
         if not guest.profile_obj.is_guest:
-            return Response({'error': 'Guest account not configured.'}, status=400)
+            return JsonResponse({'error': 'Guest account not configured.'}, status=400)
     except User.DoesNotExist:
-        return Response({'error': 'Demo mode is not enabled on this server.'}, status=404)
+        return JsonResponse({'error': 'Demo mode is not enabled on this server.'}, status=404)
 
     from rest_framework_simplejwt.tokens import RefreshToken
     refresh = RefreshToken.for_user(guest)
-    return Response({
+    return JsonResponse({
         'access': str(refresh.access_token),
         'refresh': str(refresh),
     })
