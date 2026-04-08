@@ -305,7 +305,7 @@ class Command(BaseCommand):
             link="https://jobs.bushwoodtech.example/django-senior-004",
             created_by=guest,
         )
-        post5 = JobPost.objects.create(
+        JobPost.objects.create(
             title="Software Engineer — Platform",
             company=spackler,
             description=(
