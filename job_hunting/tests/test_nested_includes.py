@@ -18,11 +18,12 @@ class TestNestedIncludes(TestCase):
         # Create company
         self.company = Company.objects.create(name="Test Company")
         
-        # Create job post
+        # Create job post owned by user1
         self.job_post = JobPost(
             title="Software Engineer",
             description="Great job",
-            company_id=self.company.id
+            company_id=self.company.id,
+            created_by_id=self.user1.id,
         )
         self.job_post.save()
         
