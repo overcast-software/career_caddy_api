@@ -143,7 +143,7 @@ def healthcheck(request):
 @csrf_exempt
 def guest_session(request):
     """Return a JWT for the guest user — no credentials required."""
-    if request.method != 'POST':
+    if request.method not in ('GET', 'POST'):
         return JsonResponse({'error': 'method not allowed'}, status=405)
 
     User = get_user_model()
