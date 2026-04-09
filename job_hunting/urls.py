@@ -46,6 +46,7 @@ from job_hunting.api.views import (
     healthcheck,
     guest_session,
     initialize,
+    waitlist_signup,
     profile,
     career_data,
     generate_prompt,
@@ -80,6 +81,8 @@ urlpatterns = [
     re_path(r"^api/v1/guest-session$", guest_session, name="guest-session-noslash"),
     path("api/v1/initialize/", initialize, name="initialize"),
     re_path(r"^api/v1/initialize$", initialize, name="initialize-noslash"),
+    path("api/v1/waitlist/", waitlist_signup, name="waitlist"),
+    re_path(r"^api/v1/waitlist$", waitlist_signup, name="waitlist-noslash"),
     re_path(
         r"^api/v1/companies/(?P<pk>\d+)/job-posts$",
         CompanyViewSet.as_view({"get": "job_posts"}),

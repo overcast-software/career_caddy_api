@@ -26,3 +26,4 @@ from .resume_certification import ResumeCertification as ResumeCertification
 from .resume_project import ResumeProject as ResumeProject
 from .project_description import ProjectDescription as ProjectDescription
 from .job_application_status import JobApplicationStatus as JobApplicationStatus
+from .waitlist import Waitlist as Waitlist

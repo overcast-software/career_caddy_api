@@ -328,6 +328,52 @@ def initialize(request):
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
+@extend_schema(
+    methods=["POST"],
+    request=inline_serializer(
+        name="WaitlistSignup",
+        fields={
+            "email": drf_serializers.EmailField(),
+        },
+    ),
+    responses={
+        201: OpenApiResponse(description="Added to waiting list"),
+        400: OpenApiResponse(description="Missing or invalid email"),
+        409: OpenApiResponse(description="Email already on the waiting list"),
+    },
+    auth=[],
+)
+@csrf_exempt
+def waitlist_signup(request):
+    """Public endpoint for joining the waiting list."""
+    if request.method == "POST":
+        import json
+        from job_hunting.models import Waitlist
+
+        try:
+            data = json.loads(request.body.decode("utf-8") or "{}")
+        except Exception:
+            data = {}
+
+        email = (data.get("email") or "").strip().lower()
+        if not email or "@" not in email:
+            return JsonResponse(
+                {"errors": [{"detail": "A valid email address is required."}]},
+                status=400,
+            )
+
+        if Waitlist.objects.filter(email=email).exists():
+            return JsonResponse(
+                {"errors": [{"detail": "This email is already on the waiting list."}]},
+                status=409,
+            )
+
+        Waitlist.objects.create(email=email)
+        return JsonResponse({"success": True, "email": email}, status=201)
+
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
 _INCLUDE_PARAM = OpenApiParameter(
     "include",
     OpenApiTypes.STR,
@@ -1614,6 +1660,16 @@ class DjangoUserViewSet(viewsets.ViewSet):
         if "password" in attrs:
             user.set_password(attrs["password"])
 
+        # Staff-only fields
+        if "is_staff" in attrs:
+            if not request.user.is_staff:
+                return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+            user.is_staff = bool(attrs["is_staff"])
+        if "is_active" in attrs:
+            if not request.user.is_staff:
+                return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+            user.is_active = bool(attrs["is_active"])
+
         user.save()
 
         # Handle phone via Django Profile if provided
@@ -1628,10 +1684,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
     @extend_schema(
         tags=["Users"],
-        summary="Delete a user",
-        responses={204: OpenApiResponse(description="Deleted")},
+        summary="Delete a user (staff only)",
+        responses={
+            204: OpenApiResponse(description="Deleted"),
+            403: OpenApiResponse(description="Forbidden — staff only"),
+        },
     )
     def destroy(self, request, pk=None):
+        if not request.user.is_staff:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         User = get_user_model()
         try:
             user = User.objects.get(id=int(pk))
