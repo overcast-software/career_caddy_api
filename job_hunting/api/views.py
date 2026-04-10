@@ -4137,6 +4137,38 @@ class ScrapeViewSet(BaseSAViewSet):
     )
     def create(self, request):
 
+        # Detect a "url" key in either a plain JSON body or JSON:API attributes
+        data = request.data if isinstance(request.data, dict) else {}
+        url = data.get("url")
+        attrs = {}
+        if isinstance(data.get("data"), dict):
+            attrs = data["data"].get("attributes") or {}
+            if url is None:
+                url = attrs.get("url")
+
+        # "hold" status: create the scrape record without dispatching the scraper.
+        # Used by MCP agents to queue URLs for later processing.
+        req_status = attrs.get("status") or data.get("status")
+        if req_status == "hold":
+            if not url:
+                return Response(
+                    {"errors": [{"detail": "URL is required"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            scrape = Scrape.objects.create(url=url, status="hold")
+            # Link to existing job post if URL matches
+            existing_jp = JobPost.objects.filter(link=url).first()
+            if existing_jp:
+                scrape.job_post = existing_jp
+                scrape.company_id = existing_jp.company_id
+                scrape.save()
+            logger.info("ScrapeViewSet.create: hold scrape id=%s url=%s", scrape.id, url)
+            scr_ser = self.get_serializer()
+            return Response(
+                {"data": scr_ser.to_resource(scrape)},
+                status=status.HTTP_201_CREATED,
+            )
+
         # Check if scraping is enabled
         if not getattr(settings, "SCRAPING_ENABLED", False):
             logger.warning("ScrapeViewSet.create: SCRAPING_ENABLED=False, rejecting request")
@@ -4144,12 +4176,6 @@ class ScrapeViewSet(BaseSAViewSet):
                 {"errors": [{"detail": "Scraping functionality is disabled"}]},
                 status=status.HTTP_501_NOT_IMPLEMENTED,
             )
-
-        # Detect a "url" key in either a plain JSON body or JSON:API attributes
-        data = request.data if isinstance(request.data, dict) else {}
-        url = data.get("url")
-        if url is None and isinstance(data.get("data"), dict):
-            url = (data["data"].get("attributes") or {}).get("url")
 
         if not url:
             logger.warning("ScrapeViewSet.create: missing url in request body")
@@ -5404,7 +5430,7 @@ class QuestionViewSet(BaseSAViewSet):
             k: v
             for k, v in attrs.items()
             if k
-            in ("content", "favorite", "application_id", "company_id", "created_by_id", "job_post_id")
+            in ("content", "application_id", "company_id", "created_by_id", "job_post_id")
         }
         obj = Question.objects.create(**safe_attrs)
 
@@ -5439,7 +5465,6 @@ class QuestionViewSet(BaseSAViewSet):
         for k, v in attrs.items():
             if k in (
                 "content",
-                "favorite",
                 "application_id",
                 "company_id",
                 "created_by_id",
@@ -5765,12 +5790,41 @@ class AnswerViewSet(BaseSAViewSet):
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
 
+    def _upsert(self, request, pk, partial=False):
+        obj = Answer.objects.filter(pk=pk).select_related("question").first()
+        if not obj or obj.question.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        for k, v in attrs.items():
+            if k in ("content", "favorite", "status"):
+                setattr(obj, k, v)
+        obj.save()
+        self._sync_question_favorite(obj.question_id)
+        return Response({"data": ser.to_resource(obj)})
+
+    def update(self, request, pk=None):
+        return self._upsert(request, pk)
+
+    def partial_update(self, request, pk=None):
+        return self._upsert(request, pk, partial=True)
+
     def destroy(self, request, pk=None):
         obj = Answer.objects.filter(pk=pk).select_related("question").first()
         if not obj or obj.question.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        question_id = obj.question_id
         obj.delete()
+        self._sync_question_favorite(question_id)
         return Response(status=204)
+
+    @staticmethod
+    def _sync_question_favorite(question_id):
+        has_fav = Answer.objects.filter(question_id=question_id, favorite=True).exists()
+        Question.objects.filter(pk=question_id).update(favorite=has_fav)
 
 
 @extend_schema_view(
@@ -6707,7 +6761,7 @@ def career_data(request, user_id=None):
 
     prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
     career_data_prompt = prompt_builder.build_from_career_data(career_data)
-    return Response({"data": career_data_prompt})
+    return Response({"data": career_data_prompt, "meta": career_data.to_refs()})
 
 
 @extend_schema(
