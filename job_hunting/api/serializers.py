@@ -243,7 +243,9 @@ class DjangoUserSerializer:
                 "first_name": obj.first_name or "",
                 "last_name": obj.last_name or "",
                 "phone": phone or "",
-                "is-guest": is_guest,
+                "is_guest": is_guest,
+                "is_staff": bool(obj.is_staff),
+                "is_active": bool(obj.is_active),
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
@@ -304,9 +306,13 @@ class DjangoUserSerializer:
             raise ValueError("Invalid payload")
 
         out: Dict[str, Any] = {}
-        for k in ["username", "email", "first_name", "last_name", "password", "phone"]:
+        for k in ["username", "email", "first_name", "last_name", "password", "phone", "is_staff", "is_active"]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
+        # Accept hyphenated variants from JSON:API clients
+        for hyphen, snake in [("is-staff", "is_staff"), ("is-active", "is_active")]:
+            if hyphen in attrs_in and snake not in out:
+                out[snake] = attrs_in[hyphen]
         return out
 
 
