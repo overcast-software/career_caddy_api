@@ -1560,9 +1560,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
-        # Extract phone before user creation
-        phone_present = "phone" in attrs
-        phone_val = str(attrs.pop("phone", "") or "").strip() if phone_present else None
+        # Extract profile fields before user creation
+        profile_fields = {}
+        for pf in ("phone", "linkedin", "github", "address", "links"):
+            if pf in attrs:
+                profile_fields[pf] = attrs.pop(pf)
 
         username = attrs.get("username")
         password = attrs.get("password")
@@ -1597,12 +1599,24 @@ class DjangoUserViewSet(viewsets.ViewSet):
         user.set_password(password)
         user.save()
 
-        # Handle phone via Django Profile if provided
-        if phone_present:
+        # Handle profile fields via Django Profile if any provided
+        if profile_fields:
             from job_hunting.models import Profile
 
             prof, _ = Profile.objects.get_or_create(user_id=user.id)
-            prof.phone = (phone_val[:50] or None) if phone_val else None
+            if "phone" in profile_fields:
+                val = str(profile_fields["phone"] or "").strip()
+                prof.phone = (val[:50] or None) if val else None
+            if "linkedin" in profile_fields:
+                val = str(profile_fields["linkedin"] or "").strip()
+                prof.linkedin = (val[:255] or None) if val else None
+            if "github" in profile_fields:
+                val = str(profile_fields["github"] or "").strip()
+                prof.github = (val[:255] or None) if val else None
+            if "address" in profile_fields:
+                prof.address = (str(profile_fields["address"] or "").strip() or None)
+            if "links" in profile_fields:
+                prof.links = profile_fields["links"] if isinstance(profile_fields["links"], dict) else {}
             prof.save()
 
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
@@ -1646,9 +1660,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
 
-        # Extract phone before user updates
-        phone_present = "phone" in attrs
-        phone_val = str(attrs.pop("phone", "") or "").strip() if phone_present else None
+        # Extract profile fields before user updates
+        profile_fields = {}
+        for pf in ("phone", "linkedin", "github", "address", "links"):
+            if pf in attrs:
+                profile_fields[pf] = attrs.pop(pf)
 
         # Update allowed fields
         if "email" in attrs:
@@ -1672,12 +1688,24 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         user.save()
 
-        # Handle phone via Django Profile if provided
-        if phone_present:
+        # Handle profile fields via Django Profile if any provided
+        if profile_fields:
             from job_hunting.models import Profile
 
             prof, _ = Profile.objects.get_or_create(user_id=user.id)
-            prof.phone = (phone_val[:50] or None) if phone_val else None
+            if "phone" in profile_fields:
+                val = str(profile_fields["phone"] or "").strip()
+                prof.phone = (val[:50] or None) if val else None
+            if "linkedin" in profile_fields:
+                val = str(profile_fields["linkedin"] or "").strip()
+                prof.linkedin = (val[:255] or None) if val else None
+            if "github" in profile_fields:
+                val = str(profile_fields["github"] or "").strip()
+                prof.github = (val[:255] or None) if val else None
+            if "address" in profile_fields:
+                prof.address = (str(profile_fields["address"] or "").strip() or None)
+            if "links" in profile_fields:
+                prof.links = profile_fields["links"] if isinstance(profile_fields["links"], dict) else {}
             prof.save()
 
         return Response({"data": ser.to_resource(user)})

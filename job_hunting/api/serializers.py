@@ -222,15 +222,23 @@ class DjangoUserSerializer:
         return {self.type, _pluralize_type(self.type)}
 
     def to_resource(self, obj) -> Dict[str, Any]:
-        # Fetch phone and guest flag from Django Profile
+        # Fetch profile fields from Django Profile
         phone = ""
         is_guest = False
+        linkedin = ""
+        github = ""
+        address = ""
+        links = {}
         try:
             from job_hunting.models import Profile
             prof = Profile.objects.filter(user_id=obj.id).first()
             if prof:
                 phone = prof.phone or ""
                 is_guest = bool(getattr(prof, "is_guest", False))
+                linkedin = prof.linkedin or ""
+                github = prof.github or ""
+                address = prof.address or ""
+                links = prof.links or {}
         except Exception:
             phone = ""
 
@@ -246,6 +254,10 @@ class DjangoUserSerializer:
                 "is_guest": is_guest,
                 "is_staff": bool(obj.is_staff),
                 "is_active": bool(obj.is_active),
+                "linkedin": linkedin,
+                "github": github,
+                "address": address,
+                "links": links,
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
@@ -306,11 +318,20 @@ class DjangoUserSerializer:
             raise ValueError("Invalid payload")
 
         out: Dict[str, Any] = {}
-        for k in ["username", "email", "first_name", "last_name", "password", "phone", "is_staff", "is_active"]:
+        for k in [
+            "username", "email", "first_name", "last_name", "password",
+            "phone", "linkedin", "github", "address", "links",
+            "is_staff", "is_active",
+        ]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
         # Accept hyphenated variants from JSON:API clients
-        for hyphen, snake in [("is-staff", "is_staff"), ("is-active", "is_active")]:
+        for hyphen, snake in [
+            ("is-staff", "is_staff"),
+            ("is-active", "is_active"),
+            ("first-name", "first_name"),
+            ("last-name", "last_name"),
+        ]:
             if hyphen in attrs_in and snake not in out:
                 out[snake] = attrs_in[hyphen]
         return out
