@@ -2,22 +2,30 @@ import os
 from datetime import datetime
 from typing import Optional
 
+from django.conf import settings
+
 
 def write_prompt_to_file(
     prompt: str, kind: str, identifiers: Optional[dict] = None, directory: Optional[str] = None
 ) -> str:
     """
     Write a prompt to disk with consistent naming and location.
-    
+
+    Only writes when DEBUG is True — in production the runtime/prompts
+    directory is never created and no disk I/O occurs.
+
     Args:
         prompt: The prompt text to write
         kind: Type of prompt (e.g., "answer", "cover_letter", "summary")
         identifiers: Dict of ID values for filename generation
         directory: Override directory (defaults to PROMPT_LOG_DIR env or runtime/prompts)
-    
+
     Returns:
-        Full path to written file, or empty string on failure
+        Full path to written file, or empty string if skipped/failed
     """
+    if not settings.DEBUG:
+        return ""
+
     try:
         # Determine directory
         if directory is None:

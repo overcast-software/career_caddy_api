@@ -58,3 +58,6 @@ staticfiles/
 
 docker-compose.yml
 .ok
+
+# Debug prompt logs
+runtime/
