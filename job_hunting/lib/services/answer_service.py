@@ -129,22 +129,32 @@ class AnswerService:
             # 1) Build unified set of question IDs from multiple sources
             question_ids = set()
 
-            # User-authored favorite questions (excluding current)
+            # User-authored questions with favorited answers (excluding current)
+            fav_q_ids = set(
+                Answer.objects.filter(
+                    question__created_by_id=user.id, favorite=True,
+                ).values_list("question_id", flat=True)
+            )
             user_questions = list(
                 Question.objects.filter(
+                    id__in=fav_q_ids,
                     created_by_id=user.id,
-                    favorite=True,
                 ).exclude(id=question.id).order_by("created_at", "id")
             )
 
             question_ids.update(q.id for q in user_questions)
 
-            # Application-linked favorite questions (excluding current)
+            # Application-linked questions with favorited answers (excluding current)
             if application:
+                app_fav_q_ids = set(
+                    Answer.objects.filter(
+                        question__application_id=application.id, favorite=True,
+                    ).values_list("question_id", flat=True)
+                )
                 app_questions = list(
                     Question.objects.filter(
+                        id__in=app_fav_q_ids,
                         application_id=application.id,
-                        favorite=True,
                     ).exclude(id=question.id).order_by("created_at", "id")
                 )
                 question_ids.update(q.id for q in app_questions)
@@ -216,16 +226,10 @@ class AnswerService:
                         }
                     )
 
-            # 4) Build unified favorite questions list (user-authored + application-linked), de-duped
+            # 4) Build unified questions list (user-authored + application-linked), de-duped
             all_questions = list(user_questions)
             if application:
-                app_questions = list(
-                    Question.objects.filter(
-                        application_id=application.id,
-                        favorite=True,
-                    ).exclude(id=question.id).order_by("created_at", "id")
-                )
-                # Add app questions that aren't already in the list
+                # Reuse app_questions from step 1 (already filtered by favorited answers)
                 existing_ids = {q.id for q in all_questions}
                 for app_q in app_questions:
                     if app_q.id not in existing_ids:

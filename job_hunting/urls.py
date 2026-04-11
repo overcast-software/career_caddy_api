@@ -49,6 +49,8 @@ from job_hunting.api.views import (
     waitlist_signup,
     profile,
     career_data,
+    career_data_export,
+    career_data_import,
     generate_prompt,
 )
 
@@ -103,6 +105,8 @@ urlpatterns = [
     path("api/v1/profile/", profile, name="profile"),
     path("api/v1/career-data/", career_data, name="career-data"),
     path("api/v1/users/<int:user_id>/career-data/", career_data, name="user-career-data"),
+    path("api/v1/career-data/export/", career_data_export, name="career-data-export"),
+    path("api/v1/career-data/import/", career_data_import, name="career-data-import"),
     path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
     path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),

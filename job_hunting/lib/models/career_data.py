@@ -21,29 +21,31 @@ class CareerData:
 
         return list(CoverLetter.objects.filter(user_id=self.user_id, favorite=True))
 
-    # Favorite answers - through favorite questions
+    # Favorite answers - directly by answer.favorite
     @property
     def favorite_answers(self):
         from job_hunting.models.answer import Answer
-        from job_hunting.models.question import Question
 
-        question_ids = list(
-            Question.objects.filter(
-                created_by_id=self.user_id, favorite=True
-            ).values_list("id", flat=True)
+        return list(
+            Answer.objects.filter(
+                question__created_by_id=self.user_id, favorite=True
+            )
         )
-        return list(Answer.objects.filter(question_id__in=question_ids, favorite=True))
 
-    # Applications linked to favorite questions
+    # Applications linked to questions that have favorited answers
     @property
     def question_applications(self):
+        from job_hunting.models.answer import Answer
         from job_hunting.models.job_application import JobApplication
         from job_hunting.models.question import Question
 
+        question_ids = Answer.objects.filter(
+            question__created_by_id=self.user_id, favorite=True,
+        ).values_list("question_id", flat=True).distinct()
+
         app_ids = list(
             Question.objects.filter(
-                created_by_id=self.user_id,
-                favorite=True,
+                pk__in=question_ids,
                 application_id__isnull=False,
             ).values_list("application_id", flat=True).distinct()
         )
@@ -69,6 +71,13 @@ class CareerData:
     @classmethod
     def for_user(cls, user_id, session=None):
         return cls(user_id)
+
+    def to_refs(self):
+        return {
+            "resume_ids": [r.id for r in self.favorite_resumes],
+            "cover_letter_ids": [cl.id for cl in self.favorite_cover_letters],
+            "answer_ids": [a.id for a in self.favorite_answers],
+        }
 
     def to_dict(self):
         return {
