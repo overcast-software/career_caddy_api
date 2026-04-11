@@ -5305,6 +5305,11 @@ class JobApplicationStatusViewSet(BaseSAViewSet):
             note=note,
             logged_at=logged_at,
         )
+
+        # Keep the parent application's status field in sync
+        application.status = status_obj.status
+        application.save(update_fields=["status"])
+
         ser = JobApplicationStatusSerializer()
         return Response(
             {"data": ser.to_resource(app_status)},
@@ -6909,3 +6914,309 @@ def generate_prompt(request):
             }
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Career-data export / import
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(
+    tags=["Career Data"],
+    summary="Export career data as an Excel (.xlsx) file",
+    responses={
+        200: OpenApiResponse(
+            description="Excel workbook with sheets: job-posts, job-applications, questions, answers"
+        )
+    },
+)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def career_data_export(request):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+
+    # -- job-posts --
+    ws = wb.active
+    ws.title = "job-posts"
+    jp_headers = [
+        "id", "title", "company", "description", "link",
+        "posted_date", "extraction_date", "salary_min", "salary_max",
+        "location", "remote", "created_at",
+    ]
+    ws.append(jp_headers)
+    for jp in JobPost.objects.select_related("company").order_by("id"):
+        ws.append([
+            jp.id, jp.title,
+            jp.company.name if jp.company else None,
+            jp.description, jp.link,
+            str(jp.posted_date) if jp.posted_date else None,
+            str(jp.extraction_date) if jp.extraction_date else None,
+            float(jp.salary_min) if jp.salary_min is not None else None,
+            float(jp.salary_max) if jp.salary_max is not None else None,
+            jp.location,
+            jp.remote,
+            jp.created_at.isoformat() if jp.created_at else None,
+        ])
+
+    # -- job-applications --
+    ws2 = wb.create_sheet("job-applications")
+    ja_headers = [
+        "id", "job_post_id", "company", "status",
+        "applied_at", "tracking_url", "notes",
+    ]
+    ws2.append(ja_headers)
+    for ja in JobApplication.objects.select_related("company").order_by("id"):
+        ws2.append([
+            ja.id, ja.job_post_id,
+            ja.company.name if ja.company else None,
+            ja.status,
+            ja.applied_at.isoformat() if ja.applied_at else None,
+            ja.tracking_url, ja.notes,
+        ])
+
+    # -- questions --
+    ws3 = wb.create_sheet("questions")
+    q_headers = ["id", "application_id", "company", "job_post_id", "content", "favorite", "created_at"]
+    ws3.append(q_headers)
+    for q in Question.objects.select_related("company").order_by("id"):
+        ws3.append([
+            q.id, q.application_id,
+            q.company.name if q.company else None,
+            q.job_post_id, q.content, q.favorite,
+            q.created_at.isoformat() if q.created_at else None,
+        ])
+
+    # -- answers --
+    ws4 = wb.create_sheet("answers")
+    a_headers = ["id", "question_id", "content", "favorite", "status", "created_at"]
+    ws4.append(a_headers)
+    for a in Answer.objects.order_by("id"):
+        ws4.append([
+            a.id, a.question_id, a.content, a.favorite, a.status,
+            a.created_at.isoformat() if a.created_at else None,
+        ])
+
+    from io import BytesIO
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    response = HttpResponse(
+        buf.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="career-caddy-export.xlsx"'
+    return response
+
+
+@extend_schema(
+    tags=["Career Data"],
+    summary="Import career data from an Excel (.xlsx) file",
+    request={"multipart/form-data": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}}},
+    responses={
+        200: OpenApiResponse(description="Import summary with created/skipped counts"),
+        400: OpenApiResponse(description="Missing or invalid file"),
+        403: OpenApiResponse(description="Superuser access required"),
+    },
+)
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def career_data_import(request):
+    if not request.user.is_superuser:
+        return Response(
+            {"errors": [{"detail": "Superuser access required"}]},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    uploaded = request.FILES.get("file")
+    if not uploaded:
+        return Response(
+            {"errors": [{"detail": "No file provided. Upload an .xlsx file as 'file'."}]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    from openpyxl import load_workbook
+    from django.db import transaction
+    from datetime import datetime
+
+    try:
+        wbook = load_workbook(uploaded, read_only=True)
+    except Exception:
+        return Response(
+            {"errors": [{"detail": "Could not read file as .xlsx"}]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    stats = {"job-posts": {"created": 0, "skipped": 0},
+             "job-applications": {"created": 0, "skipped": 0},
+             "questions": {"created": 0, "skipped": 0},
+             "answers": {"created": 0, "skipped": 0}}
+
+    def _parse_datetime(val):
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val
+        try:
+            return datetime.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_date(val):
+        if val is None:
+            return None
+        from datetime import date
+        if isinstance(val, date):
+            return val
+        try:
+            return date.fromisoformat(str(val))
+        except (ValueError, TypeError):
+            return None
+
+    def _rows_as_dicts(sheet):
+        rows = sheet.iter_rows(values_only=True)
+        headers = next(rows, None)
+        if not headers:
+            return
+        headers = [str(h).strip() if h else "" for h in headers]
+        for row in rows:
+            yield dict(zip(headers, row))
+
+    with transaction.atomic():
+        # Map old IDs → new IDs for relational integrity
+        jp_id_map = {}  # old job_post id → new job_post id
+        ja_id_map = {}  # old application id → new application id
+        q_id_map = {}   # old question id → new question id
+
+        # -- job-posts --
+        if "job-posts" in wbook.sheetnames:
+            from job_hunting.models import Company
+            for row in _rows_as_dicts(wbook["job-posts"]):
+                old_id = row.get("id")
+                link = row.get("link")
+                # Skip duplicate by link (unique constraint)
+                if link and JobPost.objects.filter(link=link).exists():
+                    if old_id is not None:
+                        existing = JobPost.objects.filter(link=link).first()
+                        jp_id_map[int(old_id)] = existing.id
+                    stats["job-posts"]["skipped"] += 1
+                    continue
+                company = None
+                if row.get("company"):
+                    company, _ = Company.objects.get_or_create(name=row["company"])
+                from decimal import Decimal
+                jp = JobPost.objects.create(
+                    title=row.get("title"),
+                    company=company,
+                    description=row.get("description"),
+                    link=link,
+                    posted_date=_parse_date(row.get("posted_date")),
+                    extraction_date=_parse_date(row.get("extraction_date")),
+                    salary_min=Decimal(str(row["salary_min"])) if row.get("salary_min") is not None else None,
+                    salary_max=Decimal(str(row["salary_max"])) if row.get("salary_max") is not None else None,
+                    location=row.get("location"),
+                    remote=row.get("remote"),
+                    created_by=request.user,
+                )
+                if old_id is not None:
+                    jp_id_map[int(old_id)] = jp.id
+                stats["job-posts"]["created"] += 1
+
+        # -- job-applications --
+        if "job-applications" in wbook.sheetnames:
+            from job_hunting.models import Company
+            for row in _rows_as_dicts(wbook["job-applications"]):
+                old_id = row.get("id")
+                old_jp_id = row.get("job_post_id")
+                new_jp_id = jp_id_map.get(int(old_jp_id)) if old_jp_id is not None else None
+                # Skip duplicate: same user + same job_post
+                if new_jp_id and JobApplication.objects.filter(
+                    user=request.user, job_post_id=new_jp_id
+                ).exists():
+                    if old_id is not None:
+                        existing = JobApplication.objects.filter(
+                            user=request.user, job_post_id=new_jp_id
+                        ).first()
+                        ja_id_map[int(old_id)] = existing.id
+                    stats["job-applications"]["skipped"] += 1
+                    continue
+                company = None
+                if row.get("company"):
+                    company, _ = Company.objects.get_or_create(name=row["company"])
+                ja = JobApplication.objects.create(
+                    user=request.user,
+                    job_post_id=new_jp_id,
+                    company=company,
+                    status=row.get("status"),
+                    applied_at=_parse_datetime(row.get("applied_at")),
+                    tracking_url=row.get("tracking_url"),
+                    notes=row.get("notes"),
+                )
+                if old_id is not None:
+                    ja_id_map[int(old_id)] = ja.id
+                stats["job-applications"]["created"] += 1
+
+        # -- questions --
+        if "questions" in wbook.sheetnames:
+            from job_hunting.models import Company
+            for row in _rows_as_dicts(wbook["questions"]):
+                old_id = row.get("id")
+                old_app_id = row.get("application_id")
+                new_app_id = ja_id_map.get(int(old_app_id)) if old_app_id is not None else None
+                old_jp_id = row.get("job_post_id")
+                new_jp_id = jp_id_map.get(int(old_jp_id)) if old_jp_id is not None else None
+                content = row.get("content")
+                # Skip duplicate: same content + same application
+                if content and new_app_id and Question.objects.filter(
+                    content=content, application_id=new_app_id
+                ).exists():
+                    if old_id is not None:
+                        existing = Question.objects.filter(
+                            content=content, application_id=new_app_id
+                        ).first()
+                        q_id_map[int(old_id)] = existing.id
+                    stats["questions"]["skipped"] += 1
+                    continue
+                company = None
+                if row.get("company"):
+                    company, _ = Company.objects.get_or_create(name=row["company"])
+                q = Question.objects.create(
+                    application_id=new_app_id,
+                    company=company,
+                    created_by=request.user,
+                    job_post_id=new_jp_id,
+                    content=content,
+                    favorite=bool(row.get("favorite")),
+                )
+                if old_id is not None:
+                    q_id_map[int(old_id)] = q.id
+                stats["questions"]["created"] += 1
+
+        # -- answers --
+        if "answers" in wbook.sheetnames:
+            for row in _rows_as_dicts(wbook["answers"]):
+                old_q_id = row.get("question_id")
+                new_q_id = q_id_map.get(int(old_q_id)) if old_q_id is not None else None
+                if new_q_id is None:
+                    stats["answers"]["skipped"] += 1
+                    continue
+                content = row.get("content")
+                # Skip duplicate: same content + same question
+                if content and Answer.objects.filter(
+                    content=content, question_id=new_q_id
+                ).exists():
+                    stats["answers"]["skipped"] += 1
+                    continue
+                Answer.objects.create(
+                    question_id=new_q_id,
+                    content=content,
+                    favorite=bool(row.get("favorite")),
+                    status=row.get("status"),
+                )
+                stats["answers"]["created"] += 1
+
+    wbook.close()
+    return Response({"data": stats})
