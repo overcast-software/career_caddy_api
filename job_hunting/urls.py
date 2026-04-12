@@ -23,6 +23,7 @@ from rest_framework_simplejwt.views import (
     TokenVerifyView,
 )
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
+from job_hunting.api.chat import chat_proxy
 from job_hunting.api.views import (
     DjangoUserViewSet,
     ResumeViewSet,
@@ -108,6 +109,7 @@ urlpatterns = [
     path("api/v1/career-data/export/", career_data_export, name="career-data-export"),
     path("api/v1/career-data/import/", career_data_import, name="career-data-import"),
     path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
+    path("api/v1/chat/", chat_proxy, name="chat"),
     path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/v1/token/verify/", TokenVerifyView.as_view(), name="token_verify"),
