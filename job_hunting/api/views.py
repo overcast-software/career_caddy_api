@@ -369,9 +369,143 @@ def waitlist_signup(request):
             )
 
         Waitlist.objects.create(email=email)
+
+        try:
+            from django.core.mail import send_mail
+            from django.template.loader import render_to_string
+
+            body = render_to_string(
+                "waitlist_email.txt",
+                {"frontend_url": settings.FRONTEND_URL},
+            )
+            send_mail(
+                subject="You're on the Career Caddy waiting list",
+                message=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+            )
+        except Exception:
+            logger.warning("Failed to send waitlist confirmation to %s", email)
+
         return JsonResponse({"success": True, "email": email}, status=201)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@csrf_exempt
+def password_reset_request(request):
+    """Request a password-reset email. Always returns 200 to prevent email enumeration."""
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    import json
+    from django.contrib.auth.tokens import PasswordResetTokenGenerator
+    from django.utils.http import urlsafe_base64_encode
+    from django.utils.encoding import force_bytes
+    from django.core.mail import send_mail
+    from django.template.loader import render_to_string
+
+    try:
+        data = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        data = {}
+
+    email = (data.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return JsonResponse(
+            {"errors": [{"detail": "A valid email address is required."}]},
+            status=400,
+        )
+
+    User = get_user_model()
+    user = User.objects.filter(email__iexact=email).first()
+
+    if user:
+        token_generator = PasswordResetTokenGenerator()
+        token = token_generator.make_token(user)
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}&uid={uid}"
+
+        body = render_to_string(
+            "password_reset_email.txt", {"reset_url": reset_url}
+        )
+        send_mail(
+            subject="Password Reset — Career Caddy",
+            message=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+        )
+
+    return JsonResponse(
+        {
+            "message": (
+                "If an account with that email exists, "
+                "a password reset link has been sent."
+            )
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+def password_reset_confirm(request):
+    """Confirm a password reset with token, uid, and new password."""
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    import json
+    from django.contrib.auth.tokens import PasswordResetTokenGenerator
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError
+    from django.utils.http import urlsafe_base64_decode
+    from django.utils.encoding import force_str
+
+    try:
+        data = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        data = {}
+
+    token = data.get("token", "")
+    uid = data.get("uid", "")
+    new_password = data.get("new_password", "")
+
+    if not token or not uid or not new_password:
+        return JsonResponse(
+            {"errors": [{"detail": "token, uid, and new_password are required."}]},
+            status=400,
+        )
+
+    User = get_user_model()
+    try:
+        user_id = force_str(urlsafe_base64_decode(uid))
+        user = User.objects.get(pk=user_id)
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        return JsonResponse(
+            {"errors": [{"detail": "Invalid or expired reset link."}]},
+            status=400,
+        )
+
+    token_generator = PasswordResetTokenGenerator()
+    if not token_generator.check_token(user, token):
+        return JsonResponse(
+            {"errors": [{"detail": "Invalid or expired reset link."}]},
+            status=400,
+        )
+
+    try:
+        validate_password(new_password, user)
+    except ValidationError as e:
+        return JsonResponse(
+            {"errors": [{"detail": msg} for msg in e.messages]},
+            status=400,
+        )
+
+    user.set_password(new_password)
+    user.save()
+
+    return JsonResponse(
+        {"message": "Password has been reset successfully."}, status=200
+    )
 
 
 _INCLUDE_PARAM = OpenApiParameter(
@@ -1618,6 +1752,26 @@ class DjangoUserViewSet(viewsets.ViewSet):
             if "links" in profile_fields:
                 prof.links = profile_fields["links"] if isinstance(profile_fields["links"], dict) else {}
             prof.save()
+
+        # Send welcome email (non-blocking — don't fail registration on email error)
+        if email:
+            try:
+                from django.core.mail import send_mail
+                from django.template.loader import render_to_string
+
+                login_url = f"{settings.FRONTEND_URL}/login"
+                body = render_to_string(
+                    "welcome_email.txt",
+                    {"username": username, "login_url": login_url},
+                )
+                send_mail(
+                    subject="Welcome to Career Caddy",
+                    message=body,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[email],
+                )
+            except Exception:
+                logger.warning("Failed to send welcome email to %s", email)
 
         return Response({"data": ser.to_resource(user)}, status=status.HTTP_201_CREATED)
 

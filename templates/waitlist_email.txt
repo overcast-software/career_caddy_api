@@ -1,0 +1,5 @@
+You're on the list.
+
+Thanks for signing up for Career Caddy. We'll let you know when a spot opens up.
+
+In the meantime, you can learn more at {{ frontend_url }}.

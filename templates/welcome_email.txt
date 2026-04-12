@@ -1,0 +1,7 @@
+Welcome to Career Caddy, {{ username }}.
+
+Your account is ready. Sign in here:
+
+{{ login_url }}
+
+Career Caddy helps you track job applications, prepare for interviews, and manage your career search in one place.

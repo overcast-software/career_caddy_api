@@ -120,7 +120,7 @@ else:
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [os.path.join(BASE_DIR, "templates")],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -365,3 +365,30 @@ LOGGING = {
 
 # Resume export template path
 RESUME_EXPORT_TEMPLATE = os.path.join(BASE_DIR, "templates", "resume_export.docx")
+
+# Email configuration
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "True").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+EMAIL_USE_SSL = os.environ.get("EMAIL_USE_SSL", "False").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+DEFAULT_FROM_EMAIL = os.environ.get(
+    "DEFAULT_FROM_EMAIL", "noreply@careercaddy.online"
+)
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:4200")
+PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
+
+if TESTING:
+    EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
