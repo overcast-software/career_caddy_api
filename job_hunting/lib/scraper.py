@@ -71,6 +71,8 @@ class Scraper:
                 logger.info("Legacy dispatch response status=%s", getattr(resp, "status_code", None))
             except Exception:
                 logger.exception("Legacy dispatch failed")
+                if self.scrape_id is not None:
+                    _set_scrape_status(self.scrape_id, "failed")
 
         thread = threading.Thread(target=_send, daemon=True)
         thread.start()
@@ -118,6 +120,8 @@ class Scraper:
                     logger.warning("MCP dispatch: no content returned url=%s scrape_id=%s", url, scrape_id)
             except Exception:
                 logger.exception("MCP dispatch failed")
+                if scrape_id is not None:
+                    _set_scrape_status(scrape_id, "failed")
 
         thread = threading.Thread(target=_send, daemon=True)
         thread.start()
@@ -159,6 +163,8 @@ class Scraper:
                         logger.exception("A2A dispatch: failed to store job_content scrape_id=%s", scrape_id)
             except Exception:
                 logger.exception("A2A dispatch failed")
+                if scrape_id is not None:
+                    _set_scrape_status(scrape_id, "failed")
 
         thread = threading.Thread(target=_send, daemon=True)
         thread.start()
