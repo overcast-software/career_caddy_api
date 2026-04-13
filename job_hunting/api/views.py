@@ -7672,6 +7672,46 @@ class InvitationViewSet(BaseViewSet):
             {"data": ser.to_resource(invitation)}, status=status.HTTP_201_CREATED
         )
 
+    @action(detail=True, methods=["post"], url_path="resend")
+    def resend(self, request, pk=None):
+        from django.utils import timezone as tz
+        from django.core.mail import send_mail
+        from django.template.loader import render_to_string
+
+        obj = Invitation.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        if obj.is_accepted:
+            return Response(
+                {"errors": [{"detail": "Invitation already accepted."}]}, status=400
+            )
+
+        # Reset expiry if expired
+        if obj.is_expired:
+            obj.expires_at = tz.now() + tz.timedelta(days=7)
+            obj.save()
+
+        invite_url = f"{settings.FRONTEND_URL}/accept-invite?token={obj.token}"
+        body = render_to_string(
+            "invitation_email.txt", {"invite_url": invite_url}
+        )
+        try:
+            send_mail(
+                subject="You're invited to Career Caddy",
+                message=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[obj.email],
+            )
+        except Exception:
+            logger.warning("Failed to resend invitation email to %s", obj.email)
+            return Response(
+                {"errors": [{"detail": "Failed to send email."}]}, status=502
+            )
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
     def destroy(self, request, pk=None):
         obj = Invitation.objects.filter(pk=pk).first()
         if not obj:
