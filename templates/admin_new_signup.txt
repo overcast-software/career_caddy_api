@@ -1,0 +1,6 @@
+New signup on Career Caddy.
+
+Username: {{ username }}
+Email: {{ email }}
+Method: {{ method }}
+Time: {{ timestamp }}

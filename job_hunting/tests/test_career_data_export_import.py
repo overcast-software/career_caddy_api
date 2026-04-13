@@ -126,6 +126,57 @@ class TestCareerDataImport(TestCase):
         self.assertEqual(data["answers"]["skipped"], 1)
         self.assertEqual(JobPost.objects.count(), 1)
 
+    def test_import_skips_duplicates_without_link(self):
+        """Job posts without a link should still be deduplicated by title+company+user."""
+        from openpyxl import Workbook
+
+        def _make_no_link_xlsx():
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "job-posts"
+            ws.append(["id", "title", "company", "description", "link",
+                        "posted_date", "extraction_date", "salary_min", "salary_max",
+                        "location", "remote", "created_at"])
+            ws.append([1, "Manual Entry", "SomeCo", "No link job", None,
+                        None, None, None, None, "Remote", True, None])
+
+            ws2 = wb.create_sheet("job-applications")
+            ws2.append(["id", "job_post_id", "company", "status",
+                         "applied_at", "tracking_url", "notes"])
+            ws2.append([1, 1, "SomeCo", "Applied", None, None, "Notes"])
+
+            ws3 = wb.create_sheet("questions")
+            ws3.append(["id", "application_id", "company", "job_post_id",
+                         "content", "favorite", "created_at"])
+            ws3.append([1, 1, "SomeCo", 1, "Why here?", False, None])
+
+            ws4 = wb.create_sheet("answers")
+            ws4.append(["id", "question_id", "content", "favorite", "status", "created_at"])
+            ws4.append([1, 1, "Because reasons", False, "draft", None])
+
+            buf = BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            buf.name = "nolink.xlsx"
+            return buf
+
+        # First import
+        f1 = _make_no_link_xlsx()
+        resp1 = self.client.post("/api/v1/career-data/import/", {"file": f1}, format="multipart")
+        self.assertEqual(resp1.json()["data"]["job-posts"]["created"], 1)
+        self.assertEqual(JobPost.objects.count(), 1)
+
+        # Second import — should skip everything
+        f2 = _make_no_link_xlsx()
+        resp2 = self.client.post("/api/v1/career-data/import/", {"file": f2}, format="multipart")
+        data = resp2.json()["data"]
+        self.assertEqual(data["job-posts"]["skipped"], 1)
+        self.assertEqual(data["job-posts"]["created"], 0)
+        self.assertEqual(data["job-applications"]["skipped"], 1)
+        self.assertEqual(data["questions"]["skipped"], 1)
+        self.assertEqual(data["answers"]["skipped"], 1)
+        self.assertEqual(JobPost.objects.count(), 1)
+
     def test_import_superuser_only(self):
         self.client.force_authenticate(user=self.regular)
         f = self._make_xlsx()

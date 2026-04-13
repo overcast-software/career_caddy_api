@@ -398,6 +398,8 @@ def waitlist_signup(request):
         except Exception:
             logger.warning("Failed to send waitlist confirmation to %s", email)
 
+        _notify_admins_new_signup(email, email, method="waitlist")
+
         return JsonResponse({"success": True, "email": email}, status=201)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
@@ -7276,16 +7278,23 @@ def career_data_import(request):
             for row in _rows_as_dicts(wbook["job-posts"]):
                 old_id = row.get("id")
                 link = row.get("link")
-                # Skip duplicate by link (unique constraint)
-                if link and JobPost.objects.filter(link=link).exists():
-                    if old_id is not None:
-                        existing = JobPost.objects.filter(link=link).first()
-                        jp_id_map[int(old_id)] = existing.id
-                    stats["job-posts"]["skipped"] += 1
-                    continue
                 company = None
                 if row.get("company"):
                     company, _ = Company.objects.get_or_create(name=row["company"])
+                # Skip duplicate by link (unique constraint)
+                existing = None
+                if link:
+                    existing = JobPost.objects.filter(link=link).first()
+                # Fallback: match on title + company + created_by for linkless posts
+                if not existing and row.get("title"):
+                    existing = JobPost.objects.filter(
+                        title=row["title"], company=company, created_by=request.user
+                    ).first()
+                if existing:
+                    if old_id is not None:
+                        jp_id_map[int(old_id)] = existing.id
+                    stats["job-posts"]["skipped"] += 1
+                    continue
                 from decimal import Decimal
                 jp = JobPost.objects.create(
                     title=row.get("title"),
@@ -7756,7 +7765,44 @@ def _create_user_from_data(username, password, email, first_name="", last_name="
 
     Profile.objects.get_or_create(user_id=user.id)
 
+    _notify_admins_new_signup(username, email, method="registration")
+
     return user, None, None
+
+
+def _notify_admins_new_signup(username, email, method="registration"):
+    """Email all superusers when someone signs up."""
+    from django.core.mail import send_mail
+    from django.template.loader import render_to_string
+    from django.utils import timezone as tz
+
+    User = get_user_model()
+    admin_emails = list(
+        User.objects.filter(is_superuser=True)
+        .exclude(email="")
+        .values_list("email", flat=True)
+    )
+    if not admin_emails:
+        return
+
+    try:
+        body = render_to_string(
+            "admin_new_signup.txt",
+            {
+                "username": username,
+                "email": email or "(none)",
+                "method": method,
+                "timestamp": tz.now().strftime("%Y-%m-%d %H:%M UTC"),
+            },
+        )
+        send_mail(
+            subject=f"Career Caddy: new signup — {username}",
+            message=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=admin_emails,
+        )
+    except Exception:
+        logger.warning("Failed to send admin signup notification for %s", username)
 
 
 @csrf_exempt
