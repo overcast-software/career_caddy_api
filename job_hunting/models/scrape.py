@@ -1,9 +1,18 @@
+from django.conf import settings
 from django.db import models
 from .base import GetMixin
 from urllib.parse import urlparse
 
 
 class Scrape(GetMixin, models.Model):
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column="created_by",
+        related_name="created_scrapes",
+    )
     url = models.CharField(max_length=2000, null=True, blank=True)
     company = models.ForeignKey(
         "Company",

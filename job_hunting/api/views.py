@@ -4185,7 +4185,9 @@ class ScrapeViewSet(BaseSAViewSet):
 
     def list(self, request):
         qs = Scrape.objects.filter(
-            Q(job_post__created_by_id=request.user.id) | Q(job_post__isnull=True)
+            Q(created_by=request.user)
+            | Q(job_post__created_by_id=request.user.id)
+            | Q(job_post__isnull=True, created_by__isnull=True)
         )
 
         # Sorting
@@ -4293,7 +4295,9 @@ class ScrapeViewSet(BaseSAViewSet):
         obj = Scrape.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        if obj.job_post_id and obj.job_post.created_by_id != request.user.id:
+        if obj.created_by_id and obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if obj.job_post_id and obj.job_post.created_by_id and obj.job_post.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         ser = self.get_serializer()
@@ -4337,7 +4341,7 @@ class ScrapeViewSet(BaseSAViewSet):
                     {"errors": [{"detail": "URL is required"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            scrape = Scrape.objects.create(url=url, status="hold")
+            scrape = Scrape.objects.create(url=url, status="hold", created_by=request.user)
             # Link to existing job post if URL matches
             existing_jp = JobPost.objects.filter(link=url).first()
             if existing_jp:
@@ -4405,7 +4409,7 @@ class ScrapeViewSet(BaseSAViewSet):
             # If failed, we'll create a new scrape below
             logger.info("ScrapeViewSet.create: existing scrape status=%s, creating new scrape", existing_scrape.status)
 
-        scrape = Scrape.objects.create(url=url, status="pending")
+        scrape = Scrape.objects.create(url=url, status="pending", created_by=request.user)
         logger.info("ScrapeViewSet.create: created scrape id=%s", scrape.id)
 
         # Associate with an existing job post (and its company) if the URL matches
@@ -4499,7 +4503,7 @@ class ScrapeViewSet(BaseSAViewSet):
 
         from job_hunting.lib.parsers.generic_parser import GenericParser
         try:
-            GenericParser().parse(obj)
+            GenericParser().parse(obj, user=request.user)
         except Exception:
             logger.exception("ScrapeViewSet.parse: failed id=%s", obj.id)
             return Response(

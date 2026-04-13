@@ -65,9 +65,9 @@ class GenericParser:
         self.client = client
         self.agent = None
 
-    def parse(self, scrape: Scrape):
+    def parse(self, scrape: Scrape, user=None):
         validated_data = self.analyze_with_ai(scrape)
-        self.process_evaluation(scrape, validated_data)
+        self.process_evaluation(scrape, validated_data, user=user)
 
     def get_agent(self):
         if self.agent:
@@ -86,7 +86,7 @@ class GenericParser:
         )
         return Agent(ollama_model, output_type=ParsedJobData)
 
-    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData):
+    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None):
         # Find or create company
         company, _ = Company.objects.get_or_create(
             name=validated_data.company_name,
@@ -94,6 +94,8 @@ class GenericParser:
         )
 
         job_defaults = {}
+        if user:
+            job_defaults["created_by"] = user
         if validated_data.description:
             job_defaults["description"] = validated_data.description
         if validated_data.posted_date:
