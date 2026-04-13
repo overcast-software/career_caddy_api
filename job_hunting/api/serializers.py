@@ -12,7 +12,7 @@ from job_hunting.models import (
     Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
-    AiUsage,
+    AiUsage, Waitlist,
 )
 
 
@@ -587,7 +587,7 @@ class ResumeSerializer(BaseSASerializer):
 class ScoreSerializer(BaseSASerializer):
     type = "score"
     model = Score
-    attributes = ["score", "status", "explanation"]
+    attributes = ["score", "status", "explanation", "created_at"]
     relationships = {
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
@@ -1314,6 +1314,14 @@ class AiUsageSerializer(BaseSASerializer):
     relationship_fks = {"user": "user_id"}
 
 
+class WaitlistSerializer(BaseSASerializer):
+    type = "waitlist"
+    model = Waitlist
+    attributes = ["email", "notes", "created_at", "updated_at"]
+    relationships = {}
+    relationship_fks = {}
+
+
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
     "api-key": ApiKeySerializer,
@@ -1338,4 +1346,5 @@ TYPE_TO_SERIALIZER = {
     "answer": AnswerSerializer,
     "project": ProjectSerializer,
     "ai-usage": AiUsageSerializer,
+    "waitlist": WaitlistSerializer,
 }

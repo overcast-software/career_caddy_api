@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from job_hunting.api.permissions import IsGuestReadOnly
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser, MultiPartParser
@@ -65,6 +65,7 @@ from job_hunting.models import (
     Project,
     ProjectDescription,
     AiUsage,
+    Waitlist,
 )
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
@@ -89,6 +90,7 @@ from .serializers import (
     AnswerSerializer,
     ProjectSerializer,
     AiUsageSerializer,
+    WaitlistSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
     _resource_base_path,
@@ -3698,7 +3700,7 @@ class ScoreViewSet(BaseSAViewSet):
         return s_int, str(explanation or "").strip()
 
     def list(self, request):
-        qs = Score.objects.filter(user_id=request.user.id).order_by("-id")
+        qs = Score.objects.filter(user_id=request.user.id).order_by("-created_at", "-id")
         total = qs.count()
         page_number, page_size = self._page_params()
         total_pages = math.ceil(total / page_size) if page_size else 1
@@ -7575,3 +7577,29 @@ class AiUsageViewSet(BaseSAViewSet):
                 },
             },
         })
+
+
+class WaitlistViewSet(BaseSAViewSet):
+    model = Waitlist
+    serializer_class = WaitlistSerializer
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def list(self, request):
+        qs = Waitlist.objects.all().order_by("-created_at")
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs[offset: offset + page_size])
+        ser = self.get_serializer()
+        return Response({
+            "data": [ser.to_resource(o) for o in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        })
+
+    def destroy(self, request, pk=None):
+        obj = Waitlist.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=204)

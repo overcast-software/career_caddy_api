@@ -45,6 +45,7 @@ from job_hunting.api.views import (
     ApiKeyViewSet,
     ProjectViewSet,
     AiUsageViewSet,
+    WaitlistViewSet,
     healthcheck,
     guest_session,
     initialize,
@@ -79,6 +80,7 @@ router.register(r"answers", AnswerViewSet, basename="answers")
 router.register(r"api-keys", ApiKeyViewSet, basename="api-keys")
 router.register(r"projects", ProjectViewSet, basename="projects")
 router.register(r"ai-usages", AiUsageViewSet, basename="ai-usages")
+router.register(r"waitlists", WaitlistViewSet, basename="waitlists")
 
 urlpatterns = [
     path("admin/", admin.site.urls),
