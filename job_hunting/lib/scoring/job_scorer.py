@@ -70,5 +70,20 @@ class JobScorer:
         if not hasattr(result, "output") or result.output is None:
             raise ValueError("Scoring failed: no structured output returned")
 
-        # Return the Pydantic model directly (no JSON/dict)
-        return result.output
+        # Attach usage data to the output for the caller to record
+        output = result.output
+        output._usage = result.usage()
+        output._model_name = self._get_model_name()
+        return output
+
+    def _get_model_name(self) -> str:
+        """Return a string name for the current model."""
+        if self.agent is None:
+            return "unknown"
+        model = self.agent.model
+        if isinstance(model, str):
+            return model
+        if hasattr(model, "model_name"):
+            name = model.model_name
+            return name() if callable(name) else str(name)
+        return str(model)

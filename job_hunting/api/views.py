@@ -3603,6 +3603,8 @@ class ScoreViewSet(BaseViewSet):
         captured_description = jp.description
         captured_resume_markdown = resume_markdown
 
+        captured_user_id = request.user.id
+
         def _score():
             import django
             django.db.close_old_connections()
@@ -3613,6 +3615,20 @@ class ScoreViewSet(BaseViewSet):
                     explanation=result.evaluation,
                     status="completed",
                 )
+                # Record AI usage for scoring
+                usage = getattr(result, "_usage", None)
+                model_name = getattr(result, "_model_name", "unknown")
+                if usage:
+                    AiUsage.objects.create(
+                        user_id=captured_user_id,
+                        agent_name="job_scorer",
+                        model_name=model_name,
+                        trigger="score",
+                        request_tokens=usage.request_tokens or 0,
+                        response_tokens=usage.response_tokens or 0,
+                        total_tokens=usage.total_tokens or 0,
+                        request_count=usage.requests or 1,
+                    )
             except Exception:
                 Score.objects.filter(pk=score_id).update(status="failed")
 
@@ -6800,7 +6816,7 @@ class ApiKeyViewSet(BaseViewSet):
         if not request.user.is_staff and obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
 
-        obj.revoke()
+        obj.delete()
         return Response(status=204)
 
     @extend_schema(

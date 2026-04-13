@@ -66,7 +66,7 @@ ALLOWED_HOSTS = list(
     set(
         (globals().get("ALLOWED_HOSTS") or [])
         + [h for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h]
-        + ["api.careercaddy.online"]
+        + ["api.careercaddy.online", "api"]
     )
 )
 
