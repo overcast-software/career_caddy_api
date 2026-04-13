@@ -64,6 +64,7 @@ from job_hunting.models import (
     JobApplicationStatus,
     Project,
     ProjectDescription,
+    AiUsage,
 )
 from job_hunting.lib.models.base import BaseModel
 from .serializers import (
@@ -87,6 +88,7 @@ from .serializers import (
     QuestionSerializer,
     AnswerSerializer,
     ProjectSerializer,
+    AiUsageSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
     _resource_base_path,
@@ -7406,3 +7408,170 @@ def career_data_import(request):
 
     wbook.close()
     return Response({"data": stats})
+
+
+class AiUsageViewSet(BaseSAViewSet):
+    model = AiUsage
+    serializer_class = AiUsageSerializer
+
+    def _base_queryset(self, request):
+        if request.user.is_staff:
+            qs = AiUsage.objects.all()
+            user_id = request.query_params.get("user_id")
+            if user_id:
+                qs = qs.filter(user_id=int(user_id))
+            return qs
+        return AiUsage.objects.filter(user=request.user)
+
+    def _apply_filters(self, qs, request):
+        for field in ("agent_name", "model_name", "trigger"):
+            val = request.query_params.get(field)
+            if val:
+                qs = qs.filter(**{field: val})
+        pipeline_run_id = request.query_params.get("pipeline_run_id")
+        if pipeline_run_id:
+            qs = qs.filter(pipeline_run_id=pipeline_run_id)
+        date_from = request.query_params.get("date_from")
+        if date_from:
+            qs = qs.filter(created_at__gte=date_from)
+        date_to = request.query_params.get("date_to")
+        if date_to:
+            qs = qs.filter(created_at__lte=date_to)
+        return qs
+
+    def list(self, request):
+        qs = self._base_queryset(request)
+        qs = self._apply_filters(qs, request)
+        qs = qs.order_by("-created_at")
+
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs[offset:offset + page_size])
+
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {
+            "data": data,
+            "meta": {
+                "total": total,
+                "page": page_number,
+                "per_page": page_size,
+                "total_pages": total_pages,
+            },
+            "links": {"next": None},
+        }
+
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"]["next"] = base + "?" + "&".join(
+                f"{k}={v}" for k, v in qp.items()
+            )
+
+        return Response(payload)
+
+    def create(self, request):
+        from job_hunting.lib.pricing import estimate_cost
+
+        data = request.data if isinstance(request.data, dict) else {}
+        ser = self.get_serializer()
+
+        if "data" in data:
+            try:
+                attrs = ser.parse_payload(request.data)
+            except ValueError as e:
+                return Response({"errors": [{"detail": str(e)}]}, status=400)
+        else:
+            attrs = {k: data[k] for k in data if k in {
+                "agent_name", "model_name", "trigger", "pipeline_run_id",
+                "request_tokens", "response_tokens", "total_tokens", "request_count",
+            }}
+
+        attrs["user_id"] = request.user.id
+        attrs.pop("estimated_cost_usd", None)
+        attrs["estimated_cost_usd"] = estimate_cost(
+            attrs.get("model_name", ""),
+            int(attrs.get("request_tokens", 0)),
+            int(attrs.get("response_tokens", 0)),
+        )
+
+        obj = AiUsage.objects.create(**attrs)
+        return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        from django.db.models import Sum, Count
+        from django.db.models.functions import TruncDay, TruncWeek, TruncMonth
+
+        qs = self._base_queryset(request)
+        qs = self._apply_filters(qs, request)
+
+        days = int(request.query_params.get("days", 30))
+        from django.utils import timezone as tz
+        cutoff = tz.now() - tz.timedelta(days=days)
+        qs = qs.filter(created_at__gte=cutoff)
+
+        period = request.query_params.get("period", "daily")
+        trunc_fn = {"daily": TruncDay, "weekly": TruncWeek, "monthly": TruncMonth}.get(
+            period, TruncDay
+        )
+
+        group_by = request.query_params.get("group_by")
+        valid_groups = {"agent_name", "model_name", "trigger"}
+        group_field = group_by if group_by in valid_groups else None
+
+        values_fields = ["period"]
+        if group_field:
+            values_fields.append(group_field)
+
+        buckets = (
+            qs.annotate(period=trunc_fn("created_at"))
+            .values(*values_fields)
+            .annotate(
+                total_tokens=Sum("total_tokens"),
+                request_tokens=Sum("request_tokens"),
+                response_tokens=Sum("response_tokens"),
+                estimated_cost_usd=Sum("estimated_cost_usd"),
+                request_count=Count("id"),
+            )
+            .order_by("period")
+        )
+
+        bucket_list = []
+        for b in buckets:
+            entry = {
+                "period": b["period"].isoformat() if b["period"] else None,
+                "total_tokens": b["total_tokens"] or 0,
+                "request_tokens": b["request_tokens"] or 0,
+                "response_tokens": b["response_tokens"] or 0,
+                "estimated_cost_usd": str(b["estimated_cost_usd"] or 0),
+                "request_count": b["request_count"],
+            }
+            if group_field:
+                entry[group_field] = b[group_field]
+            bucket_list.append(entry)
+
+        totals = qs.aggregate(
+            total_tokens=Sum("total_tokens"),
+            request_tokens=Sum("request_tokens"),
+            response_tokens=Sum("response_tokens"),
+            estimated_cost_usd=Sum("estimated_cost_usd"),
+            request_count=Count("id"),
+        )
+
+        return Response({
+            "data": {
+                "buckets": bucket_list,
+                "totals": {
+                    "total_tokens": totals["total_tokens"] or 0,
+                    "request_tokens": totals["request_tokens"] or 0,
+                    "response_tokens": totals["response_tokens"] or 0,
+                    "estimated_cost_usd": str(totals["estimated_cost_usd"] or 0),
+                    "request_count": totals["request_count"],
+                },
+            },
+        })

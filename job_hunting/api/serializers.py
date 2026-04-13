@@ -12,6 +12,7 @@ from job_hunting.models import (
     Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
+    AiUsage,
 )
 
 
@@ -1292,6 +1293,27 @@ class ProjectSerializer(BaseSASerializer):
     relationship_fks = {"user": "user_id"}
 
 
+class AiUsageSerializer(BaseSASerializer):
+    type = "ai-usage"
+    model = AiUsage
+    attributes = [
+        "agent_name",
+        "model_name",
+        "trigger",
+        "pipeline_run_id",
+        "request_tokens",
+        "response_tokens",
+        "total_tokens",
+        "request_count",
+        "estimated_cost_usd",
+        "created_at",
+    ]
+    relationships = {
+        "user": {"attr": "user", "type": "user", "uselist": False},
+    }
+    relationship_fks = {"user": "user_id"}
+
+
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
     "api-key": ApiKeySerializer,
@@ -1315,4 +1337,5 @@ TYPE_TO_SERIALIZER = {
     "question": QuestionSerializer,
     "answer": AnswerSerializer,
     "project": ProjectSerializer,
+    "ai-usage": AiUsageSerializer,
 }
