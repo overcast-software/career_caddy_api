@@ -66,6 +66,7 @@ def chat_proxy(request):
         "token": token,
         "history": body.get("history", []),
         "conversation_id": body.get("conversation_id", ""),
+        "page_context": body.get("page_context"),
     }
 
     chat_url = f"{CHAT_SERVICE_URL}/chat"
