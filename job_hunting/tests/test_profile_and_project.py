@@ -2,8 +2,6 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APITestCase
 from rest_framework import status
-from job_hunting.lib.db import init_sqlalchemy
-from job_hunting.lib.models.base import BaseModel, Base
 from job_hunting.models import Profile
 from job_hunting.models import Project
 
@@ -12,12 +10,6 @@ class ProfileAPITests(APITestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        # Initialize SQLAlchemy schema
-        init_sqlalchemy()
-
-        cls.session = BaseModel.get_session()
-        cls.engine = cls.session.bind
-        Base.metadata.create_all(bind=cls.engine)
         # Create Django user
         User = get_user_model()
         cls.user = User.objects.create_user(
@@ -92,14 +84,6 @@ class ProfileAPITests(APITestCase):
 
 
 class ProjectModelTests(TestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Initialize SQLAlchemy schema
-        init_sqlalchemy()
-        cls.session = BaseModel.get_session()
-        cls.engine = cls.session.bind
-
     def test_project_model_roundtrip_simple(self):
         """Test simple Project model round-trip using explicit fields"""
         User = get_user_model()

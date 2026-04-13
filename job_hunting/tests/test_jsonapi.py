@@ -2,45 +2,11 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APITransactionTestCase
 from rest_framework import status
 
-from job_hunting.lib.db import init_sqlalchemy
-from job_hunting.lib.models.base import BaseModel, Base
 from job_hunting.models import Company, JobPost, Resume, Score, CoverLetter, JobApplication, Scrape
 
 
 class JSONAPITests(APITransactionTestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Ensure SQLAlchemy is initialized and tables exist in the Django test DB
-        init_sqlalchemy()
-        cls.session = BaseModel.get_session()
-        cls.engine = cls.session.bind
-        Base.metadata.create_all(bind=cls.engine)
-
-    @classmethod
-    def tearDownClass(cls):
-        # Release SA session without closing underlying connections Django may reuse
-        try:
-            if hasattr(cls.session, "remove"):
-                cls.session.remove()
-        except Exception:
-            pass
-        super().tearDownClass()
-
     def setUp(self):
-        # Release any open SA connections/transactions before DDL to avoid lock contention
-        self.session.close()
-        if hasattr(self.session, "remove"):
-            self.session.remove()
-
-        # Hard reset SA tables for isolation between tests (exclude auth_user — Django-owned)
-        sa_tables = [t for t in Base.metadata.sorted_tables if t.name != "auth_user"]
-        Base.metadata.drop_all(bind=self.engine, tables=sa_tables)
-        Base.metadata.create_all(bind=self.engine)
-
-        # Reinitialize session after remove()
-        self.session = BaseModel.get_session()
-
         # Create a Django user and authenticate with JWT for protected endpoints
         User = get_user_model()
         self.username = "testuser"

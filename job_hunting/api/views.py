@@ -67,7 +67,6 @@ from job_hunting.models import (
     AiUsage,
     Waitlist,
 )
-from job_hunting.lib.models.base import BaseModel
 from .serializers import (
     ApiKeySerializer,
     DjangoUserSerializer,
@@ -624,7 +623,7 @@ _JSONAPI_WRITE = inline_serializer(
 )
 
 
-class BaseSAViewSet(viewsets.ViewSet):
+class BaseViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated, IsGuestReadOnly]
     parser_classes = [MultiPartParser, VndApiJSONParser, JSONParser]
     model = None
@@ -683,27 +682,9 @@ class BaseSAViewSet(viewsets.ViewSet):
             return []
         return super().get_throttles()
 
-    def _is_django_model(self):
-        """Return True if self.model is a Django ORM model."""
-        try:
-            from django.db import models as _django_models
-
-            return self.model is not None and issubclass(
-                self.model, _django_models.Model
-            )
-        except (TypeError, AttributeError):
-            return False
-
     def _get_obj(self, pk):
-        """Fetch a single object by PK, handling both Django and SA models."""
-        if self._is_django_model():
-            return self.model.objects.filter(pk=int(pk)).first()
-        return self.model.get(int(pk))
-
-    def get_session(self):
-        if self._is_django_model():
-            return BaseModel.get_session()
-        return self.model.get_session()
+        """Fetch a single object by PK."""
+        return self.model.objects.filter(pk=int(pk)).first()
 
     def get_serializer(self, *args, slim=False, **kwargs):
         ser = self.serializer_class()
@@ -850,12 +831,9 @@ class BaseSAViewSet(viewsets.ViewSet):
                                 rel_ser = ser_cls()
                                 model_cls = rel_ser.model
                                 try:
-                                    if hasattr(model_cls, "objects"):
-                                        fetched = model_cls.objects.filter(
-                                            pk=int(rel_id)
-                                        ).first()
-                                    else:
-                                        fetched = model_cls.get(int(rel_id))
+                                    fetched = model_cls.objects.filter(
+                                        pk=int(rel_id)
+                                    ).first()
                                     if fetched:
                                         targets = [fetched]
                                 except (TypeError, ValueError, AttributeError):
@@ -951,11 +929,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        if self._is_django_model():
-            items = list(self.model.objects.all())
-        else:
-            session = self.get_session()
-            items = session.query(self.model).all()
+        items = list(self.model.objects.all())
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -1030,13 +1004,7 @@ class BaseSAViewSet(viewsets.ViewSet):
             # Ensure unsupported ownership fields are not passed to the model
             attrs.pop("created_by_id", None)
             attrs.pop("created_by", None)
-        if self._is_django_model():
-            obj = self.model.objects.create(**attrs)
-        else:
-            obj = self.model(**attrs)
-            session = self.get_session()
-            session.add(obj)
-            session.commit()
+        obj = self.model.objects.create(**attrs)
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
     @extend_schema(
@@ -1079,12 +1047,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         attrs.pop("created_by_id", None)
         for k, v in attrs.items():
             setattr(obj, k, v)
-        if self._is_django_model():
-            obj.save()
-        else:
-            session = self.get_session()
-            session.add(obj)
-            session.commit()
+        obj.save()
         return Response({"data": ser.to_resource(obj)})
 
     @extend_schema(
@@ -1093,15 +1056,7 @@ class BaseSAViewSet(viewsets.ViewSet):
         responses={204: OpenApiResponse(description="Deleted")},
     )
     def destroy(self, request, pk=None):
-        if self._is_django_model():
-            self.model.objects.filter(pk=int(pk)).delete()
-            return Response(status=204)
-        obj = self.model.get(int(pk))
-        if not obj:
-            return Response(status=204)
-        session = self.get_session()
-        session.delete(obj)
-        session.commit()
+        self.model.objects.filter(pk=int(pk)).delete()
         return Response(status=204)
 
     # JSON:API relationships linkage endpoint:
@@ -1182,12 +1137,11 @@ class BaseSAViewSet(viewsets.ViewSet):
     ),
     destroy=extend_schema(tags=["Summaries"], summary="Delete a summary"),
 )
-class SummaryViewSet(BaseSAViewSet):
+class SummaryViewSet(BaseViewSet):
     model = Summary
     serializer_class = SummarySerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     def list(self, request):
         qs = Summary.objects.filter(user_id=request.user.id)
@@ -2067,7 +2021,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
     ),
     destroy=extend_schema(tags=["Resumes"], summary="Delete a resume"),
 )
-class ResumeViewSet(BaseSAViewSet):
+class ResumeViewSet(BaseViewSet):
     model = Resume
     serializer_class = ResumeSerializer
 
@@ -3523,7 +3477,7 @@ class ResumeViewSet(BaseSAViewSet):
     partial_update=extend_schema(tags=["Scores"], summary="Partially update a score"),
     destroy=extend_schema(tags=["Scores"], summary="Delete a score"),
 )
-class ScoreViewSet(BaseSAViewSet):
+class ScoreViewSet(BaseViewSet):
     model = Score
     serializer_class = ScoreSerializer
 
@@ -3750,12 +3704,11 @@ class ScoreViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Job Posts"], summary="Delete a job post"),
 )
-class JobPostViewSet(BaseSAViewSet):
+class JobPostViewSet(BaseViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     def pre_save_payload(self, request, attrs, creating):
         # Remove any client-supplied ownership fields so they can't be spoofed
@@ -4183,7 +4136,7 @@ class JobPostViewSet(BaseSAViewSet):
     partial_update=extend_schema(tags=["Scrapes"], summary="Partially update a scrape"),
     destroy=extend_schema(tags=["Scrapes"], summary="Delete a scrape"),
 )
-class ScrapeViewSet(BaseSAViewSet):
+class ScrapeViewSet(BaseViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
@@ -4532,12 +4485,11 @@ class ScrapeViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Companies"], summary="Delete a company"),
 )
-class CompanyViewSet(BaseSAViewSet):
+class CompanyViewSet(BaseViewSet):
     model = Company
     serializer_class = CompanySerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     def list(self, request):
         qs = Company.objects
@@ -4711,7 +4663,7 @@ class CompanyViewSet(BaseSAViewSet):
         tags=["Cover Letters"], summary="Delete a cover letter (owner only)"
     ),
 )
-class CoverLetterViewSet(BaseSAViewSet):
+class CoverLetterViewSet(BaseViewSet):
     model = CoverLetter
     serializer_class = CoverLetterSerializer
     permission_classes = [IsAuthenticated]
@@ -5146,7 +5098,7 @@ class CoverLetterViewSet(BaseSAViewSet):
         tags=["Job Applications"], summary="Delete a job application"
     ),
 )
-class JobApplicationViewSet(BaseSAViewSet):
+class JobApplicationViewSet(BaseViewSet):
     model = JobApplication
     serializer_class = JobApplicationSerializer
 
@@ -5421,7 +5373,7 @@ class StatusViewSet(viewsets.ModelViewSet):
         tags=["Job Application Statuses"], summary="Delete a job application status"
     ),
 )
-class JobApplicationStatusViewSet(BaseSAViewSet):
+class JobApplicationStatusViewSet(BaseViewSet):
     model = JobApplicationStatus
     serializer_class = JobApplicationStatusSerializer
 
@@ -5515,12 +5467,11 @@ class JobApplicationStatusViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Questions"], summary="Delete a question"),
 )
-class QuestionViewSet(BaseSAViewSet):
+class QuestionViewSet(BaseViewSet):
     model = Question
     serializer_class = QuestionSerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     @extend_schema(
         tags=["Questions"],
@@ -5725,7 +5676,7 @@ class QuestionViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Answers"], summary="Delete an answer"),
 )
-class AnswerViewSet(BaseSAViewSet):
+class AnswerViewSet(BaseViewSet):
     model = Answer
     serializer_class = AnswerSerializer
 
@@ -6035,7 +5986,7 @@ class AnswerViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Experiences"], summary="Delete an experience"),
 )
-class ExperienceViewSet(BaseSAViewSet):
+class ExperienceViewSet(BaseViewSet):
     model = Experience
     serializer_class = ExperienceSerializer
 
@@ -6222,12 +6173,11 @@ class ExperienceViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Educations"], summary="Delete an education"),
 )
-class EducationViewSet(BaseSAViewSet):
+class EducationViewSet(BaseViewSet):
     model = Education
     serializer_class = EducationSerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     def list(self, request):
         items = list(Education.objects.all())
@@ -6332,12 +6282,11 @@ class EducationViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Certifications"], summary="Delete a certification"),
 )
-class CertificationViewSet(BaseSAViewSet):
+class CertificationViewSet(BaseViewSet):
     model = Certification
     serializer_class = CertificationSerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     def list(self, request):
         items = list(Certification.objects.all())
@@ -6452,12 +6401,11 @@ class CertificationViewSet(BaseSAViewSet):
     ),
     destroy=extend_schema(tags=["Descriptions"], summary="Delete a description"),
 )
-class DescriptionViewSet(BaseSAViewSet):
+class DescriptionViewSet(BaseViewSet):
     model = Description
     serializer_class = DescriptionSerializer
 
-    def get_session(self):
-        return BaseModel.get_session()
+
 
     def list(self, request):
         items = list(Description.objects.all())
@@ -6678,7 +6626,7 @@ class DescriptionViewSet(BaseSAViewSet):
         return Response({"data": data})
 
 
-class ApiKeyViewSet(BaseSAViewSet):
+class ApiKeyViewSet(BaseViewSet):
     model = ApiKey
     serializer_class = ApiKeySerializer
     permission_classes = [IsAuthenticated]
@@ -6890,7 +6838,7 @@ class ApiKeyViewSet(BaseSAViewSet):
     partial_update=extend_schema(tags=["Projects"], summary="Partial update a project"),
     destroy=extend_schema(tags=["Projects"], summary="Delete a project"),
 )
-class ProjectViewSet(BaseSAViewSet):
+class ProjectViewSet(BaseViewSet):
     model = Project
     serializer_class = ProjectSerializer
 
@@ -7412,7 +7360,7 @@ def career_data_import(request):
     return Response({"data": stats})
 
 
-class AiUsageViewSet(BaseSAViewSet):
+class AiUsageViewSet(BaseViewSet):
     model = AiUsage
     serializer_class = AiUsageSerializer
 
@@ -7579,7 +7527,7 @@ class AiUsageViewSet(BaseSAViewSet):
         })
 
 
-class WaitlistViewSet(BaseSAViewSet):
+class WaitlistViewSet(BaseViewSet):
     model = Waitlist
     serializer_class = WaitlistSerializer
     permission_classes = [IsAuthenticated, IsAdminUser]

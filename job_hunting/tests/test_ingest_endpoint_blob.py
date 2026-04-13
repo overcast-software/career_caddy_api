@@ -4,40 +4,13 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 from rest_framework import status
 
-from job_hunting.lib.db import init_sqlalchemy
-from job_hunting.lib.models.base import BaseModel, Base
 from job_hunting.models import Resume
 
 
 class TestIngestEndpointBlob(APITestCase):
     """API-level tests for the resume ingest endpoint using blob uploads."""
 
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Ensure SQLAlchemy is initialized and tables exist in the Django test DB
-        init_sqlalchemy()
-        cls.session = BaseModel.get_session()
-        cls.engine = cls.session.bind
-        Base.metadata.create_all(bind=cls.engine)
-
-    @classmethod
-    def tearDownClass(cls):
-        # Close SA session only; Django handles DB teardown
-        try:
-            cls.session.close()
-            if hasattr(cls.session, "remove"):
-                cls.session.remove()
-        except Exception:
-            pass
-        super().tearDownClass()
-
     def setUp(self):
-        # Reset only non-Django SA tables (exclude auth_user which Django manages)
-        sa_tables = [t for t in Base.metadata.sorted_tables if t.name != "auth_user"]
-        Base.metadata.drop_all(bind=self.engine, tables=sa_tables)
-        Base.metadata.create_all(bind=self.engine)
-
         # Create a Django user and authenticate with JWT for protected endpoints
         User = get_user_model()
         self.username = "testuser"
@@ -172,7 +145,7 @@ class TestIngestEndpointBlob(APITestCase):
         self.assertIn("Failed to process resume", str(response.data))
         self.assertIn("Processing failed", str(response.data))
 
-    @patch("job_hunting.api.views.BaseSAViewSet._build_included")
+    @patch("job_hunting.api.views.BaseViewSet._build_included")
     @patch("job_hunting.api.views.IngestResume")
     def test_blob_ingest_with_includes(self, mock_ingest_class, mock_build_included):
         """Test ingest endpoint with ?include parameter."""

@@ -76,7 +76,7 @@ def _resource_base_path(t: str) -> str:
     return f"/api/v1/{_pluralize_type(t)}"
 
 
-class BaseSASerializer:
+class BaseSerializer:
     type: str
     model: Any
     attributes: List[str] = []
@@ -338,7 +338,7 @@ class DjangoUserSerializer:
         return out
 
 
-class ResumeSerializer(BaseSASerializer):
+class ResumeSerializer(BaseSerializer):
     type = "resume"
     model = Resume
     attributes = ["file_path", "title", "name", "notes", "user_id", "favorite"]
@@ -584,7 +584,7 @@ class ResumeSerializer(BaseSASerializer):
         return super().get_related(obj, rel_name)
 
 
-class ScoreSerializer(BaseSASerializer):
+class ScoreSerializer(BaseSerializer):
     type = "score"
     model = Score
     attributes = ["score", "status", "explanation", "created_at"]
@@ -649,7 +649,7 @@ class ScoreSerializer(BaseSASerializer):
         return super().get_related(obj, rel_name)
 
 
-class JobPostSerializer(BaseSASerializer):
+class JobPostSerializer(BaseSerializer):
     type = "job-post"
     model = JobPost
     attributes = [
@@ -685,7 +685,7 @@ class JobPostSerializer(BaseSASerializer):
     relationship_fks = {"company": "company_id"}
 
 
-class ScrapeSerializer(BaseSASerializer):
+class ScrapeSerializer(BaseSerializer):
     type = "scrape"
     model = Scrape
     attributes = [
@@ -705,7 +705,7 @@ class ScrapeSerializer(BaseSASerializer):
     relationship_fks = {"job-post": "job_post_id", "company": "company_id"}
 
 
-class CompanySerializer(BaseSASerializer):
+class CompanySerializer(BaseSerializer):
     type = "company"
     model = Company
     attributes = ["name", "display_name", "notes"]
@@ -738,7 +738,7 @@ class CompanySerializer(BaseSASerializer):
         return None, []
 
 
-class CoverLetterSerializer(BaseSASerializer):
+class CoverLetterSerializer(BaseSerializer):
     type = "cover-letter"
     model = CoverLetter
     attributes = ["content", "created_at", "favorite", "status"]
@@ -812,7 +812,7 @@ class CoverLetterSerializer(BaseSASerializer):
         return super().get_related(obj, rel_name)
 
 
-class JobApplicationSerializer(BaseSASerializer):
+class JobApplicationSerializer(BaseSerializer):
     type = "job-application"
     model = JobApplication
     attributes = ["applied_at", "status", "tracking_url", "notes"]
@@ -884,7 +884,7 @@ class JobApplicationSerializer(BaseSASerializer):
         return out
 
 
-class SummarySerializer(BaseSASerializer):
+class SummarySerializer(BaseSerializer):
     type = "summary"
     model = Summary
     attributes = ["content", "status"]
@@ -942,7 +942,7 @@ class SummarySerializer(BaseSASerializer):
         return super().get_related(obj, rel_name)
 
 
-class ExperienceSerializer(BaseSASerializer):
+class ExperienceSerializer(BaseSerializer):
     type = "experience"
     model = Experience
     attributes = ["title", "start_date", "end_date", "location", "content"]
@@ -1014,7 +1014,7 @@ class ExperienceSerializer(BaseSASerializer):
         return out
 
 
-class EducationSerializer(BaseSASerializer):
+class EducationSerializer(BaseSerializer):
     type = "education"
     model = Education
     attributes = ["degree", "issue_date", "institution", "major", "minor"]
@@ -1033,7 +1033,7 @@ class EducationSerializer(BaseSASerializer):
         return out
 
 
-class CertificationSerializer(BaseSASerializer):
+class CertificationSerializer(BaseSerializer):
     type = "certification"
     model = Certification
     attributes = ["issuer", "title", "issue_date", "content"]
@@ -1052,7 +1052,7 @@ class CertificationSerializer(BaseSASerializer):
         return out
 
 
-class DescriptionSerializer(BaseSASerializer):
+class DescriptionSerializer(BaseSerializer):
     type = "description"
     model = Description
     attributes = ["content"]
@@ -1076,7 +1076,7 @@ class DescriptionSerializer(BaseSASerializer):
         return res
 
 
-class SkillSerializer(BaseSASerializer):
+class SkillSerializer(BaseSerializer):
     type = "skill"
     model = Skill
     attributes = ["text", "skill_type"]
@@ -1105,7 +1105,7 @@ class StatusSerializer(serializers.ModelSerializer):
         fields = ["id", "status", "status_type", "created_at"]
 
 
-class JobApplicationStatusSerializer(BaseSASerializer):
+class JobApplicationStatusSerializer(BaseSerializer):
     type = "job-application-status"
     model = JobApplicationStatus
     attributes = ["created_at", "logged_at", "note"]
@@ -1136,7 +1136,7 @@ class JobApplicationStatusSerializer(BaseSASerializer):
         return res
 
 
-class AnswerSerializer(BaseSASerializer):
+class AnswerSerializer(BaseSerializer):
     type = "answer"
     model = Answer
     attributes = ["content", "created_at", "favorite", "status"]
@@ -1146,7 +1146,7 @@ class AnswerSerializer(BaseSASerializer):
     relationship_fks = {"question": "question_id"}
 
 
-class ApiKeySerializer(BaseSASerializer):
+class ApiKeySerializer(BaseSerializer):
     type = "api-key"
     model = ApiKey
     attributes = [
@@ -1192,7 +1192,7 @@ class ApiKeySerializer(BaseSASerializer):
         return super().get_related(obj, rel_name)
 
 
-class QuestionSerializer(BaseSASerializer):
+class QuestionSerializer(BaseSerializer):
     type = "question"
     model = Question
     attributes = ["content", "created_at", "favorite"]
@@ -1282,7 +1282,7 @@ class QuestionSerializer(BaseSASerializer):
         return out
 
 
-class ProjectSerializer(BaseSASerializer):
+class ProjectSerializer(BaseSerializer):
     type = "project"
     model = Project
     attributes = ["title", "description", "start_date", "end_date", "is_active", "created_at", "updated_at"]
@@ -1293,7 +1293,7 @@ class ProjectSerializer(BaseSASerializer):
     relationship_fks = {"user": "user_id"}
 
 
-class AiUsageSerializer(BaseSASerializer):
+class AiUsageSerializer(BaseSerializer):
     type = "ai-usage"
     model = AiUsage
     attributes = [
@@ -1314,7 +1314,7 @@ class AiUsageSerializer(BaseSASerializer):
     relationship_fks = {"user": "user_id"}
 
 
-class WaitlistSerializer(BaseSASerializer):
+class WaitlistSerializer(BaseSerializer):
     type = "waitlist"
     model = Waitlist
     attributes = ["email", "notes", "created_at", "updated_at"]

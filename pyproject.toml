@@ -15,7 +15,6 @@ dependencies = [
     "dj-database-url>=2.2.0",
     # Database
     "psycopg2-binary>=2.9.11",
-    "SQLAlchemy>=2.0.44",
     # AI / LLM
     "openai>=2.15.0",
     "pydantic-ai>=1.41.0",

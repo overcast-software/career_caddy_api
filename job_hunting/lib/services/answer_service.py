@@ -1,6 +1,5 @@
 from datetime import datetime
 
-from job_hunting.lib.models import BaseModel
 from job_hunting.models import Answer, JobApplication, Company, CoverLetter, Question, Resume
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
@@ -17,7 +16,6 @@ class AnswerService:
     ):
         self.ai_client = ai_client
         self.model = model
-        self.session = self._get_session()
         self.temperature = temperature
         self.previous_limit = previous_limit  # None means no limit
         self.max_section_chars = max_section_chars
@@ -25,9 +23,6 @@ class AnswerService:
             max_section_chars=self.max_section_chars
         )
         self.question = None
-
-    def _get_session(self):
-        return BaseModel.get_session()
 
     def load_context(self):
         pass
