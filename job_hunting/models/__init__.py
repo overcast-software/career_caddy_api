@@ -27,4 +27,5 @@ from .resume_project import ResumeProject as ResumeProject
 from .project_description import ProjectDescription as ProjectDescription
 from .job_application_status import JobApplicationStatus as JobApplicationStatus
 from .waitlist import Waitlist as Waitlist
+from .invitation import Invitation as Invitation
 from .ai_usage import AiUsage as AiUsage

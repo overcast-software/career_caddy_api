@@ -52,6 +52,9 @@ from job_hunting.api.views import (
     waitlist_signup,
     password_reset_request,
     password_reset_confirm,
+    InvitationViewSet,
+    accept_invite,
+    test_email,
     profile,
     career_data,
     career_data_export,
@@ -81,6 +84,7 @@ router.register(r"api-keys", ApiKeyViewSet, basename="api-keys")
 router.register(r"projects", ProjectViewSet, basename="projects")
 router.register(r"ai-usages", AiUsageViewSet, basename="ai-usages")
 router.register(r"waitlists", WaitlistViewSet, basename="waitlists")
+router.register(r"invitations", InvitationViewSet, basename="invitations")
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -96,6 +100,10 @@ urlpatterns = [
     re_path(r"^api/v1/password-reset$", password_reset_request, name="password-reset-noslash"),
     path("api/v1/password-reset/confirm/", password_reset_confirm, name="password-reset-confirm"),
     re_path(r"^api/v1/password-reset/confirm$", password_reset_confirm, name="password-reset-confirm-noslash"),
+    path("api/v1/accept-invite/", accept_invite, name="accept-invite"),
+    re_path(r"^api/v1/accept-invite$", accept_invite, name="accept-invite-noslash"),
+    path("api/v1/test-email/", test_email, name="test-email"),
+    re_path(r"^api/v1/test-email$", test_email, name="test-email-noslash"),
     re_path(
         r"^api/v1/companies/(?P<pk>\d+)/job-posts$",
         CompanyViewSet.as_view({"get": "job_posts"}),

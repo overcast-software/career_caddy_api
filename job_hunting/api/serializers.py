@@ -12,7 +12,7 @@ from job_hunting.models import (
     Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
-    AiUsage, Waitlist,
+    AiUsage, Waitlist, Invitation,
 )
 
 
@@ -1322,6 +1322,16 @@ class WaitlistSerializer(BaseSerializer):
     relationship_fks = {}
 
 
+class InvitationSerializer(BaseSerializer):
+    type = "invitation"
+    model = Invitation
+    attributes = ["email", "token", "created_at", "accepted_at", "expires_at"]
+    relationships = {
+        "created-by": {"attr": "created_by", "type": "user", "uselist": False},
+    }
+    relationship_fks = {"created-by": "created_by_id"}
+
+
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
     "api-key": ApiKeySerializer,
@@ -1347,4 +1357,5 @@ TYPE_TO_SERIALIZER = {
     "project": ProjectSerializer,
     "ai-usage": AiUsageSerializer,
     "waitlist": WaitlistSerializer,
+    "invitation": InvitationSerializer,
 }

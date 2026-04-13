@@ -1,0 +1,9 @@
+You've been invited to Career Caddy.
+
+Click the link below to create your account:
+
+{{ invite_url }}
+
+This link will expire in 7 days.
+
+If you did not expect this invitation, you can safely ignore this email.

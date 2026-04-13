@@ -91,5 +91,4 @@ class TestApiKeyAPI(TestCase):
         obj, _ = ApiKey.generate_key(name="to-revoke", user_id=self.user.id)
         response = self.client.delete(f"/api/v1/api-keys/{obj.id}/")
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        obj.refresh_from_db()
-        self.assertFalse(obj.is_active)
+        self.assertFalse(ApiKey.objects.filter(id=obj.id).exists())

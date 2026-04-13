@@ -390,5 +390,16 @@ DEFAULT_FROM_EMAIL = os.environ.get(
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:4200")
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
+# Registration control — set REGISTRATION_OPEN=true to allow public signups
+REGISTRATION_OPEN = os.environ.get("REGISTRATION_OPEN", "false").lower() in ("true", "1", "yes")
+
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
 if TESTING:
     EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+    REGISTRATION_OPEN = True

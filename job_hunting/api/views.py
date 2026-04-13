@@ -66,6 +66,7 @@ from job_hunting.models import (
     ProjectDescription,
     AiUsage,
     Waitlist,
+    Invitation,
 )
 from .serializers import (
     ApiKeySerializer,
@@ -90,6 +91,7 @@ from .serializers import (
     ProjectSerializer,
     AiUsageSerializer,
     WaitlistSerializer,
+    InvitationSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
     _resource_base_path,
@@ -138,7 +140,13 @@ def profile(request):
 def healthcheck(request):
     """Simple health check endpoint that only reports system health."""
     if request.method == "GET":
-        return JsonResponse({"healthy": True})
+        User = get_user_model()
+        user_count = User.objects.count()
+        return JsonResponse({
+            "healthy": True,
+            "bootstrap_open": user_count == 0,
+            "registration_open": settings.REGISTRATION_OPEN,
+        })
 
     return JsonResponse({"error": "method not allowed"}, status=405)
 
@@ -1646,6 +1654,14 @@ class DjangoUserViewSet(viewsets.ViewSet):
         },
     )
     def create(self, request):
+        # Staff users can always create accounts; public registration requires REGISTRATION_OPEN
+        is_staff = request.user and request.user.is_authenticated and request.user.is_staff
+        if not is_staff and not settings.REGISTRATION_OPEN:
+            return Response(
+                {"errors": [{"detail": "Registration is currently closed."}]},
+                status=403,
+            )
+
         ser = self.get_serializer()
         try:
             attrs = ser.parse_payload(request.data)
@@ -1683,6 +1699,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
         if email and User.objects.filter(email=email).exists():
             return Response(
                 {"errors": [{"detail": "Email already exists"}]}, status=400
+            )
+
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError
+        try:
+            validate_password(password)
+        except ValidationError as e:
+            return Response(
+                {"errors": [{"detail": msg} for msg in e.messages]}, status=400
             )
 
         user = User(
@@ -7567,3 +7592,230 @@ class WaitlistViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         obj.delete()
         return Response(status=204)
+
+
+class InvitationViewSet(BaseViewSet):
+    model = Invitation
+    serializer_class = InvitationSerializer
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def list(self, request):
+        qs = Invitation.objects.all().order_by("-created_at")
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs[offset: offset + page_size])
+        ser = self.get_serializer()
+        return Response({
+            "data": [ser.to_resource(o) for o in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        })
+
+    def create(self, request):
+        import json
+        import secrets
+        from django.utils import timezone as tz
+        from django.core.mail import send_mail
+        from django.template.loader import render_to_string
+
+        try:
+            payload = request.data
+            if isinstance(payload, bytes):
+                payload = json.loads(payload.decode("utf-8") or "{}")
+        except Exception:
+            payload = {}
+
+        # Support both JSON:API envelope and flat body
+        if "data" in payload and isinstance(payload["data"], dict):
+            attrs = payload["data"].get("attributes", {})
+        else:
+            attrs = payload
+
+        email = (attrs.get("email") or "").strip().lower()
+        if not email or "@" not in email:
+            return Response(
+                {"errors": [{"detail": "A valid email address is required."}]},
+                status=400,
+            )
+
+        token = secrets.token_urlsafe(32)
+        expires_at = tz.now() + tz.timedelta(days=7)
+
+        invitation = Invitation.objects.create(
+            email=email,
+            token=token,
+            created_by=request.user,
+            expires_at=expires_at,
+        )
+
+        # Auto-remove matching waitlist entry
+        Waitlist.objects.filter(email=email).delete()
+
+        # Send invitation email
+        try:
+            invite_url = f"{settings.FRONTEND_URL}/accept-invite?token={token}"
+            body = render_to_string(
+                "invitation_email.txt", {"invite_url": invite_url}
+            )
+            send_mail(
+                subject="You're invited to Career Caddy",
+                message=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+            )
+        except Exception:
+            logger.warning("Failed to send invitation email to %s", email)
+
+        ser = self.get_serializer()
+        return Response(
+            {"data": ser.to_resource(invitation)}, status=status.HTTP_201_CREATED
+        )
+
+    def destroy(self, request, pk=None):
+        obj = Invitation.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        obj.delete()
+        return Response(status=204)
+
+
+def _create_user_from_data(username, password, email, first_name="", last_name=""):
+    """Shared user creation logic for registration and invitation acceptance.
+
+    Returns (user, error_messages, status_code).
+    If error_messages is not None, user creation failed.
+    """
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError
+    from job_hunting.models import Profile
+
+    User = get_user_model()
+
+    if not username:
+        return None, [{"detail": "Username is required."}], 400
+    if not password:
+        return None, [{"detail": "Password is required."}], 400
+
+    if User.objects.filter(username=username).exists():
+        return None, [{"detail": "Username already exists."}], 400
+    if email and User.objects.filter(email__iexact=email).exists():
+        return None, [{"detail": "An account with this email already exists."}], 400
+
+    try:
+        validate_password(password)
+    except ValidationError as e:
+        return None, [{"detail": msg} for msg in e.messages], 400
+
+    user = User(
+        username=username, email=email,
+        first_name=first_name, last_name=last_name,
+    )
+    user.set_password(password)
+    user.save()
+
+    Profile.objects.get_or_create(user_id=user.id)
+
+    return user, None, None
+
+
+@csrf_exempt
+def accept_invite(request):
+    """Accept an invitation and create an account."""
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    import json
+    from django.utils import timezone as tz
+    from django.core.mail import send_mail
+    from django.template.loader import render_to_string
+
+    try:
+        data = json.loads(request.body.decode("utf-8") or "{}")
+    except Exception:
+        data = {}
+
+    token = (data.get("token") or "").strip()
+    username = (data.get("username") or "").strip()
+    password = data.get("password", "")
+    first_name = (data.get("first_name") or "").strip()
+    last_name = (data.get("last_name") or "").strip()
+
+    if not token:
+        return JsonResponse(
+            {"errors": [{"detail": "Invitation token is required."}]}, status=400
+        )
+
+    invitation = Invitation.objects.filter(token=token).first()
+    if not invitation or not invitation.is_valid:
+        return JsonResponse(
+            {"errors": [{"detail": "Invalid or expired invitation link."}]},
+            status=400,
+        )
+
+    user, errors, error_status = _create_user_from_data(
+        username=username,
+        password=password,
+        email=invitation.email,
+        first_name=first_name,
+        last_name=last_name,
+    )
+    if errors:
+        return JsonResponse({"errors": errors}, status=error_status)
+
+    invitation.accepted_at = tz.now()
+    invitation.save()
+
+    # Send welcome email
+    try:
+        login_url = f"{settings.FRONTEND_URL}/login"
+        body = render_to_string(
+            "welcome_email.txt",
+            {"username": username, "login_url": login_url},
+        )
+        send_mail(
+            subject="Welcome to Career Caddy",
+            message=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[invitation.email],
+        )
+    except Exception:
+        logger.warning("Failed to send welcome email to %s", invitation.email)
+
+    ser = DjangoUserSerializer()
+    return JsonResponse({"data": ser.to_resource(user)}, status=201)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminUser])
+def test_email(request):
+    """Admin-only endpoint to verify email delivery."""
+    from django.utils import timezone as tz
+    from django.core.mail import send_mail
+    from django.template.loader import render_to_string
+
+    data = request.data or {}
+
+    target_email = (data.get("email") or "").strip().lower()
+    if not target_email:
+        target_email = request.user.email
+
+    if not target_email or "@" not in target_email:
+        return Response(
+            {"errors": [{"detail": "No valid email address available."}]},
+            status=400,
+        )
+
+    body = render_to_string(
+        "test_email.txt", {"timestamp": tz.now().isoformat()}
+    )
+    send_mail(
+        subject="Test Email — Career Caddy",
+        message=body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[target_email],
+    )
+
+    return Response(
+        {"message": f"Test email sent to {target_email}."}, status=200
+    )
