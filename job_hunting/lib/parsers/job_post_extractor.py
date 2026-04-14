@@ -63,7 +63,10 @@ def _to_decimal(value) -> Optional[Decimal]:
         return None
 
 
-class GenericParser:
+_DEFAULT_PARSER_MODEL = "gpt-4o"
+
+
+class JobPostExtractor:
     def __init__(self, client=None):
         self.client = client
         self.agent = None
@@ -72,25 +75,36 @@ class GenericParser:
         validated_data = self.analyze_with_ai(scrape)
         self.process_evaluation(scrape, validated_data, user=user)
 
+    def _resolve_model_name(self) -> str:
+        """Role-specific env var -> fallback env var -> default."""
+        return (
+            os.environ.get("JOB_PARSER_MODEL")
+            or os.environ.get("CADDY_DEFAULT_MODEL")
+            or _DEFAULT_PARSER_MODEL
+        )
+
     def get_agent(self):
         if self.agent:
             return self.agent
 
-        if os.getenv("OPENAI_API_KEY"):
-            try:
-                openai_model = OpenAIResponsesModel("gpt-4o")
-                return Agent(openai_model, output_type=ParsedJobData)
-            except Exception:
-                pass
+        model_name = self._resolve_model_name()
 
-        ollama_model = OpenAIChatModel(
-            model_name="qwen3-coder",
-            provider=OllamaProvider(base_url="http://localhost:11434/v1"),
-        )
-        return Agent(ollama_model, output_type=ParsedJobData)
+        if model_name.startswith("ollama:"):
+            ollama_model_name = model_name.split(":", 1)[1]
+            model = OpenAIChatModel(
+                model_name=ollama_model_name,
+                provider=OllamaProvider(
+                    base_url=os.environ.get("OLLAMA_API_BASE", "http://localhost:11434/v1")
+                ),
+            )
+        else:
+            model = OpenAIResponsesModel(model_name)
+
+        self.agent = Agent(model, output_type=ParsedJobData)
+        return self.agent
 
     def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None):
-        # Find or create company
+        # Find or create company — Company is a shared resource (no user scoping).
         company, _ = Company.objects.get_or_create(
             name=validated_data.company_name,
             defaults={"display_name": validated_data.company_display_name},
@@ -222,7 +236,7 @@ Content:
 
             AiUsage.objects.create(
                 user=user,
-                agent_name="generic_parser",
+                agent_name="job_post_extractor",
                 model_name=model_name,
                 trigger="scrape",
                 request_tokens=request_tokens,
@@ -239,35 +253,61 @@ Content:
             logger.exception("Failed to record parser usage for scrape_id=%s", scrape.id)
 
 
-def extract_job_from_scrape(scrape: Scrape) -> None:
+def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> None:
     """
-    Fire-and-forget: parse job_content on a completed scrape and create/update
-    the JobPost and Company records.  Safe to call even if already extracted —
-    bails out if job_post_id is already set.
-    """
-    if not (scrape.job_content and not scrape.job_post_id):
-        return
+    Single entry point for parsing a scrape into a JobPost + Company.
 
-    scrape_id = scrape.id
+    Handles status transitions (extracting -> completed/failed), error logging,
+    and user resolution.  Safe to call even if already extracted — bails out if
+    job_post_id is already set.
+
+    Args:
+        scrape_id: PK of the Scrape record.
+        user_id: PK of the user to attribute created records to.
+                 Falls back to scrape.created_by if None.
+        sync: If True, run inline (use when already in a background thread).
+              If False, spawn a daemon thread.
+    """
 
     def _run():
+        from job_hunting.models.scrape import Scrape as ScrapeModel
+        from job_hunting.lib.scraper import _log_scrape_status
+        from django.contrib.auth import get_user_model
+
         try:
-            from job_hunting.models.scrape import Scrape as ScrapeModel
-            from job_hunting.lib.scraper import _log_scrape_status
-            s = ScrapeModel.objects.filter(pk=scrape_id).first()
-            if not s or s.job_post_id:
+            scrape = ScrapeModel.objects.filter(pk=scrape_id).first()
+            if not scrape:
+                logger.warning("parse_scrape: scrape_id=%s not found", scrape_id)
                 return
-            parser = GenericParser()
-            parser.parse(s, user=s.created_by)
+            if scrape.job_post_id:
+                logger.info("parse_scrape: scrape_id=%s already has job_post, skipping", scrape_id)
+                return
+            if not (scrape.job_content or scrape.html):
+                logger.warning("parse_scrape: scrape_id=%s has no content", scrape_id)
+                return
+
+            user = None
+            if user_id:
+                User = get_user_model()
+                user = User.objects.filter(pk=user_id).first()
+            if not user:
+                user = scrape.created_by
+
+            _log_scrape_status(scrape_id, "extracting")
+
+            parser = JobPostExtractor()
+            parser.parse(scrape, user=user)
+
             _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
+
         except Exception:
-            import logging
-            logging.getLogger(__name__).exception(
-                "extract_job_from_scrape failed scrape_id=%s", scrape_id
-            )
+            logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
             try:
                 _log_scrape_status(scrape_id, "failed", note="Extraction failed")
             except Exception:
                 pass
 
-    threading.Thread(target=_run, daemon=True).start()
+    if sync:
+        _run()
+    else:
+        threading.Thread(target=_run, daemon=True).start()

@@ -4506,30 +4506,8 @@ class ScrapeViewSet(BaseViewSet):
 
         logger.info("ScrapeViewSet.parse: id=%s", obj.id)
 
-        from job_hunting.lib.scraper import _log_scrape_status
-        _log_scrape_status(obj.id, "extracting")
-
-        user_id = request.user.id
-        scrape_id = obj.id
-
-        import threading
-
-        def _run():
-            from job_hunting.lib.parsers.generic_parser import GenericParser
-            from django.contrib.auth import get_user_model
-            try:
-                User = get_user_model()
-                user = User.objects.filter(pk=user_id).first()
-                scrape = Scrape.objects.filter(pk=scrape_id).first()
-                if not scrape:
-                    return
-                GenericParser().parse(scrape, user=user)
-                _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
-            except Exception:
-                logger.exception("ScrapeViewSet.parse: failed id=%s", scrape_id)
-                _log_scrape_status(scrape_id, "failed", note="Parsing failed")
-
-        threading.Thread(target=_run, daemon=True).start()
+        from job_hunting.lib.parsers.job_post_extractor import parse_scrape
+        parse_scrape(obj.id, user_id=request.user.id)
 
         scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(obj)

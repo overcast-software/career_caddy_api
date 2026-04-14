@@ -8,9 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 def _maybe_caddy_extract(scrape) -> None:
-    """Parse job_content and create JobPost + Company via GenericParser."""
-    from job_hunting.lib.parsers.generic_parser import extract_job_from_scrape
-    extract_job_from_scrape(scrape)
+    """Parse job_content and create JobPost + Company via JobPostExtractor."""
+    from job_hunting.lib.parsers.job_post_extractor import parse_scrape
+    if scrape.job_content and not scrape.job_post_id:
+        parse_scrape(scrape.id, user_id=getattr(scrape.created_by, "id", None), sync=True)
 
 
 def _set_scrape_status(scrape_id: int, status: str) -> None:
@@ -136,7 +137,6 @@ class Scraper:
                             scrape.scraped_at = timezone.now()
                             scrape.save(update_fields=["job_content", "scraped_at"])
                             logger.info("MCP dispatch: stored job_content on scrape id=%s", scrape_id)
-                            _log_scrape_status(scrape_id, "extracting")
                             _maybe_caddy_extract(scrape)
                     except Exception:
                         logger.exception("MCP dispatch: failed to store job_content scrape_id=%s", scrape_id)
