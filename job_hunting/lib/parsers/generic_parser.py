@@ -128,6 +128,9 @@ class GenericParser:
         else:
             # Update fields that may have been missing on a prior pass
             update_fields = []
+            if not job.company_id:
+                job.company = company
+                update_fields.append("company_id")
             for field, value in job_defaults.items():
                 if value is not None and getattr(job, field) is None:
                     setattr(job, field, value)
