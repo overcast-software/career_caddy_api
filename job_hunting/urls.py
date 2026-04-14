@@ -22,6 +22,8 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
     TokenVerifyView,
 )
+
+
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from job_hunting.api.chat import chat_proxy
 from job_hunting.api.views import (
@@ -61,6 +63,19 @@ from job_hunting.api.views import (
     career_data_import,
     generate_prompt,
 )
+
+
+class UnthrottledTokenObtainPairView(TokenObtainPairView):
+    throttle_classes = []
+
+
+class UnthrottledTokenRefreshView(TokenRefreshView):
+    throttle_classes = []
+
+
+class UnthrottledTokenVerifyView(TokenVerifyView):
+    throttle_classes = []
+
 
 router = routers.DefaultRouter(trailing_slash="/?")
 router.register(r"users", DjangoUserViewSet, basename="users")
@@ -128,9 +143,9 @@ urlpatterns = [
     path("api/v1/career-data/import/", career_data_import, name="career-data-import"),
     path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
     path("api/v1/chat/", chat_proxy, name="chat"),
-    path("api/v1/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("api/v1/token/verify/", TokenVerifyView.as_view(), name="token_verify"),
+    path("api/v1/token/", UnthrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/v1/token/refresh/", UnthrottledTokenRefreshView.as_view(), name="token_refresh"),
+    path("api/v1/token/verify/", UnthrottledTokenVerifyView.as_view(), name="token_verify"),
     # path("api/v1/ping/", ping, name="ping"),
     # OpenAPI schema + UI
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),

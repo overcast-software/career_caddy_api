@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 from datetime import datetime
@@ -12,6 +13,8 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 from job_hunting.models import Company, JobPost, Scrape
+
+logger = logging.getLogger(__name__)
 
 
 class ParsedJobData(BaseModel):
@@ -149,6 +152,18 @@ class GenericParser:
         if update_fields:
             scrape.save(update_fields=update_fields)
 
+    def _get_model_name(self) -> str:
+        if self.agent is None:
+            return "unknown"
+        model = getattr(self.agent, "model", None)
+        if model is None:
+            return "unknown"
+        if isinstance(model, OpenAIResponsesModel):
+            return f"openai:{model.model_name}"
+        if isinstance(model, OpenAIChatModel):
+            return f"ollama:{model.model_name}"
+        return str(model)
+
     def analyze_with_ai(self, scrape: Scrape) -> ParsedJobData:
         content = scrape.job_content or ""
         if not content and scrape.html:
@@ -186,7 +201,42 @@ Content:
             self.agent = self.get_agent()
 
         result = self.agent.run_sync(prompt)
+        self._record_usage(result, scrape)
         return result.output
+
+    def _record_usage(self, result, scrape: Scrape) -> None:
+        try:
+            from job_hunting.models.ai_usage import AiUsage
+            from job_hunting.lib.pricing import estimate_cost
+
+            usage = result.usage()
+            model_name = self._get_model_name()
+            user = scrape.created_by
+
+            if not user:
+                logger.warning("No user on scrape %s — skipping usage record", scrape.id)
+                return
+
+            request_tokens = usage.request_tokens or 0
+            response_tokens = usage.response_tokens or 0
+
+            AiUsage.objects.create(
+                user=user,
+                agent_name="generic_parser",
+                model_name=model_name,
+                trigger="scrape",
+                request_tokens=request_tokens,
+                response_tokens=response_tokens,
+                total_tokens=usage.total_tokens or 0,
+                request_count=1,
+                estimated_cost_usd=estimate_cost(model_name, request_tokens, response_tokens),
+            )
+            logger.info(
+                "Recorded parser usage: model=%s tokens=%s/%s scrape_id=%s",
+                model_name, request_tokens, response_tokens, scrape.id,
+            )
+        except Exception:
+            logger.exception("Failed to record parser usage for scrape_id=%s", scrape.id)
 
 
 def extract_job_from_scrape(scrape: Scrape) -> None:
