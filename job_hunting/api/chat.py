@@ -68,6 +68,7 @@ def chat_proxy(request):
         "conversation_id": body.get("conversation_id", ""),
         "page_context": body.get("page_context"),
     }
+    logger.info("Chat proxy page_context: %s", payload.get("page_context"))
 
     chat_url = f"{CHAT_SERVICE_URL}/chat"
     logger.info("Proxying to chat service at %s", chat_url)

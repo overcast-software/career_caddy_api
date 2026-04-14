@@ -29,7 +29,8 @@ class TestPasswordResetRequest(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("reset-password", mail.outbox[0].body)
         self.assertIn("token=", mail.outbox[0].body)
-        self.assertIn("uid=", mail.outbox[0].body)
+        self.assertIn("&uid=", mail.outbox[0].body)
+        self.assertNotIn("&amp;", mail.outbox[0].body)
 
     def test_unknown_email_still_200(self):
         response = self.client.post(
