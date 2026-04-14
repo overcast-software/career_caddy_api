@@ -129,14 +129,14 @@ class Scraper:
                     try:
                         from django.utils import timezone
                         from job_hunting.models.scrape import Scrape
+                        _log_scrape_status(scrape_id, "scraping", note=f"Content received ({len(job_content)} chars)")
                         scrape = Scrape.objects.filter(pk=scrape_id).first()
                         if scrape:
                             scrape.job_content = job_content
-                            scrape.status = "completed"
                             scrape.scraped_at = timezone.now()
-                            scrape.save(update_fields=["job_content", "status", "scraped_at"])
-                            _log_scrape_status(scrape_id, "completed", note=f"Content length: {len(job_content)}")
+                            scrape.save(update_fields=["job_content", "scraped_at"])
                             logger.info("MCP dispatch: stored job_content on scrape id=%s", scrape_id)
+                            _log_scrape_status(scrape_id, "extracting")
                             _maybe_caddy_extract(scrape)
                     except Exception:
                         logger.exception("MCP dispatch: failed to store job_content scrape_id=%s", scrape_id)

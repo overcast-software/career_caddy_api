@@ -195,7 +195,7 @@ def extract_job_from_scrape(scrape: Scrape) -> None:
     the JobPost and Company records.  Safe to call even if already extracted —
     bails out if job_post_id is already set.
     """
-    if not (scrape.job_content and scrape.status == "completed" and not scrape.job_post_id):
+    if not (scrape.job_content and not scrape.job_post_id):
         return
 
     scrape_id = scrape.id
@@ -203,15 +203,21 @@ def extract_job_from_scrape(scrape: Scrape) -> None:
     def _run():
         try:
             from job_hunting.models.scrape import Scrape as ScrapeModel
+            from job_hunting.lib.scraper import _log_scrape_status
             s = ScrapeModel.objects.filter(pk=scrape_id).first()
             if not s or s.job_post_id:
                 return
             parser = GenericParser()
             parser.parse(s, user=s.created_by)
+            _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
         except Exception:
             import logging
             logging.getLogger(__name__).exception(
                 "extract_job_from_scrape failed scrape_id=%s", scrape_id
             )
+            try:
+                _log_scrape_status(scrape_id, "failed", note="Extraction failed")
+            except Exception:
+                pass
 
     threading.Thread(target=_run, daemon=True).start()
