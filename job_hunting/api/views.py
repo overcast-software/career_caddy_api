@@ -1431,7 +1431,7 @@ _USER_WRITE_REQUEST = inline_serializer(
 
 
 class DjangoUserViewSet(viewsets.ViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsGuestReadOnly]
     parser_classes = [VndApiJSONParser, JSONParser]
 
     def get_permissions(self):
@@ -4781,7 +4781,7 @@ class CompanyViewSet(BaseViewSet):
 class CoverLetterViewSet(BaseViewSet):
     model = CoverLetter
     serializer_class = CoverLetterSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsGuestReadOnly]
 
     def list(self, request):
         items = list(CoverLetter.objects.filter(user_id=request.user.id))
@@ -5398,6 +5398,7 @@ class JobApplicationViewSet(BaseViewSet):
 class StatusViewSet(viewsets.ModelViewSet):
     queryset = Status.objects.all()
     serializer_class = StatusSerializer
+    permission_classes = [IsAuthenticated, IsGuestReadOnly]
 
     def create(self, request):
         data = request.data if isinstance(request.data, dict) else {}
@@ -6744,7 +6745,7 @@ class DescriptionViewSet(BaseViewSet):
 class ApiKeyViewSet(BaseViewSet):
     model = ApiKey
     serializer_class = ApiKeySerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsGuestReadOnly]
 
     @extend_schema(
         tags=["API Keys"],
