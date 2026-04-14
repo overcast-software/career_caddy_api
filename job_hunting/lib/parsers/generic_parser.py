@@ -204,7 +204,7 @@ def extract_job_from_scrape(scrape: Scrape) -> None:
             if not s or s.job_post_id:
                 return
             parser = GenericParser()
-            parser.parse(s)
+            parser.parse(s, user=s.created_by)
         except Exception:
             import logging
             logging.getLogger(__name__).exception(
