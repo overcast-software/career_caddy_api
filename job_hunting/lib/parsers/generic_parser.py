@@ -111,15 +111,19 @@ class GenericParser:
         if validated_data.remote is not None:
             job_defaults["remote"] = validated_data.remote
 
+        # Use the scrape URL as the canonical link — it's the known-good source.
+        # The LLM-extracted link may be an apply URL, redirect, or null.
+        link = scrape.url or validated_data.link
+
         # Prefer link-based lookup since link is unique
         job = None
-        if validated_data.link:
-            job = JobPost.objects.filter(link=validated_data.link).first()
+        if link:
+            job = JobPost.objects.filter(link=link).first()
         if job is None:
             job, _ = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company=company,
-                defaults={**job_defaults, "link": validated_data.link},
+                defaults={**job_defaults, "link": link},
             )
         else:
             # Update fields that may have been missing on a prior pass
