@@ -10,6 +10,8 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.ollama import OllamaProvider
 
+from urllib.parse import urlparse
+
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 from job_hunting.models import Company, JobPost, Scrape
@@ -72,7 +74,12 @@ class JobPostExtractor:
         self.agent = None
 
     def parse(self, scrape: Scrape, user=None):
-        validated_data = self.analyze_with_ai(scrape)
+        # Try Tier 0 (deterministic CSS extraction) first — $0 cost
+        validated_data = self._try_tier0_extraction(scrape)
+        if validated_data:
+            logger.info("Tier 0 extraction succeeded for scrape %s", scrape.id)
+        else:
+            validated_data = self.analyze_with_ai(scrape)
         self.process_evaluation(scrape, validated_data, user=user)
 
     def _resolve_model_name(self) -> str:
@@ -178,10 +185,101 @@ class JobPostExtractor:
             return f"ollama:{model.model_name}"
         return str(model)
 
+    def _get_profile_hints(self, scrape: Scrape) -> str:
+        """Look up ScrapeProfile for this scrape's hostname and return hint text."""
+        try:
+            from job_hunting.models import ScrapeProfile
+            hostname = urlparse(scrape.url or "").hostname or ""
+            if not hostname:
+                return ""
+            # Strip www. prefix for matching
+            if hostname.startswith("www."):
+                hostname = hostname[4:]
+            profile = ScrapeProfile.objects.filter(
+                hostname=hostname, enabled=True
+            ).first()
+            if not profile:
+                return ""
+            parts = []
+            if profile.extraction_hints:
+                parts.append(f"Previous extractions from this domain found: {profile.extraction_hints}")
+            if profile.page_structure:
+                parts.append(f"Page structure: {profile.page_structure}")
+            return "\n".join(parts)
+        except Exception:
+            logger.debug("Could not load scrape profile hints", exc_info=True)
+            return ""
+
+    def _try_tier0_extraction(self, scrape: Scrape) -> Optional[ParsedJobData]:
+        """Attempt deterministic extraction using CSS selectors from ScrapeProfile.
+
+        Returns ParsedJobData if all required fields (title, company_name) are found,
+        None otherwise (caller should fall back to LLM).
+        """
+        if not scrape.html:
+            return None
+
+        try:
+            from bs4 import BeautifulSoup
+            from job_hunting.models import ScrapeProfile
+
+            hostname = urlparse(scrape.url or "").hostname or ""
+            if hostname.startswith("www."):
+                hostname = hostname[4:]
+            if not hostname:
+                return None
+
+            profile = ScrapeProfile.objects.filter(
+                hostname=hostname, enabled=True
+            ).first()
+            if not profile or not profile.css_selectors:
+                return None
+            if profile.preferred_tier not in ("auto", "0"):
+                return None
+
+            selectors = profile.css_selectors
+            if not isinstance(selectors, dict):
+                return None
+
+            soup = BeautifulSoup(scrape.html, "html.parser")
+            extracted = {}
+            for field, selector in selectors.items():
+                el = soup.select_one(selector)
+                if el:
+                    extracted[field] = el.get_text(strip=True)
+
+            title = extracted.get("title", "")
+            company = extracted.get("company_name", "") or extracted.get("company", "")
+            if not title or not company:
+                return None
+
+            logger.info(
+                "Tier 0 extraction for %s: title=%s, company=%s",
+                hostname, title[:50], company[:50],
+            )
+
+            return ParsedJobData(
+                title=title,
+                company_name=company,
+                description=extracted.get("description"),
+                location=extracted.get("location"),
+                remote=None,
+                salary_min=None,
+                salary_max=None,
+                link=scrape.url,
+                extraction_date=datetime.now(),
+            )
+        except Exception:
+            logger.debug("Tier 0 extraction failed", exc_info=True)
+            return None
+
     def analyze_with_ai(self, scrape: Scrape) -> ParsedJobData:
         content = scrape.job_content or ""
         if not content and scrape.html:
             content = clean_html_to_markdown(scrape.html)
+
+        hints = self._get_profile_hints(scrape)
+        hints_block = f"\n\nDomain hints (from previous successful extractions):\n{hints}\n" if hints else ""
 
         prompt = f"""Extract job posting information from the content below and return structured data.
 
@@ -197,7 +295,7 @@ Fields to extract:
 - location: city/state/country (e.g. "United States" or "Austin, TX")
 - remote: true if role is remote or hybrid, false if fully on-site, null if unknown
 - link: the job application or posting URL if present (null otherwise)
-
+{hints_block}
 Content:
 {content}
 """
@@ -225,11 +323,7 @@ Content:
 
             usage = result.usage()
             model_name = self._get_model_name()
-            user = scrape.created_by
-
-            if not user:
-                logger.warning("No user on scrape %s — skipping usage record", scrape.id)
-                return
+            user = scrape.created_by or _get_genesis_user()
 
             request_tokens = usage.request_tokens or 0
             response_tokens = usage.response_tokens or 0
@@ -251,6 +345,13 @@ Content:
             )
         except Exception:
             logger.exception("Failed to record parser usage for scrape_id=%s", scrape.id)
+
+
+def _get_genesis_user():
+    """Return the first staff user (genesis user) as a fallback for cost attribution."""
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    return User.objects.filter(is_staff=True).order_by("id").first()
 
 
 def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> None:
@@ -300,6 +401,12 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
 
             _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
 
+            # Auto-populate scrape profile for this domain
+            try:
+                _update_scrape_profile(scrape, user)
+            except Exception:
+                logger.debug("Failed to update scrape profile", exc_info=True)
+
         except Exception:
             logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
             try:
@@ -311,3 +418,127 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
         _run()
     else:
         threading.Thread(target=_run, daemon=True).start()
+
+
+def _update_scrape_profile(scrape, user=None):
+    """Create or update ScrapeProfile for this scrape's hostname after successful extraction."""
+    from django.utils import timezone
+    from job_hunting.models import ScrapeProfile
+
+    hostname = urlparse(scrape.url or "").hostname or ""
+    if not hostname:
+        return
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+
+    content_len = len(scrape.job_content or "")
+
+    profile, created = ScrapeProfile.objects.get_or_create(
+        hostname=hostname,
+        defaults={
+            "requires_auth": False,
+            "avg_content_length": content_len,
+            "success_rate": 1.0,
+            "scrape_count": 1,
+            "last_success_at": timezone.now(),
+            "created_by": user,
+        },
+    )
+
+    if not created:
+        profile.scrape_count += 1
+        profile.last_success_at = timezone.now()
+        # Rolling average of content length
+        if profile.avg_content_length:
+            profile.avg_content_length = int(
+                (profile.avg_content_length * (profile.scrape_count - 1) + content_len)
+                / profile.scrape_count
+            )
+        else:
+            profile.avg_content_length = content_len
+        # Update success rate (simple: successes / total)
+        profile.success_rate = min(
+            1.0,
+            (profile.success_rate * (profile.scrape_count - 1) + 1.0)
+            / profile.scrape_count,
+        )
+        profile.save()
+
+    logger.info(
+        "Scrape profile %s for %s (count=%d, rate=%.0f%%)",
+        "created" if created else "updated",
+        hostname,
+        profile.scrape_count,
+        profile.success_rate * 100,
+    )
+
+    # Generate extraction hints with a cheap LLM call (only on first scrape or if hints are empty)
+    if not profile.extraction_hints:
+        try:
+            _generate_profile_hints(profile, scrape, user)
+        except Exception:
+            logger.debug("Failed to generate profile hints for %s", hostname, exc_info=True)
+
+
+class ProfileHints(BaseModel):
+    """Structured output for scrape profile hint generation."""
+    extraction_hints: str = Field(
+        description="2-3 sentences describing patterns that help extract key fields "
+        "(salary location, date format, company name placement, etc.)"
+    )
+    page_structure: str = Field(
+        description="2-3 sentences describing how the page organizes job data "
+        "(heading hierarchy, section layout, where key fields appear)"
+    )
+
+
+def _generate_profile_hints(profile, scrape, user=None):
+    """Use a cheap LLM call to generate extraction_hints and page_structure for a ScrapeProfile."""
+    from job_hunting.models.ai_usage import AiUsage
+    from job_hunting.lib.pricing import estimate_cost
+
+    content = scrape.job_content or ""
+    if not content:
+        return
+
+    model_name = os.environ.get("HINT_GENERATOR_MODEL", "openai:gpt-4o-mini")
+    try:
+        agent = Agent(model_name, output_type=ProfileHints)
+    except Exception:
+        logger.debug("Could not create hint agent with model %s", model_name)
+        return
+
+    prompt = f"""Analyze this scraped job posting content from {profile.hostname} and describe extraction patterns and page structure. Be concise — 2-3 sentences each. This will help future extractions from this domain.
+
+Content (first 2000 chars):
+{content[:2000]}"""
+
+    try:
+        result = agent.run_sync(prompt)
+        hints = result.output
+
+        profile.extraction_hints = hints.extraction_hints[:1000]
+        profile.page_structure = hints.page_structure[:1000]
+        profile.save()
+
+        # Record AI usage
+        usage = result.usage()
+        request_tokens = usage.request_tokens or 0
+        response_tokens = usage.response_tokens or 0
+        cost_user = user or _get_genesis_user()
+        if cost_user:
+            AiUsage.objects.create(
+                user=cost_user,
+                agent_name="scrape_profile_hints",
+                model_name=model_name,
+                trigger="scrape_profile",
+                request_tokens=request_tokens,
+                response_tokens=response_tokens,
+                total_tokens=usage.total_tokens or 0,
+                request_count=1,
+                estimated_cost_usd=estimate_cost(model_name, request_tokens, response_tokens),
+            )
+
+        logger.info("Generated hints for %s (%d tokens)", profile.hostname, usage.total_tokens or 0)
+    except Exception:
+        logger.debug("Hint generation LLM call failed for %s", profile.hostname, exc_info=True)

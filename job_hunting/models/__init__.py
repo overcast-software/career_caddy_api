@@ -30,3 +30,4 @@ from .scrape_status import ScrapeStatus as ScrapeStatus
 from .waitlist import Waitlist as Waitlist
 from .invitation import Invitation as Invitation
 from .ai_usage import AiUsage as AiUsage
+from .scrape_profile import ScrapeProfile as ScrapeProfile

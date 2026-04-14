@@ -67,6 +67,7 @@ from job_hunting.models import (
     AiUsage,
     Waitlist,
     Invitation,
+    ScrapeProfile,
 )
 from .serializers import (
     ApiKeySerializer,
@@ -92,6 +93,7 @@ from .serializers import (
     AiUsageSerializer,
     WaitlistSerializer,
     InvitationSerializer,
+    ScrapeProfileSerializer,
     TYPE_TO_SERIALIZER,
     _parse_date,
     _resource_base_path,
@@ -7978,3 +7980,53 @@ def test_email(request):
     return Response(
         {"message": f"Test email sent to {target_email}."}, status=200
     )
+
+
+class ScrapeProfileViewSet(BaseViewSet):
+    model = ScrapeProfile
+    serializer_class = ScrapeProfileSerializer
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def list(self, request):
+        qs = ScrapeProfile.objects.all().order_by("-scrape_count")
+        hostname = request.query_params.get("filter[hostname]")
+        if hostname:
+            qs = qs.filter(hostname=hostname)
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs[offset: offset + page_size])
+        ser = self.get_serializer()
+        return Response({
+            "data": [ser.to_resource(o) for o in items],
+            "meta": {"total": total, "page": page_number, "per_page": page_size, "total_pages": total_pages},
+        })
+
+    def retrieve(self, request, pk=None):
+        obj = ScrapeProfile.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    def partial_update(self, request, pk=None):
+        obj = ScrapeProfile.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") or {}
+        attrs = node.get("attributes") or {}
+        editable = [
+            "extraction_hints", "page_structure", "css_selectors",
+            "preferred_tier", "enabled",
+        ]
+        for field in editable:
+            json_key = field.replace("_", "-")
+            if json_key in attrs:
+                setattr(obj, field, attrs[json_key])
+            elif field in attrs:
+                setattr(obj, field, attrs[field])
+        obj.save()
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})

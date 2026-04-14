@@ -40,6 +40,26 @@ def _log_scrape_status(scrape_id: int, status_label: str, note: str = None) -> N
             logged_at=timezone.now(),
             note=note,
         )
+
+        # Mark domain as requiring auth on login_failed
+        if status_label in ("login_failed",):
+            try:
+                from urllib.parse import urlparse
+                from job_hunting.models import ScrapeProfile
+                scrape = Scrape.objects.filter(pk=scrape_id).first()
+                if scrape and scrape.url:
+                    hostname = urlparse(scrape.url).hostname or ""
+                    if hostname.startswith("www."):
+                        hostname = hostname[4:]
+                    if hostname:
+                        ScrapeProfile.objects.update_or_create(
+                            hostname=hostname,
+                            defaults={"requires_auth": True},
+                        )
+                        logger.info("Marked %s as requires_auth", hostname)
+            except Exception:
+                logger.debug("Failed to mark requires_auth", exc_info=True)
+
     except Exception:
         logger.exception(
             "_log_scrape_status failed scrape_id=%s status=%s", scrape_id, status_label
