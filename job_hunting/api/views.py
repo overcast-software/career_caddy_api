@@ -4349,6 +4349,8 @@ class ScrapeViewSet(BaseViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             scrape = Scrape.objects.create(url=url, status="hold", created_by=request.user)
+            from job_hunting.lib.scraper import _log_scrape_status
+            _log_scrape_status(scrape.id, "hold")
             # Link to existing job post if URL matches
             existing_jp = JobPost.objects.filter(link=url).first()
             if existing_jp:
@@ -4418,6 +4420,8 @@ class ScrapeViewSet(BaseViewSet):
 
         scrape = Scrape.objects.create(url=url, status="pending", created_by=request.user)
         logger.info("ScrapeViewSet.create: created scrape id=%s", scrape.id)
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(scrape.id, "pending")
 
         # Associate with an existing job post (and its company) if the URL matches
         existing_jp = JobPost.objects.filter(link=url).first()
@@ -4471,6 +4475,9 @@ class ScrapeViewSet(BaseViewSet):
 
         obj.status = "pending"
         obj.save()
+
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(obj.id, "pending", note="Redo requested")
 
         browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3012")
         logger.info("ScrapeViewSet.redo: dispatching browser_service_url=%s scrape_id=%s", browser_service_url, obj.id)
