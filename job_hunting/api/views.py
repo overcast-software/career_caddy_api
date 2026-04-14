@@ -4493,7 +4493,7 @@ class ScrapeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["post"])
     def parse(self, request, pk=None):
-        """Parse a completed scrape's content and create/update the JobPost and Company."""
+        """Kick off parsing in a background thread. Returns 200 immediately."""
         obj = Scrape.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -4506,18 +4506,31 @@ class ScrapeViewSet(BaseViewSet):
 
         logger.info("ScrapeViewSet.parse: id=%s", obj.id)
 
-        from job_hunting.lib.parsers.generic_parser import GenericParser
-        try:
-            GenericParser().parse(obj, user=request.user)
-        except Exception:
-            logger.exception("ScrapeViewSet.parse: failed id=%s", obj.id)
-            return Response(
-                {"errors": [{"detail": "Parsing failed"}]},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(obj.id, "extracting")
 
-        # Reload to pick up updated job_post_id / company_id
-        obj = Scrape.objects.filter(pk=int(pk)).first()
+        user_id = request.user.id
+        scrape_id = obj.id
+
+        import threading
+
+        def _run():
+            from job_hunting.lib.parsers.generic_parser import GenericParser
+            from django.contrib.auth import get_user_model
+            try:
+                User = get_user_model()
+                user = User.objects.filter(pk=user_id).first()
+                scrape = Scrape.objects.filter(pk=scrape_id).first()
+                if not scrape:
+                    return
+                GenericParser().parse(scrape, user=user)
+                _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
+            except Exception:
+                logger.exception("ScrapeViewSet.parse: failed id=%s", scrape_id)
+                _log_scrape_status(scrape_id, "failed", note="Parsing failed")
+
+        threading.Thread(target=_run, daemon=True).start()
+
         scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(obj)
         return Response({"data": scrape_resource})
