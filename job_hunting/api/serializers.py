@@ -701,8 +701,19 @@ class ScrapeSerializer(BaseSerializer):
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "company": {"attr": "company", "type": "company", "uselist": False},
+        "scrape-statuses": {"attr": "scrape_statuses", "type": "scrape-status", "uselist": True},
     }
     relationship_fks = {"job-post": "job_post_id", "company": "company_id"}
+
+
+class ScrapeStatusSerializer(BaseSerializer):
+    type = "scrape-status"
+    attributes = ["logged_at", "note", "created_at"]
+    relationships = {
+        "scrape": {"attr": "scrape", "type": "scrape", "uselist": False},
+        "status": {"attr": "status", "type": "status", "uselist": False},
+    }
+    relationship_fks = {"scrape": "scrape_id", "status": "status_id"}
 
 
 class CompanySerializer(BaseSerializer):

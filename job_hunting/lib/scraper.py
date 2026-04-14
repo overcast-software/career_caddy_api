@@ -21,6 +21,30 @@ def _set_scrape_status(scrape_id: int, status: str) -> None:
         logger.exception("_set_scrape_status failed scrape_id=%s status=%s", scrape_id, status)
 
 
+def _log_scrape_status(scrape_id: int, status_label: str, note: str = None) -> None:
+    """Update Scrape.status AND append a ScrapeStatus audit record."""
+    try:
+        from job_hunting.models.scrape import Scrape
+        from job_hunting.models.scrape_status import ScrapeStatus
+        from job_hunting.models.status import Status
+        from django.utils import timezone
+
+        Scrape.objects.filter(pk=scrape_id).update(status=status_label)
+        status_obj, _ = Status.objects.get_or_create(
+            status=status_label, defaults={"status_type": "scrape"}
+        )
+        ScrapeStatus.objects.create(
+            scrape_id=scrape_id,
+            status=status_obj,
+            logged_at=timezone.now(),
+            note=note,
+        )
+    except Exception:
+        logger.exception(
+            "_log_scrape_status failed scrape_id=%s status=%s", scrape_id, status_label
+        )
+
+
 class Scraper:
     def __init__(self, browser_service_url: str, url: str, scrape_id: Optional[int] = None):
         self.url = url
@@ -91,7 +115,7 @@ class Scraper:
         def _send():
             try:
                 if scrape_id is not None:
-                    _set_scrape_status(scrape_id, "running")
+                    _log_scrape_status(scrape_id, "running")
                 sse_url = os.getenv("BROWSER_MCP_SSE_URL", "http://0.0.0.0:3004/sse")
                 logger.info("MCP dispatch -> SSE %s (url=%s, scrape_id=%s)", sse_url, url, scrape_id)
                 client = get_browser_mcp_client()
@@ -111,17 +135,18 @@ class Scraper:
                             scrape.status = "completed"
                             scrape.scraped_at = timezone.now()
                             scrape.save(update_fields=["job_content", "status", "scraped_at"])
+                            _log_scrape_status(scrape_id, "completed", note=f"Content length: {len(job_content)}")
                             logger.info("MCP dispatch: stored job_content on scrape id=%s", scrape_id)
                             _maybe_caddy_extract(scrape)
                     except Exception:
                         logger.exception("MCP dispatch: failed to store job_content scrape_id=%s", scrape_id)
                 elif scrape_id is not None:
-                    _set_scrape_status(scrape_id, "failed")
+                    _log_scrape_status(scrape_id, "failed", note="No content returned from browser")
                     logger.warning("MCP dispatch: no content returned url=%s scrape_id=%s", url, scrape_id)
             except Exception:
                 logger.exception("MCP dispatch failed")
                 if scrape_id is not None:
-                    _set_scrape_status(scrape_id, "failed")
+                    _log_scrape_status(scrape_id, "failed", note="MCP dispatch exception")
 
         thread = threading.Thread(target=_send, daemon=True)
         thread.start()

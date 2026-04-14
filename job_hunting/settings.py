@@ -160,7 +160,7 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DRF_ANON_THROTTLE_RATE", "100/day"),
-        "user": os.environ.get("DRF_USER_THROTTLE_RATE", "1000/day"),
+        "user": os.environ.get("DRF_USER_THROTTLE_RATE", "5000/day"),
     },
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
@@ -323,6 +323,7 @@ SCRAPING_ENABLED = os.environ.get("SCRAPING_ENABLED", "False") == "True"
 BROWSER_SERVICE_URL = os.environ.get("BROWSER_SERVICE_URL", "http://localhost:3012")
 CADDY_AGENT_URL = os.environ.get("CADDY_AGENT_URL", "http://localhost:3011")
 USE_CADDY_AGENT_EXTRACTION = os.environ.get("USE_CADDY_AGENT_EXTRACTION", "").lower() in ("1", "true", "yes")
+SCREENSHOT_DIR = os.environ.get("SCREENSHOT_DIR", "/app/screenshots")
 
 # Logging configuration
 LOGGING = {

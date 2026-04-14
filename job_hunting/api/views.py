@@ -4210,6 +4210,11 @@ class ScrapeViewSet(BaseViewSet):
             except Exception:
                 qs = qs.order_by("-id")
 
+        # Status filter
+        status_filter = request.query_params.get("filter[status]")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
         # Pagination
         total = qs.count()
         page_number, page_size = self._page_params()
@@ -4516,6 +4521,43 @@ class ScrapeViewSet(BaseViewSet):
         scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(obj)
         return Response({"data": scrape_resource})
+
+    @action(detail=True, methods=["get"], url_path="screenshots")
+    def screenshots(self, request, pk=None):
+        """List screenshot filenames for a scrape. Staff only."""
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Staff access required"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from job_hunting.lib.screenshot_store import ScreenshotStore
+        store = ScreenshotStore(settings.SCREENSHOT_DIR)
+        files = store.list_for_scrape(int(pk))
+        return Response({"data": files})
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="screenshots/(?P<filename>[^/]+)",
+        url_name="screenshot-file",
+    )
+    def screenshot_file(self, request, pk=None, filename=None):
+        """Serve a screenshot PNG. Staff only."""
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Staff access required"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from django.http import FileResponse
+        from job_hunting.lib.screenshot_store import ScreenshotStore
+        store = ScreenshotStore(settings.SCREENSHOT_DIR)
+        path = store.read(filename)
+        if not path:
+            return Response(
+                {"errors": [{"detail": "Screenshot not found"}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return FileResponse(open(path, "rb"), content_type="image/png")
 
 
 @extend_schema_view(
