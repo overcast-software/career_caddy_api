@@ -4559,6 +4559,45 @@ class ScrapeViewSet(BaseViewSet):
             )
         return FileResponse(open(path, "rb"), content_type="image/png")
 
+    @action(detail=True, methods=["get"], url_path="scrape-statuses")
+    def scrape_statuses(self, request, pk=None):
+        """List status history for a scrape."""
+        from job_hunting.models.scrape_status import ScrapeStatus
+        qs = ScrapeStatus.objects.filter(scrape_id=int(pk)).select_related("status").order_by("logged_at")
+        data = []
+        for ss in qs:
+            data.append({
+                "type": "scrape-status",
+                "id": str(ss.id),
+                "attributes": {
+                    "logged_at": ss.logged_at.isoformat() if ss.logged_at else None,
+                    "note": ss.note,
+                    "created_at": ss.created_at.isoformat() if ss.created_at else None,
+                },
+                "relationships": {
+                    "scrape": {"data": {"type": "scrape", "id": str(ss.scrape_id)}},
+                    "status": {"data": {"type": "status", "id": str(ss.status_id)} if ss.status_id else None},
+                },
+            })
+        # Include the status records so Ember Data can resolve them
+        included = []
+        seen = set()
+        for ss in qs:
+            if ss.status_id and ss.status_id not in seen:
+                seen.add(ss.status_id)
+                included.append({
+                    "type": "status",
+                    "id": str(ss.status_id),
+                    "attributes": {
+                        "status": ss.status.status,
+                        "status_type": ss.status.status_type,
+                    },
+                })
+        payload = {"data": data}
+        if included:
+            payload["included"] = included
+        return Response(payload)
+
 
 @extend_schema_view(
     list=extend_schema(tags=["Companies"], summary="List companies"),
