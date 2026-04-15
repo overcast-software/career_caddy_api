@@ -3649,7 +3649,12 @@ class ScoreViewSet(BaseViewSet):
                     explanation=result.evaluation,
                     status="completed",
                 )
-                # Record AI usage for scoring
+            except Exception:
+                logger.exception("Scoring failed for score_id=%s", score_id)
+                Score.objects.filter(pk=score_id).update(status="failed")
+                return
+            # Record AI usage — separate try so a logging failure doesn't mark the score as failed
+            try:
                 usage = getattr(result, "_usage", None)
                 model_name = getattr(result, "_model_name", "unknown")
                 if usage:
@@ -3663,8 +3668,10 @@ class ScoreViewSet(BaseViewSet):
                         total_tokens=usage.total_tokens or 0,
                         request_count=usage.requests or 1,
                     )
+                else:
+                    logger.warning("No usage data for score_id=%s", score_id)
             except Exception:
-                Score.objects.filter(pk=score_id).update(status="failed")
+                logger.exception("Failed to record AI usage for score_id=%s", score_id)
 
         import threading
         threading.Thread(target=_score, daemon=True).start()
