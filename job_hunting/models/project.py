@@ -33,3 +33,17 @@ class Project(GetMixin, models.Model):
             .values_list("description_id", flat=True)
         )
         return list(Description.objects.filter(pk__in=desc_ids))
+
+    def to_export_dict(self) -> dict:
+        proj_dict = {
+            "title": self.title or "",
+            "start_date": str(self.start_date) if self.start_date else None,
+            "end_date": str(self.end_date) if self.end_date else None,
+            "is_active": self.is_active,
+        }
+        descriptions = []
+        for d in self.descriptions:
+            if d.content:
+                descriptions.append(str(d.content).strip())
+        proj_dict["description"] = descriptions
+        return proj_dict

@@ -132,67 +132,18 @@ class Resume(GetMixin, models.Model):
         return s.content if s else ""
 
     def to_export_context(self) -> dict:
-        from job_hunting.models.education import Education
-        from job_hunting.models.certification import Certification
-        from job_hunting.models.resume_education import ResumeEducation
-        from job_hunting.models.resume_certification import ResumeCertification
-
-        context = {}
-
         header = {
             "name": getattr(self.user, "get_full_name", lambda: "")() if self.user else "",
             "title": self.title or "",
-            "phone": "",
+            "phone": self.user_phone,
         }
-        context["header"] = header
-        context["HEADER"] = header
-        context["summary"] = self.active_summary_content().strip()
-
-        experiences = []
-        try:
-            from job_hunting.models.resume_experience import ResumeExperience
-            from job_hunting.models.experience import Experience
-
-            exp_ids = list(
-                ResumeExperience.objects.filter(resume_id=self.id)
-                .order_by("order")
-                .values_list("experience_id", flat=True)
-            )
-            exp_map = {e.id: e for e in Experience.objects.filter(pk__in=exp_ids).select_related("company")}
-            for exp_id in exp_ids:
-                exp = exp_map.get(exp_id)
-                if exp:
-                    experiences.append(exp.to_export_dict())
-        except Exception:
-            pass
-        context["experiences"] = experiences
-
-        educations = []
-        try:
-            edu_ids = list(ResumeEducation.objects.filter(resume_id=self.id).values_list("education_id", flat=True))
-            for edu in Education.objects.filter(pk__in=edu_ids):
-                educations.append(edu.to_export_dict())
-        except Exception:
-            pass
-        context["educations"] = educations
-
-        certifications = []
-        try:
-            cert_ids = list(ResumeCertification.objects.filter(resume_id=self.id).values_list("certification_id", flat=True))
-            for cert in Certification.objects.filter(pk__in=cert_ids):
-                certifications.append(cert.to_export_dict())
-        except Exception:
-            pass
-        context["certifications"] = certifications
-
-        skills = []
-        try:
-            for skill in self._get_django_skills():
-                skill_value = skill.to_export_value()
-                if skill_value:
-                    skills.append(skill_value)
-        except Exception:
-            pass
-        context["skills"] = skills
-
-        return context
+        return {
+            "header": header,
+            "HEADER": header,
+            "summary": self.active_summary_content().strip(),
+            "experiences": [e.to_export_dict() for e in self.experiences],
+            "educations": [e.to_export_dict() for e in self.educations],
+            "certifications": [c.to_export_dict() for c in self.certifications],
+            "skills": [s.to_export_value() for s in self.skills if s.to_export_value()],
+            "projects": [p.to_export_dict() for p in self.projects],
+        }

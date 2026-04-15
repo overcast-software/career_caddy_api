@@ -6,7 +6,7 @@ from job_hunting.models import (
     Resume, Skill, ResumeSkill, Experience, ResumeExperience,
     Education, ResumeEducation, Certification, ResumeCertification,
     Summary, ResumeSummary, Project, ResumeProject,
-    Description, ExperienceDescription,
+    Description, ExperienceDescription, ProjectDescription,
 )
 
 User = get_user_model()
@@ -285,3 +285,86 @@ class TestResumeJSONAPIRelationships(TestCase):
             if r["type"] == "summary" and r["id"] == str(orphan_summary.id)
         )
         self.assertEqual(summary_resource["attributes"]["content"], "Orphan summary")
+
+
+class TestResumeExportContext(TestCase):
+    """Verify to_export_context returns all resume data for Jinja templates."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="exportuser", password="pass", first_name="Jane", last_name="Doe"
+        )
+        self.resume = Resume.objects.create(user=self.user, title="Senior Engineer")
+
+        self.skill = Skill.objects.create(text="Python", skill_type="Language")
+        ResumeSkill.objects.create(resume=self.resume, skill=self.skill)
+
+        self.exp = Experience.objects.create(title="Dev", location="NYC")
+        ResumeExperience.objects.create(resume=self.resume, experience=self.exp, order=0)
+        self.exp_desc = Description.objects.create(content="Built APIs")
+        ExperienceDescription.objects.create(experience=self.exp, description=self.exp_desc, order=0)
+
+        self.edu = Education.objects.create(degree="BS", institution="MIT")
+        ResumeEducation.objects.create(resume=self.resume, education=self.edu)
+
+        self.cert = Certification.objects.create(title="AWS", issuer="Amazon")
+        ResumeCertification.objects.create(resume=self.resume, certification=self.cert)
+
+        self.summary = Summary.objects.create(content="A great engineer", user=self.user)
+        ResumeSummary.objects.create(resume=self.resume, summary=self.summary, active=True)
+
+        self.project = Project.objects.create(title="OSS Tool", user=self.user)
+        ResumeProject.objects.create(resume=self.resume, project=self.project, order=0)
+        self.proj_desc = Description.objects.create(content="Open source CLI")
+        ProjectDescription.objects.create(project=self.project, description=self.proj_desc, order=0)
+
+    def test_export_context_has_all_keys(self):
+        ctx = self.resume.to_export_context()
+        for key in ["header", "summary", "experiences", "educations", "certifications", "skills", "projects"]:
+            self.assertIn(key, ctx, f"Missing key: {key}")
+
+    def test_export_context_header(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(ctx["header"]["name"], "Jane Doe")
+        self.assertEqual(ctx["header"]["title"], "Senior Engineer")
+
+    def test_export_context_summary(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(ctx["summary"], "A great engineer")
+
+    def test_export_context_experiences(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(len(ctx["experiences"]), 1)
+        self.assertEqual(ctx["experiences"][0]["title"], "Dev")
+        self.assertEqual(ctx["experiences"][0]["descriptions"], ["Built APIs"])
+
+    def test_export_context_educations(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(len(ctx["educations"]), 1)
+        self.assertEqual(ctx["educations"][0]["degree"], "BS")
+
+    def test_export_context_certifications(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(len(ctx["certifications"]), 1)
+        self.assertEqual(ctx["certifications"][0]["title"], "AWS")
+
+    def test_export_context_skills(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(len(ctx["skills"]), 1)
+        self.assertEqual(ctx["skills"][0]["text"], "Python")
+        self.assertEqual(ctx["skills"][0]["skill_type"], "Language")
+
+    def test_export_context_projects(self):
+        ctx = self.resume.to_export_context()
+        self.assertEqual(len(ctx["projects"]), 1)
+        self.assertEqual(ctx["projects"][0]["title"], "OSS Tool")
+        self.assertEqual(ctx["projects"][0]["description"], ["Open source CLI"])
+
+    def test_export_context_empty_resume(self):
+        empty = Resume.objects.create(user=self.user, title="Empty")
+        ctx = empty.to_export_context()
+        self.assertEqual(ctx["experiences"], [])
+        self.assertEqual(ctx["educations"], [])
+        self.assertEqual(ctx["certifications"], [])
+        self.assertEqual(ctx["skills"], [])
+        self.assertEqual(ctx["projects"], [])
