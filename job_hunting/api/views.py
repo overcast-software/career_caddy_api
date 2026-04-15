@@ -1737,7 +1737,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
             if "address" in profile_fields:
                 prof.address = (str(profile_fields["address"] or "").strip() or None)
             if "links" in profile_fields:
-                prof.links = profile_fields["links"] if isinstance(profile_fields["links"], dict) else {}
+                val = profile_fields["links"]
+                prof.links = val if isinstance(val, (dict, list)) else {}
             prof.save()
 
         # Send welcome email (non-blocking — don't fail registration on email error)
@@ -1846,7 +1847,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
             if "address" in profile_fields:
                 prof.address = (str(profile_fields["address"] or "").strip() or None)
             if "links" in profile_fields:
-                prof.links = profile_fields["links"] if isinstance(profile_fields["links"], dict) else {}
+                val = profile_fields["links"]
+                prof.links = val if isinstance(val, (dict, list)) else {}
             prof.save()
 
         return Response({"data": ser.to_resource(user)})

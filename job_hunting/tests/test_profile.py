@@ -18,10 +18,22 @@ class ProfileModelTests(TestCase):
         with self.assertRaises(Exception):
             Profile.objects.create(user=self.user, phone="555-0002")
 
-    def test_links_json(self):
+    def test_links_json_dict(self):
         profile = Profile.objects.create(user=self.user, links={"website": "https://example.com"})
         profile.refresh_from_db()
         self.assertEqual(profile.links["website"], "https://example.com")
+
+    def test_links_json_list(self):
+        links = [
+            {"name": "Portfolio", "url": "https://portfolio.example.com"},
+            {"name": "Blog", "url": "https://blog.example.com"},
+        ]
+        profile = Profile.objects.create(user=self.user, links=links)
+        profile.refresh_from_db()
+        self.assertIsInstance(profile.links, list)
+        self.assertEqual(len(profile.links), 2)
+        self.assertEqual(profile.links[0]["name"], "Portfolio")
+        self.assertEqual(profile.links[1]["url"], "https://blog.example.com")
 
     def test_nullable_fields(self):
         profile = Profile.objects.create(user=self.user)

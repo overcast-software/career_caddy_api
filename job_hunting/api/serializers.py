@@ -229,7 +229,7 @@ class DjangoUserSerializer:
         linkedin = ""
         github = ""
         address = ""
-        links = {}
+        links = []
         try:
             from job_hunting.models import Profile
             prof = Profile.objects.filter(user_id=obj.id).first()
@@ -239,7 +239,7 @@ class DjangoUserSerializer:
                 linkedin = prof.linkedin or ""
                 github = prof.github or ""
                 address = prof.address or ""
-                links = prof.links or {}
+                links = prof.links if prof.links is not None else []
         except Exception:
             phone = ""
 

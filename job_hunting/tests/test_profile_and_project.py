@@ -83,6 +83,65 @@ class ProfileAPITests(APITestCase):
         self.assertEqual(attributes["phone"], "")  # Should be empty string
 
 
+    def test_patch_user_links_as_list(self):
+        """PATCH /api/v1/users/:id/ with links as a list of {name, url} objects"""
+        token = self.get_jwt_token()
+        links = [
+            {"name": "Portfolio", "url": "https://portfolio.example.com"},
+            {"name": "Blog", "url": "https://blog.example.com"},
+        ]
+        payload = {
+            "data": {
+                "type": "user",
+                "id": str(self.user.id),
+                "attributes": {"links": links},
+            }
+        }
+        response = self.client.patch(
+            f"/api/v1/users/{self.user.id}/",
+            payload,
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_links = response.data["data"]["attributes"]["links"]
+        self.assertIsInstance(returned_links, list)
+        self.assertEqual(len(returned_links), 2)
+        self.assertEqual(returned_links[0]["name"], "Portfolio")
+
+    def test_patch_user_links_empty_list(self):
+        """PATCH /api/v1/users/:id/ with empty links list clears links"""
+        token = self.get_jwt_token()
+        # First set some links
+        self.client.patch(
+            f"/api/v1/users/{self.user.id}/",
+            {"data": {"type": "user", "id": str(self.user.id), "attributes": {"links": [{"name": "X", "url": "https://x.com"}]}}},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        # Now clear them
+        response = self.client.patch(
+            f"/api/v1/users/{self.user.id}/",
+            {"data": {"type": "user", "id": str(self.user.id), "attributes": {"links": []}}},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"]["attributes"]["links"], [])
+
+    def test_get_user_includes_links(self):
+        """GET /api/v1/users/:id/ returns links in attributes"""
+        token = self.get_jwt_token()
+        links = [{"name": "Site", "url": "https://site.example.com"}]
+        Profile.objects.filter(user_id=self.user.id).update(links=links)
+        response = self.client.get(
+            f"/api/v1/users/{self.user.id}/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"]["attributes"]["links"], links)
+
+
 class ProjectModelTests(TestCase):
     def test_project_model_roundtrip_simple(self):
         """Test simple Project model round-trip using explicit fields"""
