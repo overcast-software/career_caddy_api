@@ -32,6 +32,17 @@ class Score(GetMixin, models.Model):
 
     class Meta:
         db_table = "score"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job_post", "resume", "user"],
+                name="unique_score_per_job_resume_user",
+            ),
+            models.UniqueConstraint(
+                fields=["job_post", "user"],
+                condition=models.Q(resume__isnull=True),
+                name="unique_score_per_job_user_career_data",
+            ),
+        ]
 
     @property
     def company(self):

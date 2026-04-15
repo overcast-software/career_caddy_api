@@ -3952,7 +3952,7 @@ class JobPostViewSet(BaseViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response(status=204)
-        if obj.created_by_id != request.user.id:
+        if not request.user.is_staff and obj.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         if obj.applications.exclude(user_id=request.user.id).exists():
             return Response(

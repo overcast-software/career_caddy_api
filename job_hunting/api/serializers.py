@@ -1193,6 +1193,26 @@ class ProjectSerializer(BaseSerializer):
     }
     relationship_fks = {"user": "user_id"}
 
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        if self.slim:
+            return res
+        # Add data linkage for descriptions so Ember Data can resolve from included
+        try:
+            _, items = self.get_related(obj, "descriptions")
+            linkage = [{"type": "description", "id": str(d.id)} for d in items]
+        except Exception:
+            linkage = []
+        existing_links = res.get("relationships", {}).get("descriptions", {}).get("links", {
+            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/descriptions",
+            "related": f"{_resource_base_path(self.type)}/{obj.id}/descriptions",
+        })
+        res.setdefault("relationships", {})["descriptions"] = {
+            "data": linkage,
+            "links": existing_links,
+        }
+        return res
+
 
 class AiUsageSerializer(BaseSerializer):
     type = "ai-usage"
