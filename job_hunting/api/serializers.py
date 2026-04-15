@@ -134,9 +134,7 @@ class BaseSerializer:
                 
                 if uselist:
                     # Map relationship name to URL segment for special cases
-                    rel_segment = (
-                        "job-applications" if rel_name == "applications" else rel_name
-                    )
+                    rel_segment = rel_name
                     links = {
                         "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                         "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
@@ -268,7 +266,7 @@ class DjangoUserSerializer:
             ("resumes", "resume", "resumes"),
             ("scores", "score", "scores"),
             ("cover-letters", "cover-letter", "cover-letters"),
-            ("applications", "job-application", "job-applications"),
+            ("job-applications", "job-application", "job-applications"),
             ("summaries", "summary", "summaries"),
         ]
         relationships = {}
@@ -295,7 +293,7 @@ class DjangoUserSerializer:
             return "score", list(Score.objects.filter(user_id=obj.id))
         elif rel_name == "cover-letters":
             return "cover-letter", list(CoverLetter.objects.filter(user_id=obj.id))
-        elif rel_name == "applications":
+        elif rel_name == "job-applications":
             return "job-application", list(JobApplication.objects.filter(user_id=obj.id))
         elif rel_name == "summaries":
             return "summary", list(Summary.objects.filter(user_id=obj.id))
@@ -351,7 +349,7 @@ class ResumeSerializer(BaseSerializer):
             "type": "cover-letter",
             "uselist": True,
         },
-        "applications": {
+        "job-applications": {
             "attr": "applications",
             "type": "job-application",
             "uselist": True,
@@ -672,7 +670,7 @@ class JobPostSerializer(BaseSerializer):
             "type": "cover-letter",
             "uselist": True,
         },
-        "applications": {
+        "job-applications": {
             "attr": "applications",
             "type": "job-application",
             "uselist": True,
