@@ -574,6 +574,35 @@ class JobPostSerializer(BaseSerializer):
     }
     relationship_fks = {"company": "company_id"}
 
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        if self.slim:
+            return res
+        # Add data linkage for to-many relationships so Ember Data
+        # can resolve them from the included sideload array.
+        linked_rels = [
+            ("scores", "score", "scores"),
+            ("questions", "question", "questions"),
+            ("summaries", "summary", "summaries"),
+            ("cover-letters", "cover-letter", "cover_letters"),
+            ("job-applications", "job-application", "applications"),
+        ]
+        for rel_name, rel_type, attr_name in linked_rels:
+            try:
+                _, items = self.get_related(obj, rel_name)
+                linkage = [{"type": rel_type, "id": str(item.id)} for item in items]
+            except Exception:
+                linkage = []
+            existing_links = res.get("relationships", {}).get(rel_name, {}).get("links", {
+                "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
+            })
+            res.setdefault("relationships", {})[rel_name] = {
+                "data": linkage,
+                "links": existing_links,
+            }
+        return res
+
 
 class ScrapeSerializer(BaseSerializer):
     type = "scrape"
