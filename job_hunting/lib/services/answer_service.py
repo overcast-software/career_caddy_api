@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from job_hunting.models import Answer, JobApplication, Company, CoverLetter, Question, Resume
+from job_hunting.models import Answer, JobApplication, JobPost, Company, CoverLetter, Question, Resume
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -56,9 +56,11 @@ class AnswerService:
         if not user and application and getattr(application, "user", None):
             user = application.user
 
-        # Resolve job_post
+        # Resolve job_post — from question directly, or via application
         job_post = None
-        if application and hasattr(application, "job_post"):
+        if getattr(question, "job_post_id", None):
+            job_post = JobPost.objects.filter(pk=question.job_post_id).first()
+        if not job_post and application and hasattr(application, "job_post"):
             job_post = application.job_post
 
         # Resolve company (via Django ORM using company_id fields)

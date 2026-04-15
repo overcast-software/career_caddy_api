@@ -186,17 +186,14 @@ class ApplicationPromptBuilder:
         # Instructions
         if instructions is None:
             instructions = (
-                "Answer the user's application question in clear, professional markdown. "
-                "Be concise, truthful, and specific to the job. If you need to assume, state assumptions briefly. "
-                "Use the provided contextual information to make a more personalized answer."
+                "Answer ONLY the question in the '## Question to Answer' section below. "
+                "Use the provided context (job details, resume, Q&A history) to personalize "
+                "your answer, but do NOT answer any questions from the Q&A History section. "
+                "Be concise, truthful, and specific to the job. Use clear, professional markdown."
             )
         sections.append(instructions)
 
-        # Current Question
-        question_content = self._safe_str(getattr(context["question"], "content", ""))
-        if question_content:
-            sections.append(f"## Current Question\n{question_content}")
-
+        # Context sections — background info for the model
         # Job Details
         job_text = self._job_post_text(context["job_post"])
         if job_text:
@@ -231,9 +228,14 @@ class ApplicationPromptBuilder:
         if cover_letters_text:
             sections.append(f"## Cover Letters\n{cover_letters_text}")
 
-        # Q&A History
+        # Q&A History (reference only — do not answer these)
         qas_text = self._qas_text(context["qas"])
         if qas_text:
-            sections.append(f"## Q&A History\n{qas_text}")
+            sections.append(f"## Q&A History (for reference style and tone only — do NOT answer these)\n{qas_text}")
+
+        # Current question — LAST so it's closest to the model's output
+        question_content = self._safe_str(getattr(context["question"], "content", ""))
+        if question_content:
+            sections.append(f"## Question to Answer\n{question_content}")
 
         return "\n\n".join(sections)
