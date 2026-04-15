@@ -75,7 +75,7 @@ def chat_proxy(request):
 
     def stream_response():
         try:
-            with httpx.Client(timeout=120.0) as client:
+            with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)) as client:
                 with client.stream(
                     "POST",
                     chat_url,
@@ -98,6 +98,13 @@ def chat_proxy(request):
             error = json.dumps({
                 "type": "error",
                 "content": "Chat service is unavailable",
+            })
+            yield f"data: {error}\n\n"
+        except httpx.RemoteProtocolError as e:
+            logger.warning("Chat service closed connection: %s", e)
+            error = json.dumps({
+                "type": "error",
+                "content": "Chat service closed the connection unexpectedly",
             })
             yield f"data: {error}\n\n"
         except Exception as e:
