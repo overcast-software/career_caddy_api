@@ -110,7 +110,23 @@ class JobPostExtractor:
         self.agent = Agent(model, output_type=ParsedJobData)
         return self.agent
 
+    _PLACEHOLDER_NAMES = {"n/a", "na", "unknown", "none", "tbd", "not specified", ""}
+
+    def _is_placeholder(self, value: str) -> bool:
+        return (value or "").strip().lower() in self._PLACEHOLDER_NAMES
+
     def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None):
+        if self._is_placeholder(validated_data.title):
+            logger.warning("Scrape %s: extracted title is a placeholder (%r), skipping", scrape.id, validated_data.title)
+            scrape.status = "failed"
+            scrape.save()
+            return
+        if self._is_placeholder(validated_data.company_name):
+            logger.warning("Scrape %s: extracted company is a placeholder (%r), skipping", scrape.id, validated_data.company_name)
+            scrape.status = "failed"
+            scrape.save()
+            return
+
         # Find or create company — Company is a shared resource (no user scoping).
         company, _ = Company.objects.get_or_create(
             name=validated_data.company_name,
