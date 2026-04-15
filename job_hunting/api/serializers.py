@@ -375,144 +375,41 @@ class ResumeSerializer(BaseSerializer):
         res = super().to_resource(obj)
         if self.slim:
             return res
-        # Embed active summary content as a convenience attribute
+
+        # Convenience attribute: active summary content
         try:
             res.setdefault("attributes", {})["summary"] = obj.active_summary_content()
         except Exception:
             pass
-        # Embed all skills inline — intrinsic to the record, never paginated
-        try:
-            rs_qs = ResumeSkill.objects.select_related("skill").filter(resume_id=obj.id)
-            res["attributes"]["skills"] = [
-                {
-                    "id": rs.skill.id,
-                    "text": rs.skill.text,
-                    "skill_type": rs.skill.skill_type,
-                    "active": rs.active,
-                }
-                for rs in rs_qs
-            ]
-        except Exception:
-            res["attributes"]["skills"] = []
 
-        # Embed experiences with their descriptions
-        try:
-            re_qs = (
-                ResumeExperience.objects.select_related("experience", "experience__company")
-                .filter(resume_id=obj.id)
-                .order_by("order")
-            )
-            exp_ids = [re.experience_id for re in re_qs]
-            # Batch-fetch all descriptions for these experiences
-            ed_rows = (
-                ExperienceDescription.objects.select_related("description")
-                .filter(experience_id__in=exp_ids)
-                .order_by("order")
-            )
-            descs_by_exp = {}
-            for ed in ed_rows:
-                descs_by_exp.setdefault(ed.experience_id, []).append(
-                    {"id": ed.description.id, "content": ed.description.content}
-                )
-            res["attributes"]["experiences"] = [
-                {
-                    "id": re.experience.id,
-                    "title": re.experience.title,
-                    "start_date": _to_primitive(re.experience.start_date),
-                    "end_date": _to_primitive(re.experience.end_date),
-                    "content": re.experience.content,
-                    "location": re.experience.location,
-                    "summary": re.experience.summary,
-                    "company_id": re.experience.company_id,
-                    "company": re.experience.company.name if re.experience.company_id else None,
-                    "order": re.order,
-                    "descriptions": descs_by_exp.get(re.experience_id, []),
-                }
-                for re in re_qs
-            ]
-        except Exception:
-            res["attributes"]["experiences"] = []
+        # Add data linkage to to-many relationships so Ember Data
+        # can resolve them from the `included` sideload array.
+        rel_defs = [
+            ("summaries", "summary"),
+            ("certifications", "certification"),
+            ("educations", "education"),
+            ("experiences", "experience"),
+            ("skills", "skill"),
+            ("projects", "project"),
+        ]
+        for rel_name, rel_type in rel_defs:
+            try:
+                _, items = self.get_related(obj, rel_name)
+                linkage = [{"type": rel_type, "id": str(item.id)} for item in items]
+            except Exception:
+                linkage = []
+            existing_links = res.get("relationships", {}).get(rel_name, {}).get("links", {
+                "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
+            })
+            res.setdefault("relationships", {})[rel_name] = {
+                "data": linkage,
+                "links": existing_links,
+            }
 
-        # Embed projects
-        try:
-            rp_qs = (
-                ResumeProject.objects.select_related("project")
-                .filter(resume_id=obj.id)
-                .order_by("order")
-            )
-            res["attributes"]["projects"] = [
-                {
-                    "id": rp.project.id,
-                    "title": rp.project.title,
-                    "description": rp.project.description,
-                    "start_date": _to_primitive(rp.project.start_date),
-                    "end_date": _to_primitive(rp.project.end_date),
-                    "is_active": rp.project.is_active,
-                    "order": rp.order,
-                }
-                for rp in rp_qs
-            ]
-        except Exception:
-            res["attributes"]["projects"] = []
-
-        # Embed educations — join table fields override base model when set
-        try:
-            red_qs = ResumeEducation.objects.select_related("education").filter(resume_id=obj.id)
-            res["attributes"]["educations"] = [
-                {
-                    "id": red.education.id,
-                    "degree": red.degree or red.education.degree,
-                    "institution": red.institution or red.education.institution,
-                    "issue_date": _to_primitive(red.issue_date or red.education.issue_date),
-                    "major": red.education.major,
-                    "minor": red.education.minor,
-                    "content": red.content,
-                }
-                for red in red_qs
-            ]
-        except Exception:
-            res["attributes"]["educations"] = []
-
-        # Embed certifications — join table fields override base model when set
-        try:
-            rc_qs = ResumeCertification.objects.select_related("certification").filter(resume_id=obj.id)
-            res["attributes"]["certifications"] = [
-                {
-                    "id": rc.certification.id,
-                    "title": rc.title or rc.certification.title,
-                    "issuer": rc.issuer or rc.certification.issuer,
-                    "issue_date": _to_primitive(rc.issue_date or rc.certification.issue_date),
-                    "content": rc.content or rc.certification.content,
-                }
-                for rc in rc_qs
-            ]
-        except Exception:
-            res["attributes"]["certifications"] = []
-
-        # Embed summaries
-        try:
-            rsm_qs = ResumeSummary.objects.select_related("summary").filter(resume_id=obj.id)
-            res["attributes"]["summaries"] = [
-                {
-                    "id": rsm.summary.id,
-                    "content": rsm.summary.content,
-                    "status": rsm.summary.status,
-                    "job_post_id": rsm.summary.job_post_id,
-                    "active": rsm.active,
-                }
-                for rsm in rsm_qs
-            ]
-        except Exception:
-            res["attributes"]["summaries"] = []
-
-        # Ensure user relationship linkage points to Django user
-        # Handle both Django and SA Resume models
-        user_id = None
-        if hasattr(obj, "user_id"):
-            user_id = obj.user_id
-        
+        # User relationship with proper linkage
+        user_id = getattr(obj, "user_id", None)
         if user_id:
-            # Verify user exists before adding relationship
             try:
                 User = get_user_model()
                 if User.objects.filter(id=user_id).exists():
@@ -524,13 +421,8 @@ class ResumeSerializer(BaseSerializer):
                         },
                     }
             except Exception:
-                # User doesn't exist or error checking - skip relationship
                 pass
 
-        # Convenience link to related summaries collection
-        res.setdefault("links", {})[
-            "summaries"
-        ] = f"{_resource_base_path(self.type)}/{obj.id}/summaries"
         return res
 
     def get_related(self, obj, rel_name):
@@ -985,20 +877,20 @@ class ExperienceSerializer(BaseSerializer):
             if rid is not None:
                 res.setdefault("attributes", {})["resume_id"] = rid
 
-        # Also expose description content lines for convenience, either from linked descriptions
-        # or by splitting the legacy Experience.content field.
+        # Add data linkage for descriptions so Ember Data can resolve from included
         try:
-            desc_list = getattr(obj, "descriptions", None)
-            if desc_list:
-                lines = [d.content for d in desc_list if getattr(d, "content", None)]
-            else:
-                raw = getattr(obj, "content", None) or ""
-                lines = [ln.strip() for ln in raw.splitlines() if ln and ln.strip()]
-            if lines:
-                res.setdefault("attributes", {})["description_lines"] = lines
+            _, items = self.get_related(obj, "descriptions")
+            linkage = [{"type": "description", "id": str(d.id)} for d in items]
         except Exception:
-            # Non-fatal; just omit description_lines on error
-            pass
+            linkage = []
+        existing_links = res.get("relationships", {}).get("descriptions", {}).get("links", {
+            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/descriptions",
+            "related": f"{_resource_base_path(self.type)}/{obj.id}/descriptions",
+        })
+        res.setdefault("relationships", {})["descriptions"] = {
+            "data": linkage,
+            "links": existing_links,
+        }
 
         return res
 

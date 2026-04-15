@@ -2,7 +2,12 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
-from job_hunting.models import Resume
+from job_hunting.models import (
+    Resume, Skill, ResumeSkill, Experience, ResumeExperience,
+    Education, ResumeEducation, Certification, ResumeCertification,
+    Summary, ResumeSummary, Project, ResumeProject,
+    Description, ExperienceDescription,
+)
 
 User = get_user_model()
 
@@ -96,3 +101,187 @@ class TestResumeAPI(TestCase):
         other_client.force_authenticate(user=other)
         response = other_client.get(f"/api/v1/resumes/{self.resume.id}/")
         self.assertIn(response.status_code, [403, 404])
+
+
+class TestResumeJSONAPIRelationships(TestCase):
+    """Verify resume responses use proper JSON:API relationship linkage + sideloading."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="reluser", password="pass")
+        self.client.force_authenticate(user=self.user)
+        self.resume = Resume.objects.create(user=self.user, title="Test Resume")
+
+        # Create related records via join tables
+        self.skill = Skill.objects.create(text="Python", skill_type="technical")
+        ResumeSkill.objects.create(resume=self.resume, skill=self.skill, active=True)
+
+        self.experience = Experience.objects.create(title="Developer", location="Remote")
+        ResumeExperience.objects.create(resume=self.resume, experience=self.experience, order=0)
+
+        self.education = Education.objects.create(degree="BS", institution="MIT")
+        ResumeEducation.objects.create(resume=self.resume, education=self.education)
+
+        self.certification = Certification.objects.create(title="AWS", issuer="Amazon")
+        ResumeCertification.objects.create(resume=self.resume, certification=self.certification)
+
+        self.summary = Summary.objects.create(content="A summary", user=self.user)
+        ResumeSummary.objects.create(resume=self.resume, summary=self.summary, active=True)
+
+        self.project = Project.objects.create(title="Open Source Tool")
+        ResumeProject.objects.create(resume=self.resume, project=self.project, order=0)
+
+    def _get_retrieve(self):
+        response = self.client.get(f"/api/v1/resumes/{self.resume.id}/")
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def _get_list(self):
+        response = self.client.get("/api/v1/resumes/")
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_retrieve_has_relationship_data_linkage(self):
+        body = self._get_retrieve()
+        rels = body["data"]["relationships"]
+        for rel_name, rel_type, expected_id in [
+            ("skills", "skill", self.skill.id),
+            ("experiences", "experience", self.experience.id),
+            ("educations", "education", self.education.id),
+            ("certifications", "certification", self.certification.id),
+            ("summaries", "summary", self.summary.id),
+            ("projects", "project", self.project.id),
+        ]:
+            with self.subTest(rel=rel_name):
+                self.assertIn(rel_name, rels, f"Missing relationship: {rel_name}")
+                self.assertIn("data", rels[rel_name], f"Missing data key in {rel_name}")
+                data = rels[rel_name]["data"]
+                self.assertIsInstance(data, list)
+                self.assertEqual(len(data), 1)
+                self.assertEqual(data[0]["type"], rel_type)
+                self.assertEqual(data[0]["id"], str(expected_id))
+
+    def test_retrieve_has_included_sideloads(self):
+        body = self._get_retrieve()
+        self.assertIn("included", body)
+        included_types = {r["type"] for r in body["included"]}
+        for expected_type in ["skill", "experience", "education", "certification", "summary", "project"]:
+            self.assertIn(expected_type, included_types, f"Missing included type: {expected_type}")
+
+    def test_retrieve_included_has_attributes(self):
+        body = self._get_retrieve()
+        included_by_type = {}
+        for r in body["included"]:
+            included_by_type[r["type"]] = r
+        self.assertEqual(included_by_type["skill"]["attributes"]["text"], "Python")
+        self.assertEqual(included_by_type["experience"]["attributes"]["title"], "Developer")
+        self.assertEqual(included_by_type["education"]["attributes"]["degree"], "BS")
+        self.assertEqual(included_by_type["certification"]["attributes"]["title"], "AWS")
+        self.assertEqual(included_by_type["summary"]["attributes"]["content"], "A summary")
+        self.assertEqual(included_by_type["project"]["attributes"]["title"], "Open Source Tool")
+
+    def test_retrieve_no_embedded_attributes(self):
+        body = self._get_retrieve()
+        attrs = body["data"]["attributes"]
+        for key in ["skills", "experiences", "educations", "certifications", "summaries", "projects"]:
+            self.assertNotIn(key, attrs, f"Embedded attribute should not exist: {key}")
+
+    def test_retrieve_keeps_summary_convenience_attribute(self):
+        body = self._get_retrieve()
+        # The active summary content is a convenience attribute (not the relationship)
+        self.assertIn("summary", body["data"]["attributes"])
+
+    def test_list_has_relationship_data_linkage(self):
+        body = self._get_list()
+        self.assertEqual(len(body["data"]), 1)
+        rels = body["data"][0]["relationships"]
+        self.assertIn("data", rels["skills"])
+        self.assertEqual(len(rels["skills"]["data"]), 1)
+
+    def test_list_has_included_sideloads(self):
+        body = self._get_list()
+        self.assertIn("included", body)
+        included_types = {r["type"] for r in body["included"]}
+        self.assertIn("skill", included_types)
+        self.assertIn("experience", included_types)
+
+    def test_slim_request_skips_linkage(self):
+        response = self.client.get("/api/v1/resumes/?slim=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        # Slim responses should not have relationship data or included
+        self.assertNotIn("included", body)
+
+    def test_empty_resume_has_empty_data_arrays(self):
+        empty = Resume.objects.create(user=self.user, title="Empty")
+        response = self.client.get(f"/api/v1/resumes/{empty.id}/")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        rels = body["data"]["relationships"]
+        for rel_name in ["skills", "experiences", "educations", "certifications", "summaries", "projects"]:
+            with self.subTest(rel=rel_name):
+                self.assertEqual(rels[rel_name]["data"], [])
+
+    def test_user_relationship_has_data(self):
+        body = self._get_retrieve()
+        user_rel = body["data"]["relationships"]["user"]
+        self.assertIn("data", user_rel)
+        self.assertEqual(user_rel["data"]["type"], "user")
+        self.assertEqual(user_rel["data"]["id"], str(self.user.id))
+
+    def test_other_user_data_not_in_included(self):
+        other = User.objects.create_user(username="other_rel", password="pass")
+        other_resume = Resume.objects.create(user=other, title="Other")
+        other_skill = Skill.objects.create(text="Java")
+        ResumeSkill.objects.create(resume=other_resume, skill=other_skill)
+
+        body = self._get_list()
+        included_ids = {(r["type"], r["id"]) for r in body.get("included", [])}
+        self.assertNotIn(("skill", str(other_skill.id)), included_ids)
+
+    def test_experience_descriptions_have_data_linkage(self):
+        desc = Description.objects.create(content="Built microservices")
+        ExperienceDescription.objects.create(
+            experience=self.experience, description=desc, order=0
+        )
+        body = self._get_retrieve()
+        # Find the experience in included
+        exp_resource = next(
+            r for r in body["included"]
+            if r["type"] == "experience" and r["id"] == str(self.experience.id)
+        )
+        desc_rel = exp_resource["relationships"]["descriptions"]
+        self.assertIn("data", desc_rel)
+        self.assertEqual(len(desc_rel["data"]), 1)
+        self.assertEqual(desc_rel["data"][0]["type"], "description")
+        self.assertEqual(desc_rel["data"][0]["id"], str(desc.id))
+
+    def test_experience_descriptions_sideloaded_in_included(self):
+        desc = Description.objects.create(content="Deployed to prod")
+        ExperienceDescription.objects.create(
+            experience=self.experience, description=desc, order=0
+        )
+        body = self._get_retrieve()
+        included_types = {(r["type"], r["id"]) for r in body["included"]}
+        self.assertIn(("description", str(desc.id)), included_types)
+        desc_resource = next(
+            r for r in body["included"]
+            if r["type"] == "description" and r["id"] == str(desc.id)
+        )
+        self.assertEqual(desc_resource["attributes"]["content"], "Deployed to prod")
+
+    def test_summary_with_null_user_id_included(self):
+        """Summaries with user_id=None should still be sideloaded when linked to a resume."""
+        # Remove the setUp summary (which has user_id set) and create one without
+        ResumeSummary.objects.filter(resume=self.resume).delete()
+        orphan_summary = Summary.objects.create(content="Orphan summary", user=None)
+        ResumeSummary.objects.create(resume=self.resume, summary=orphan_summary, active=True)
+
+        body = self._get_retrieve()
+        included_ids = {(r["type"], r["id"]) for r in body["included"]}
+        self.assertIn(("summary", str(orphan_summary.id)), included_ids)
+        summary_resource = next(
+            r for r in body["included"]
+            if r["type"] == "summary" and r["id"] == str(orphan_summary.id)
+        )
+        self.assertEqual(summary_resource["attributes"]["content"], "Orphan summary")

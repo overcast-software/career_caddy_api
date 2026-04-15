@@ -875,15 +875,19 @@ class BaseViewSet(viewsets.ViewSet):
                     already_seen = key in seen
 
                     if not already_seen:
-                        # Filter user-owned resources to only include those owned by authenticated user
+                        # Filter user-owned resources to only include those owned by authenticated user.
+                        # Skip the check when user_id is None (resource reached via relationship on
+                        # an already-authorized parent, e.g. a summary linked to the user's resume).
+                        t_user_id = getattr(t, "user_id", None)
                         if (
                             effective_type in ("cover-letter", "score", "summary", "job-application")
+                            and t_user_id is not None
                             and request
                             and hasattr(request, "user")
                             and request.user.is_authenticated
+                            and t_user_id != request.user.id
                         ):
-                            if getattr(t, "user_id", None) != request.user.id:
-                                continue
+                            continue
 
                         seen.add(key)
                         included.append(rel_ser.to_resource(t))
@@ -2055,6 +2059,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
 class ResumeViewSet(BaseViewSet):
     model = Resume
     serializer_class = ResumeSerializer
+    _default_includes = ["summaries", "certifications", "educations", "experiences", "skills", "projects"]
 
     @extend_schema(
         tags=["Resumes"],
@@ -2070,9 +2075,8 @@ class ResumeViewSet(BaseViewSet):
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
         if not slim:
-            include_rels = self._parse_include(request)
-            if include_rels:
-                payload["included"] = self._build_included(items, include_rels, request)
+            include_rels = self._parse_include(request) or self._default_includes
+            payload["included"] = self._build_included(items, include_rels, request)
         return Response(payload)
 
     @extend_schema(
@@ -2087,9 +2091,8 @@ class ResumeViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
-        include_rels = self._parse_include(request)
-        if include_rels:
-            payload["included"] = self._build_included([obj], include_rels, request)
+        include_rels = self._parse_include(request) or self._default_includes
+        payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
