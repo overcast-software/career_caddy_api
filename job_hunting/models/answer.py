@@ -15,3 +15,4 @@ class Answer(GetMixin, models.Model):
 
     class Meta:
         db_table = "answer"
+        ordering = ["-created_at"]
