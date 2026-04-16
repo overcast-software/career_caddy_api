@@ -260,9 +260,14 @@ class JobPostExtractor:
             if not isinstance(selectors, dict):
                 return None
 
+            # Extract job_data selectors from nested schema
+            job_selectors = selectors.get("job_data", {})
+            if not job_selectors:
+                return None
+
             soup = BeautifulSoup(scrape.html, "html.parser")
             extracted = {}
-            for field, selector in selectors.items():
+            for field, selector in job_selectors.items():
                 el = soup.select_one(selector)
                 if el:
                     extracted[field] = el.get_text(strip=True)
@@ -418,13 +423,15 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
             parser = JobPostExtractor()
             parser.parse(scrape, user=user)
 
-            _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
+            _log_scrape_status(scrape_id, "updating_profile", note="Updating scrape profile")
 
             # Auto-populate scrape profile for this domain
             try:
                 _update_scrape_profile(scrape, user)
             except Exception:
                 logger.debug("Failed to update scrape profile", exc_info=True)
+
+            _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
 
         except Exception:
             logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
@@ -509,10 +516,17 @@ class ProfileHints(BaseModel):
         description="2-3 sentences describing how the page organizes job data "
         "(heading hierarchy, section layout, where key fields appear)"
     )
+    css_selectors: dict = Field(
+        default_factory=dict,
+        description="CSS selectors for job data fields based on common patterns for this "
+        "domain. Keys should be: title, company_name, description, location, salary. "
+        "Values are CSS selector strings. Only include selectors you are confident about "
+        "based on the domain's typical job page structure. Omit fields you are unsure of."
+    )
 
 
 def _generate_profile_hints(profile, scrape, user=None):
-    """Use a cheap LLM call to generate extraction_hints and page_structure for a ScrapeProfile."""
+    """Use a cheap LLM call to generate extraction_hints, page_structure, and CSS selectors for a ScrapeProfile."""
     from job_hunting.models.ai_usage import AiUsage
     from job_hunting.lib.pricing import estimate_cost
 
@@ -527,7 +541,9 @@ def _generate_profile_hints(profile, scrape, user=None):
         logger.debug("Could not create hint agent with model %s", model_name)
         return
 
-    prompt = f"""Analyze this scraped job posting content from {profile.hostname} and describe extraction patterns and page structure. Be concise — 2-3 sentences each. This will help future extractions from this domain.
+    prompt = f"""Analyze this scraped job posting content from {profile.hostname} and describe extraction patterns, page structure, and suggest CSS selectors.
+
+For css_selectors, suggest selectors based on common patterns used by {profile.hostname} for job pages. Common patterns include class-based selectors like ".job-title", ID selectors like "#job-description", or data attributes like "[data-testid='title']". Only include selectors you are reasonably confident about for this domain. Omit fields where you cannot make a good guess.
 
 Content (first 2000 chars):
 {content[:2000]}"""
@@ -538,6 +554,13 @@ Content (first 2000 chars):
 
         profile.extraction_hints = hints.extraction_hints[:1000]
         profile.page_structure = hints.page_structure[:1000]
+
+        # Save proposed CSS selectors under job_data if none exist yet
+        existing_selectors = profile.css_selectors or {}
+        if hints.css_selectors and not existing_selectors.get("job_data"):
+            existing_selectors["job_data"] = hints.css_selectors
+            profile.css_selectors = existing_selectors
+
         profile.save()
 
         # Record AI usage
