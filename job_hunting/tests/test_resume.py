@@ -7,6 +7,7 @@ from job_hunting.models import (
     Education, ResumeEducation, Certification, ResumeCertification,
     Summary, ResumeSummary, Project, ResumeProject,
     Description, ExperienceDescription, ProjectDescription,
+    JobApplication, JobPost, Company, Score,
 )
 
 User = get_user_model()
@@ -368,3 +369,78 @@ class TestResumeExportContext(TestCase):
         self.assertEqual(ctx["certifications"], [])
         self.assertEqual(ctx["skills"], [])
         self.assertEqual(ctx["projects"], [])
+
+
+class TestResumeSlimMeta(TestCase):
+    """Verify slim list responses include meta counts per JSON:API spec."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="slimuser", password="pass")
+        self.client.force_authenticate(user=self.user)
+        self.resume = Resume.objects.create(user=self.user, title="Slim Resume")
+
+        # Related records
+        self.skill = Skill.objects.create(text="Go", skill_type="Language")
+        ResumeSkill.objects.create(resume=self.resume, skill=self.skill)
+
+        self.experience = Experience.objects.create(title="Engineer")
+        ResumeExperience.objects.create(resume=self.resume, experience=self.experience, order=0)
+
+        self.company = Company.objects.create(name="SlimCo")
+        self.job_post = JobPost.objects.create(
+            title="Dev", company=self.company, created_by=self.user
+        )
+        JobApplication.objects.create(
+            job_post=self.job_post, resume=self.resume, user=self.user
+        )
+        JobApplication.objects.create(
+            job_post=self.job_post, resume=self.resume, user=self.user
+        )
+        Score.objects.create(
+            job_post=self.job_post, resume=self.resume, user=self.user, score=85
+        )
+
+    def test_slim_list_has_meta_counts(self):
+        response = self.client.get("/api/v1/resumes/", {"slim": "true"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["data"]
+        self.assertEqual(len(data), 1)
+        resource = data[0]
+        self.assertIn("meta", resource)
+        meta = resource["meta"]
+        self.assertEqual(meta["job_application_count"], 2)
+        self.assertEqual(meta["score_count"], 1)
+        self.assertEqual(meta["experience_count"], 1)
+        self.assertEqual(meta["skill_count"], 1)
+
+    def test_slim_list_only_has_slim_attributes(self):
+        response = self.client.get("/api/v1/resumes/", {"slim": "true"})
+        data = response.json()["data"][0]
+        attrs = data["attributes"]
+        self.assertIn("name", attrs)
+        self.assertIn("title", attrs)
+        self.assertIn("notes", attrs)
+        self.assertIn("favorite", attrs)
+        self.assertNotIn("file_path", attrs)
+        self.assertNotIn("user_id", attrs)
+
+    def test_slim_list_has_no_included(self):
+        response = self.client.get("/api/v1/resumes/", {"slim": "true"})
+        self.assertNotIn("included", response.json())
+
+    def test_non_slim_list_has_no_meta_counts(self):
+        response = self.client.get("/api/v1/resumes/")
+        data = response.json()["data"][0]
+        self.assertNotIn("meta", data)
+
+    def test_slim_empty_resume_has_zero_counts(self):
+        empty = Resume.objects.create(user=self.user, title="Empty")
+        response = self.client.get("/api/v1/resumes/", {"slim": "true"})
+        data = response.json()["data"]
+        empty_resource = next(r for r in data if r["id"] == str(empty.id))
+        meta = empty_resource["meta"]
+        self.assertEqual(meta["job_application_count"], 0)
+        self.assertEqual(meta["score_count"], 0)
+        self.assertEqual(meta["experience_count"], 0)
+        self.assertEqual(meta["skill_count"], 0)

@@ -392,7 +392,7 @@ class ResumeSerializer(BaseSerializer):
     type = "resume"
     model = Resume
     attributes = ["file_path", "title", "name", "notes", "user_id", "favorite"]
-    slim_attributes = ["name", "title"]
+    slim_attributes = ["name", "title", "notes", "favorite"]
     user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
@@ -431,6 +431,7 @@ class ResumeSerializer(BaseSerializer):
     def to_resource(self, obj):
         res = super().to_resource(obj)
         if self.slim:
+            res["meta"] = self._build_counts(obj)
             return res
         # Convenience attribute: active summary content
         try:
@@ -438,6 +439,19 @@ class ResumeSerializer(BaseSerializer):
         except Exception:
             pass
         return res
+
+    def _build_counts(self, obj):
+        from job_hunting.models import ResumeExperience, ResumeSkill
+        from job_hunting.models.job_application import JobApplication
+        from job_hunting.models.score import Score
+
+        rid = obj.id
+        return {
+            "job_application_count": JobApplication.objects.filter(resume_id=rid).count(),
+            "score_count": Score.objects.filter(resume_id=rid).count(),
+            "experience_count": ResumeExperience.objects.filter(resume_id=rid).count(),
+            "skill_count": ResumeSkill.objects.filter(resume_id=rid).count(),
+        }
 
     def get_related(self, obj, rel_name):
         if rel_name == "experiences":
