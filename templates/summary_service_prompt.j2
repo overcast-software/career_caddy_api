@@ -1,6 +1,11 @@
-You are a career counselor.  I am going to provide a job description and a resume
+You are a career counselor.  I am going to provide a job description and supporting documents
 You will create a new resume summary tailored to the job description.
 Keep the summary to less than 80 words.
+{% if injected_prompt %}
+
+Additional Instructions:
+{{ injected_prompt }}
+{% endif %}
 job description:
 {{job_description}}
 

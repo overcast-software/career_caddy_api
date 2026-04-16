@@ -12,7 +12,7 @@ class CoverLetterService:
         self._resume_markdown = resume_markdown
         self._user_id = user_id
 
-    def generate_cover_letter(self):
+    def generate_cover_letter(self, injected_prompt=None):
         env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         tmpl = env.get_template("cover_letter_prompt.j2")
 
@@ -27,6 +27,7 @@ class CoverLetterService:
             company_name=getattr(self.job_post.company, "name", ""),
             job_description=self.job_post.description,
             resume=resume_markdown,
+            injected_prompt=injected_prompt,
         )
 
         user_id = self._user_id or (self.resume.user.id if self.resume else None)

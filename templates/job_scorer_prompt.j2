@@ -1,4 +1,4 @@
-You are an expert technical recruiter. Given the following job description and resume, evaluate the match and respond ONLY with a single JSON object with these keys:
+You are an expert technical recruiter. Given the following job description and supporting documents, evaluate the match and respond ONLY with a single JSON object with these keys:
 - score: integer between 1 and 100 inclusive
 - explanation: a concise one-paragraph explanation
 
@@ -8,7 +8,11 @@ Do not include any additional text, markdown, or code fences.
   "score": 85,
   "explanation": "Explain briefly why the resume matches the job."
 }
+{% if injected_prompt %}
 
+Additional Instructions:
+{{ injected_prompt }}
+{% endif %}
 
 Job Description:
 {{job_description}}

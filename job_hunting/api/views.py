@@ -1337,6 +1337,11 @@ class SummaryViewSet(BaseViewSet):
 
         content = attrs.get("content")
 
+        # Extract injected prompt for AI generation
+        injected_prompt = attrs.get("instructions") or attrs.get("injected_prompt")
+        injected_prompt = injected_prompt.strip() if isinstance(injected_prompt, str) else None
+        injected_prompt = injected_prompt or None
+
         if content:
             summary = Summary.objects.create(
                 job_post_id=job_post.id if job_post else None,
@@ -1381,7 +1386,7 @@ class SummaryViewSet(BaseViewSet):
             else:
                 summary_service = SummaryService(client, job=job_post, resume=resume)
 
-            summary = summary_service.generate_summary()
+            summary = summary_service.generate_summary(injected_prompt=injected_prompt)
 
         # Link to resume when one was provided
         if resume is not None:
@@ -3541,7 +3546,17 @@ class ScoreViewSet(BaseViewSet):
 
         myJobScorer = JobScorer(client)
 
-        relationships = (data.get("data") or {}).get("relationships") or {}
+        node = data.get("data") or {}
+        relationships = node.get("relationships") or {}
+        attrs_node = node.get("attributes") or {}
+
+        # Extract injected prompt for AI scoring
+        injected_prompt = (
+            attrs_node.get("instructions") or attrs_node.get("injected_prompt")
+            or data.get("instructions") or data.get("injected_prompt")
+        )
+        injected_prompt = injected_prompt.strip() if isinstance(injected_prompt, str) else None
+        injected_prompt = injected_prompt or None
 
         def _first_id(node):
             if isinstance(node, dict):
@@ -3638,12 +3653,13 @@ class ScoreViewSet(BaseViewSet):
         captured_resume_markdown = resume_markdown
 
         captured_user_id = request.user.id
+        captured_injected_prompt = injected_prompt
 
         def _score():
             import django
             django.db.close_old_connections()
             try:
-                result = myJobScorer.score_job_match(captured_description, captured_resume_markdown)
+                result = myJobScorer.score_job_match(captured_description, captured_resume_markdown, injected_prompt=captured_injected_prompt)
                 Score.objects.filter(pk=score_id).update(
                     score=result.score,
                     explanation=result.evaluation,
@@ -5024,6 +5040,15 @@ class CoverLetterViewSet(BaseViewSet):
         # Force ownership to authenticated user
         user_id = request.user.id
 
+        # Extract injected prompt for AI generation
+        injected_prompt = (
+            attrs_node.get("instructions") or attrs_node.get("injected_prompt")
+            or node.get("instructions") or data.get("instructions")
+            or attrs.get("instructions") or attrs.get("injected_prompt")
+        )
+        injected_prompt = injected_prompt.strip() if isinstance(injected_prompt, str) else None
+        injected_prompt = injected_prompt or None
+
         # Accept provided content; otherwise, generate via AI
         content = attrs_node.get("content")
         if content:
@@ -5083,6 +5108,7 @@ class CoverLetterViewSet(BaseViewSet):
             status="pending",
         )
         cl_id = cover_letter.id
+        captured_injected_prompt = injected_prompt
 
         def _generate():
             import django
@@ -5091,7 +5117,7 @@ class CoverLetterViewSet(BaseViewSet):
                 cl_service = CoverLetterService(
                     client, job_post, resume=resume, resume_markdown=career_markdown, user_id=user_id
                 )
-                result = cl_service.generate_cover_letter()
+                result = cl_service.generate_cover_letter(injected_prompt=captured_injected_prompt)
                 CoverLetter.objects.filter(pk=cl_id).update(
                     content=result.content, status="completed"
                 )

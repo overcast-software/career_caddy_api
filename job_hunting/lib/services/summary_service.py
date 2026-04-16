@@ -16,7 +16,7 @@ class SummaryService:
         self.env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         self.ai_client = ai_client
 
-    def generate_summary(self) -> Summary:
+    def generate_summary(self, injected_prompt=None) -> Summary:
         if self._resume_markdown is not None:
             resume_markdown = self._resume_markdown
         else:
@@ -29,7 +29,9 @@ class SummaryService:
         template = self.env.get_template("summary_service_prompt.j2")
 
         prompt = template.render(
-            job_description=self.job.description, resume=resume_markdown
+            job_description=self.job.description,
+            resume=resume_markdown,
+            injected_prompt=injected_prompt,
         )
 
         write_prompt_to_file(

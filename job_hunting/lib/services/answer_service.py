@@ -304,26 +304,21 @@ class AnswerService:
         self.question = question
         context = self._load_context()
 
-        if career_markdown and career_markdown.strip():
-            # Use the provided career data instead of context-loaded resumes
+        # Normalize optional strings
+        clean_injected = injected_prompt.strip() if isinstance(injected_prompt, str) and injected_prompt.strip() else None
+        clean_career = career_markdown.strip() if isinstance(career_markdown, str) and career_markdown.strip() else None
+
+        if clean_career:
+            # Career markdown replaces context-loaded resumes
             context["resumes"] = []
             context["resume"] = None
 
-        # Build the base prompt
-        base_prompt = self.prompt_builder.build(context)
-
-        if career_markdown and career_markdown.strip():
-            base_prompt = f"## Career Profile\n{career_markdown}\n\n{base_prompt}"
-
-        # If there's an injected prompt, append it to the base prompt
-        if injected_prompt and isinstance(injected_prompt, str):
-            injected_prompt = injected_prompt.strip()
-            if injected_prompt:
-                prompt = f"{base_prompt}\n\nAdditional Instructions:\n{injected_prompt}"
-            else:
-                prompt = base_prompt
-        else:
-            prompt = base_prompt
+        # Build prompt: preamble → injected instructions → question → supporting context
+        prompt = self.prompt_builder.build(
+            context,
+            injected_prompt=clean_injected,
+            career_markdown=clean_career,
+        )
 
         write_prompt_to_file(
             prompt,

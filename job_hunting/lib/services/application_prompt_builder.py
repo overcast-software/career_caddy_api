@@ -180,10 +180,18 @@ class ApplicationPromptBuilder:
             sections.append("")
         return "\n".join(sections)
 
-    def build(self, context: dict, instructions: Optional[str] = None) -> str:
+    def build(
+        self,
+        context: dict,
+        instructions: Optional[str] = None,
+        injected_prompt: Optional[str] = None,
+        career_markdown: Optional[str] = None,
+    ) -> str:
         sections = []
 
-        # Instructions
+        # --- Front matter: what is being asked ---
+
+        # 1. Instructions (preamble)
         if instructions is None:
             instructions = (
                 "Answer ONLY the question in the '## Question to Answer' section below. "
@@ -193,7 +201,21 @@ class ApplicationPromptBuilder:
             )
         sections.append(instructions)
 
-        # Context sections — background info for the model
+        # 2. Injected prompt (caller-supplied additional instructions)
+        if injected_prompt:
+            sections.append(f"## Additional Instructions\n{injected_prompt}")
+
+        # 3. Question to Answer
+        question_content = self._safe_str(getattr(context["question"], "content", ""))
+        if question_content:
+            sections.append(f"## Question to Answer\n{question_content}")
+
+        # --- Supporting context: background info for the model ---
+
+        # Career Profile (pre-rendered markdown from /career-data/ endpoint)
+        if career_markdown:
+            sections.append(f"## Career Profile\n{career_markdown}")
+
         # Job Details
         job_text = self._job_post_text(context["job_post"])
         if job_text:
@@ -232,10 +254,5 @@ class ApplicationPromptBuilder:
         qas_text = self._qas_text(context["qas"])
         if qas_text:
             sections.append(f"## Q&A History (for reference style and tone only — do NOT answer these)\n{qas_text}")
-
-        # Current question — LAST so it's closest to the model's output
-        question_content = self._safe_str(getattr(context["question"], "content", ""))
-        if question_content:
-            sections.append(f"## Question to Answer\n{question_content}")
 
         return "\n\n".join(sections)

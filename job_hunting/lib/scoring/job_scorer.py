@@ -36,7 +36,7 @@ class JobScorer:
 
 
     def score_job_match(
-        self, job_description: Union[str, JobMatchRequest], resume: str = None
+        self, job_description: Union[str, JobMatchRequest], resume: str = None, injected_prompt: str = None
     ) -> JobMatchResponse:
         # Handle input validation
         if isinstance(job_description, str):
@@ -50,7 +50,9 @@ class JobScorer:
 
         template = self.env.get_template("job_scorer_prompt.j2")
         prompt = template.render(
-            job_description=request.job_description, resume=request.resume
+            job_description=request.job_description,
+            resume=request.resume,
+            injected_prompt=injected_prompt,
         )
 
         write_prompt_to_file(
