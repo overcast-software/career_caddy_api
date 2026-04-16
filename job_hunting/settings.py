@@ -65,6 +65,7 @@ if DEBUG or not CSRF_TRUSTED_ORIGINS:
 USE_TZ = True
 
 MIDDLEWARE = [
+    "job_hunting.api.middleware.OvercastHeaderMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",

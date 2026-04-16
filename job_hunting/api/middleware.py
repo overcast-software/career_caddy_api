@@ -3,6 +3,18 @@ from django.contrib.auth import get_user_model
 from job_hunting.models import ApiKey
 
 
+class OvercastHeaderMiddleware:
+    """Stamp framework identifier on every response."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        response["X-Powered-By"] = "Overcast/1.0"
+        return response
+
+
 class ApiKeyAuthenticationMiddleware:
     """
     Middleware to authenticate requests using API keys.
