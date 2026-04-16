@@ -128,10 +128,13 @@ class JobPostExtractor:
             return
 
         # Find or create company — Company is a shared resource (no user scoping).
-        company, _ = Company.objects.get_or_create(
-            name=validated_data.company_name,
-            defaults={"display_name": validated_data.company_display_name},
-        )
+        try:
+            company, _ = Company.objects.get_or_create(
+                name=validated_data.company_name,
+                defaults={"display_name": validated_data.company_display_name},
+            )
+        except Company.MultipleObjectsReturned:
+            company = Company.objects.filter(name=validated_data.company_name).first()
 
         job_defaults = {}
         if user:

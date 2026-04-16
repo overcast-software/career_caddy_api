@@ -4641,7 +4641,21 @@ class CompanyViewSet(BaseViewSet):
     model = Company
     serializer_class = CompanySerializer
 
-
+    def create(self, request):
+        ser = self.get_serializer()
+        try:
+            attrs = ser.parse_payload(request.data)
+        except ValueError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
+        name = attrs.get("name", "").strip()
+        if not name:
+            return Response({"errors": [{"detail": "Company name is required."}]}, status=400)
+        existing = Company.objects.filter(name__iexact=name).first()
+        if existing:
+            return Response({"data": ser.to_resource(existing)}, status=200)
+        attrs["name"] = name
+        obj = Company.objects.create(**attrs)
+        return Response({"data": ser.to_resource(obj)}, status=201)
 
     def list(self, request):
         qs = Company.objects
@@ -4711,17 +4725,6 @@ class CompanyViewSet(BaseViewSet):
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
-
-    def create(self, request):
-        data = request.data.get("data", {})
-        attrs = data.get("attributes", {})
-        obj = Company.objects.create(
-            name=attrs.get("name", ""),
-            display_name=attrs.get("display_name"),
-            notes=attrs.get("notes"),
-        )
-        ser = self.get_serializer()
-        return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
         obj = Company.objects.filter(pk=pk).first()
