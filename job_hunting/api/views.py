@@ -3424,99 +3424,74 @@ class ResumeViewSet(BaseViewSet):
     @action(detail=False, methods=["post"], url_path="ingest")
     def ingest(self, request):
         """
-        Ingest a resume from an uploaded docx file and create a new resume.
+        Ingest a resume from an uploaded docx file.
 
-        Expects a multipart/form-data request with a 'file' field containing the docx.
+        Creates a placeholder resume with status='pending', processes in background,
+        and returns HTTP 202. Frontend polls until status is 'completed' or 'failed'.
         """
-        # Check if file was uploaded
         if "file" not in request.FILES:
             return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": "No file uploaded. Expected 'file' field with docx content."
-                        }
-                    ]
-                },
+                {"errors": [{"detail": "No file uploaded. Expected 'file' field with docx content."}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         uploaded_file = request.FILES["file"]
 
-        # Validate file type
         if not uploaded_file.name.lower().endswith(".docx"):
             return Response(
                 {"errors": [{"detail": "Only .docx files are supported"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            # Read file content as blob
-            file_blob = uploaded_file.read()
+        file_blob = uploaded_file.read()
+        resume_name = uploaded_file.name
 
-            # Create a new resume for the authenticated user
-            # resume = Resume(user_id=request.user.id, file_path=uploaded_file.name)
+        # Derive a display name from the filename
+        base_name = resume_name
+        if base_name.lower().endswith(".docx"):
+            base_name = base_name[:-5]
+        derived_name = base_name.strip()[:100] or "Imported Resume"
 
-            # Create IngestResume service with the blob
-            resume_name = uploaded_file.name
-            ingest_service = IngestResume(
-                user=request.user,
-                resume=file_blob,  # Pass blob instead of path
-                resume_name=resume_name,
-                agent=None,  # Will use default agent
-                # agent=ollama_model,  # Will use default agent
-            )
+        # Create placeholder resume immediately
+        resume = Resume.objects.create(
+            user_id=request.user.id,
+            name=derived_name,
+            status="pending",
+        )
 
-            # Process the resume
-            result = ingest_service.process()
-            resume = result or ingest_service.db_resume
+        resume_id = resume.id
+        user_id = request.user.id
 
-            # Guard against None resume from failed ingestion
-            if resume is None:
-                return Response(
-                    {"errors": [{"detail": "Ingest failed: no resume created"}]},
-                    status=status.HTTP_400_BAD_REQUEST,
+        def _ingest():
+            import django
+            django.db.close_old_connections()
+            User = get_user_model()
+            try:
+                ingest_service = IngestResume(
+                    user=User.objects.get(pk=user_id),
+                    resume=file_blob,
+                    resume_name=resume_name,
+                    agent=None,
+                    db_resume=Resume.objects.get(pk=resume_id),
                 )
+                ingest_service.process()
 
-            # Set resume title from filename if not already set
-            if hasattr(resume, "title") and not getattr(resume, "title", None):
-                # Derive name from uploaded filename
-                base_name = uploaded_file.name
-                if base_name.lower().endswith(".docx"):
-                    base_name = base_name[:-5]  # Remove .docx extension
-                derived_name = base_name.strip()[:100]  # Trim to reasonable length
-                if derived_name:
-                    resume.title = derived_name
-                    resume.save()
-            elif hasattr(resume, "name") and not getattr(resume, "name", None):
-                # Fallback to 'name' field if 'title' doesn't exist
-                base_name = uploaded_file.name
-                if base_name.lower().endswith(".docx"):
-                    base_name = base_name[:-5]  # Remove .docx extension
-                derived_name = base_name.strip()[:100]  # Trim to reasonable length
-                if derived_name:
-                    resume.name = derived_name
-                    resume.save()
+                r = Resume.objects.filter(pk=resume_id).first()
+                if r:
+                    if not r.title:
+                        r.title = derived_name
+                    r.status = "completed"
+                    r.save()
+            except Exception:
+                logger.exception("Resume ingest failed for resume_id=%s", resume_id)
+                Resume.objects.filter(pk=resume_id).update(status="failed")
 
-            # Return the created resume with all relationships
-            ser = self.get_serializer()
-            payload = {"data": ser.to_resource(resume)}
+        import threading
+        threading.Thread(target=_ingest, daemon=True).start()
 
-            # Include all relationships by default for ingest response
-            ser_rels = list(getattr(ser, "relationships", {}).keys())
-            include_rels = self._parse_include(request) or ser_rels
-            if include_rels:
-                payload["included"] = self._build_included(
-                    [resume], include_rels, request
-                )
-
-            return Response(payload, status=status.HTTP_201_CREATED)
-
-        except Exception as e:
-            return Response(
-                {"errors": [{"detail": f"Failed to process resume: {str(e)}"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(resume)}
+        return Response(payload, status=status.HTTP_202_ACCEPTED)
 
 
 @extend_schema_view(

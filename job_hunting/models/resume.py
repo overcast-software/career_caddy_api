@@ -16,6 +16,7 @@ class Resume(GetMixin, models.Model):
     name = models.CharField(max_length=255, null=True, blank=True)
     notes = models.TextField(null=True, blank=True)
     favorite = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, null=True, blank=True)
 
     class Meta:
         db_table = "resume"

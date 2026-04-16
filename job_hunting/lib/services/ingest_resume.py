@@ -135,21 +135,21 @@ class ParsedResume(BaseModel):
 
 
 class IngestResume:
-    def __init__(self, user=None, resume=None, resume_name=None, agent=None):
+    def __init__(self, user=None, resume=None, resume_name=None, agent=None, db_resume=None):
         """
         Keyword Arguments:
-        user   -- (default None) the user who is submitting the resume
-        resume -- (default None) the resume they are submitting docx???
-        resume_name -- (default None) the way to name the resume to reference within app
-        agent  -- (default None) optional agent to pass in
+        user        -- the user who is submitting the resume
+        resume      -- file blob (bytes) or file path of the docx
+        resume_name -- display name for the resume within the app
+        agent       -- optional pydantic-ai Agent to use
+        db_resume   -- optional pre-created Resume record (for async/polling pattern)
         """
 
         self.user = user
-        self.resume = resume  # what is this?
+        self.resume = resume
         self.resume_name = resume_name
-        # Defer agent creation until process() to avoid requiring external API keys during tests
         self.agent = agent
-        self.db_resume = None
+        self.db_resume = db_resume
 
     def _resolve_user_id(self, user) -> Optional[int]:
         """
@@ -260,8 +260,12 @@ class IngestResume:
             parsed_resume = ParsedResume(**json.loads(output))
         else:
             parsed_resume = output
-        resume = Resume(name=self.resume_name, title=parsed_resume.title)
-        self.db_resume = resume
+        if self.db_resume:
+            self.db_resume.title = parsed_resume.title
+            if not self.db_resume.name:
+                self.db_resume.name = self.resume_name
+        else:
+            self.db_resume = Resume(name=self.resume_name, title=parsed_resume.title)
 
         from job_hunting.models import Profile as DjangoProfile
 
@@ -411,22 +415,56 @@ class IngestResume:
         return self.db_resume
 
     def get_agent(self):
-        # Prefer OpenAI if OPENAI_API_KEY is set; otherwise fall back to local Ollama.
         if self.agent:
             return self.agent
-        try:
-            if os.getenv("OPENAI_API_KEY"):
-                openai_model = OpenAIModel("gpt-5")
-                return Agent(openai_model, output_type=ParsedResume)
-        except Exception:
-            # Fall back to Ollama if OpenAI model initialization fails for any reason
-            pass
 
+        model_spec = os.getenv("RESUME_INGEST_MODEL", "").strip()
+
+        # Explicit model override: "provider:model_name"
+        if model_spec:
+            return self._agent_from_spec(model_spec)
+
+        # Default: Anthropic > OpenAI > Ollama
+        if os.getenv("ANTHROPIC_API_KEY"):
+            from pydantic_ai.models.anthropic import AnthropicModel
+            model = AnthropicModel("claude-sonnet-4-6")
+            return Agent(model, output_type=ParsedResume)
+
+        if os.getenv("OPENAI_API_KEY"):
+            try:
+                model = OpenAIModel("gpt-5")
+                return Agent(model, output_type=ParsedResume)
+            except Exception:
+                pass
+
+        ollama_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1")
         ollama_model = OpenAIChatModel(
             model_name="qwen3-coder",
-            provider=OllamaProvider(base_url="http://localhost:11434/v1"),
+            provider=OllamaProvider(base_url=ollama_base),
         )
         return Agent(ollama_model, output_type=ParsedResume)
+
+    def _agent_from_spec(self, spec: str):
+        """Parse 'provider:model_name' and return an Agent."""
+        if ":" in spec:
+            provider, model_name = spec.split(":", 1)
+        else:
+            provider, model_name = "openai", spec
+
+        if provider == "anthropic":
+            from pydantic_ai.models.anthropic import AnthropicModel
+            return Agent(AnthropicModel(model_name), output_type=ParsedResume)
+        elif provider == "openai":
+            return Agent(OpenAIModel(model_name), output_type=ParsedResume)
+        elif provider == "ollama":
+            ollama_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1")
+            model = OpenAIChatModel(
+                model_name=model_name,
+                provider=OllamaProvider(base_url=ollama_base),
+            )
+            return Agent(model, output_type=ParsedResume)
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
 
     def parse_date(self, value: Optional[str]) -> Optional[date]:
         """
