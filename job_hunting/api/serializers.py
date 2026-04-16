@@ -30,6 +30,11 @@ def _parse_date(val):
     try:
         return date.fromisoformat(str(val))
     except Exception:
+        pass
+    try:
+        dt = dateparser.parse(str(val))
+        return dt.date() if dt else None
+    except Exception:
         return None
 
 
@@ -86,6 +91,12 @@ class BaseSerializer:
     # Defaults to ["name"] — override per serializer as needed.
     slim_attributes: List[str] = ["name"]
     slim: bool = False
+    # Set to a FK field name (e.g. "user_id", "created_by_id") to auto-inject
+    # user relationship linkage in to_resource() and resolve in get_related().
+    user_fk: str = ""
+    # List of relationship names whose data linkage arrays should be
+    # auto-populated in to_resource() (for Ember Data sideload resolution).
+    linked_relationships: List[str] = []
 
     def set_parent_context(self, parent_type: str, parent_id: int, rel_name: str):
         self._parent_context = {
@@ -171,9 +182,50 @@ class BaseSerializer:
                         )
                     rel_out[rel_name] = {"data": data, "links": links}
             res["relationships"] = rel_out
+        # Auto-inject user relationship linkage when user_fk is declared
+        if self.user_fk:
+            fk_value = getattr(obj, self.user_fk, None)
+            if fk_value:
+                res.setdefault("relationships", {})["user"] = {
+                    "data": {"type": "user", "id": str(fk_value)},
+                    "links": {
+                        "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
+                        "related": f"{_resource_base_path('user')}/{fk_value}",
+                    },
+                }
+        # Auto-populate data linkage for declared linked_relationships
+        if not self.slim and self.linked_relationships:
+            for rel_name in self.linked_relationships:
+                rel_cfg = self.relationships.get(rel_name)
+                if not rel_cfg:
+                    continue
+                rel_type = rel_cfg["type"]
+                try:
+                    _, items = self.get_related(obj, rel_name)
+                    linkage = [{"type": rel_type, "id": str(item.id)} for item in items]
+                except Exception:
+                    linkage = []
+                existing_links = res.get("relationships", {}).get(rel_name, {}).get("links", {
+                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
+                    "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
+                })
+                res.setdefault("relationships", {})[rel_name] = {
+                    "data": linkage,
+                    "links": existing_links,
+                }
         return res
 
     def get_related(self, obj, rel_name):
+        # Auto-resolve user relationship when user_fk is declared
+        if rel_name == "user" and self.user_fk:
+            fk_value = getattr(obj, self.user_fk, None)
+            if fk_value:
+                User = get_user_model()
+                try:
+                    return "user", [User.objects.get(id=fk_value)]
+                except User.DoesNotExist:
+                    return "user", []
+            return "user", []
         cfg = self.relationships.get(rel_name)
         if not cfg:
             return None, []
@@ -341,6 +393,7 @@ class ResumeSerializer(BaseSerializer):
     model = Resume
     attributes = ["file_path", "title", "name", "notes", "user_id", "favorite"]
     slim_attributes = ["name", "title"]
+    user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
@@ -370,70 +423,24 @@ class ResumeSerializer(BaseSerializer):
         "projects": {"attr": "projects", "type": "project", "uselist": True},
     }
     relationship_fks = {"user": "user_id"}
+    linked_relationships = [
+        "summaries", "certifications", "educations",
+        "experiences", "skills", "projects",
+    ]
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
         if self.slim:
             return res
-
         # Convenience attribute: active summary content
         try:
             res.setdefault("attributes", {})["summary"] = obj.active_summary_content()
         except Exception:
             pass
-
-        # Add data linkage to to-many relationships so Ember Data
-        # can resolve them from the `included` sideload array.
-        rel_defs = [
-            ("summaries", "summary"),
-            ("certifications", "certification"),
-            ("educations", "education"),
-            ("experiences", "experience"),
-            ("skills", "skill"),
-            ("projects", "project"),
-        ]
-        for rel_name, rel_type in rel_defs:
-            try:
-                _, items = self.get_related(obj, rel_name)
-                linkage = [{"type": rel_type, "id": str(item.id)} for item in items]
-            except Exception:
-                linkage = []
-            existing_links = res.get("relationships", {}).get(rel_name, {}).get("links", {
-                "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
-                "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
-            })
-            res.setdefault("relationships", {})[rel_name] = {
-                "data": linkage,
-                "links": existing_links,
-            }
-
-        # User relationship with proper linkage
-        user_id = getattr(obj, "user_id", None)
-        if user_id:
-            try:
-                User = get_user_model()
-                if User.objects.filter(id=user_id).exists():
-                    res.setdefault("relationships", {})["user"] = {
-                        "data": {"type": "user", "id": str(user_id)},
-                        "links": {
-                            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                            "related": f"{_resource_base_path('user')}/{user_id}",
-                        },
-                    }
-            except Exception:
-                pass
-
         return res
 
     def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.user_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        elif rel_name == "experiences":
+        if rel_name == "experiences":
             exp_ids = list(
                 ResumeExperience.objects.filter(resume_id=obj.id)
                 .order_by("order")
@@ -478,6 +485,7 @@ class ScoreSerializer(BaseSerializer):
     type = "score"
     model = Score
     attributes = ["score", "status", "explanation", "created_at"]
+    user_fk = "user_id"
     relationships = {
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
@@ -492,16 +500,6 @@ class ScoreSerializer(BaseSerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
-        # Ensure user relationship linkage points to Django user
-        if hasattr(obj, "user_id") and obj.user_id:
-            res.setdefault("relationships", {})["user"] = {
-                "data": {"type": "user", "id": str(obj.user_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
-                },
-            }
-
         # Expose statuses merged with join attributes (created_at, note)
         try:
             statuses_out = []
@@ -525,18 +523,7 @@ class ScoreSerializer(BaseSerializer):
         except Exception:
             # Non-fatal; omit statuses on error
             pass
-
         return res
-
-    def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.user_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        return super().get_related(obj, rel_name)
 
 
 class JobPostSerializer(BaseSerializer):
@@ -573,35 +560,10 @@ class JobPostSerializer(BaseSerializer):
         "top-score": {"attr": "top_score_record", "type": "score", "uselist": False},
     }
     relationship_fks = {"company": "company_id"}
-
-    def to_resource(self, obj):
-        res = super().to_resource(obj)
-        if self.slim:
-            return res
-        # Add data linkage for to-many relationships so Ember Data
-        # can resolve them from the included sideload array.
-        linked_rels = [
-            ("scores", "score", "scores"),
-            ("questions", "question", "questions"),
-            ("summaries", "summary", "summaries"),
-            ("cover-letters", "cover-letter", "cover_letters"),
-            ("job-applications", "job-application", "applications"),
-        ]
-        for rel_name, rel_type, attr_name in linked_rels:
-            try:
-                _, items = self.get_related(obj, rel_name)
-                linkage = [{"type": rel_type, "id": str(item.id)} for item in items]
-            except Exception:
-                linkage = []
-            existing_links = res.get("relationships", {}).get(rel_name, {}).get("links", {
-                "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
-                "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_name}",
-            })
-            res.setdefault("relationships", {})[rel_name] = {
-                "data": linkage,
-                "links": existing_links,
-            }
-        return res
+    linked_relationships = [
+        "scores", "questions", "summaries",
+        "cover-letters", "job-applications",
+    ]
 
 
 class ScrapeSerializer(BaseSerializer):
@@ -672,6 +634,7 @@ class CoverLetterSerializer(BaseSerializer):
     type = "cover-letter"
     model = CoverLetter
     attributes = ["content", "created_at", "favorite", "status"]
+    user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "resume": {"attr": "resume", "type": "resume", "uselist": False},
@@ -690,16 +653,6 @@ class CoverLetterSerializer(BaseSerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
-        # Ensure user relationship linkage points to Django user
-        if hasattr(obj, "user_id") and obj.user_id:
-            res.setdefault("relationships", {})["user"] = {
-                "data": {"type": "user", "id": str(obj.user_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
-                },
-            }
-
         # Add company relationship via job_post fallback
         company_id = None
         if hasattr(obj, "company_id") and obj.company_id:
@@ -728,24 +681,14 @@ class CoverLetterSerializer(BaseSerializer):
                     "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/company",
                 },
             }
-
         return res
-
-    def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.user_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        return super().get_related(obj, rel_name)
 
 
 class JobApplicationSerializer(BaseSerializer):
     type = "job-application"
     model = JobApplication
     attributes = ["applied_at", "status", "tracking_url", "notes"]
+    user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
@@ -781,29 +724,6 @@ class JobApplicationSerializer(BaseSerializer):
     def accepted_types(self):
         return {"application", "applications", "job-application", "job-applications"}
 
-    def to_resource(self, obj):
-        res = super().to_resource(obj)
-        # Ensure user relationship linkage points to Django user
-        if hasattr(obj, "user_id") and obj.user_id:
-            res.setdefault("relationships", {})["user"] = {
-                "data": {"type": "user", "id": str(obj.user_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
-                },
-            }
-        return res
-
-    def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.user_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        return super().get_related(obj, rel_name)
-
     def parse_payload(self, payload):
         out = super().parse_payload(payload)
         if "applied_at" in out:
@@ -818,6 +738,7 @@ class SummarySerializer(BaseSerializer):
     type = "summary"
     model = Summary
     attributes = ["content", "status"]
+    user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
         "job-post": {"attr": "job_post_id", "type": "job-post", "uselist": False},
@@ -828,24 +749,7 @@ class SummarySerializer(BaseSerializer):
     }
 
     def to_resource(self, obj):
-        d = {
-            "type": self.type,
-            "id": str(obj.id),
-            "attributes": {"content": getattr(obj, "content", None)},
-            "relationships": {},
-        }
-        if hasattr(obj, "user_id") and obj.user_id:
-            d["relationships"]["user"] = {
-                "data": {"type": "user", "id": str(obj.user_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
-                },
-            }
-        if hasattr(obj, "job_post_id") and obj.job_post_id:
-            d["relationships"]["job-post"] = {
-                "data": {"type": "job-post", "id": str(obj.job_post_id)},
-            }
+        res = super().to_resource(obj)
         # If included under a resume, inject per-link 'active' from resume_summary
         try:
             ctx = getattr(self, "_parent_context", None)
@@ -856,20 +760,10 @@ class SummarySerializer(BaseSerializer):
                         resume_id=int(resume_id), summary_id=obj.id
                     ).first()
                     if link and hasattr(link, "active"):
-                        d["attributes"]["active"] = bool(link.active)
+                        res.setdefault("attributes", {})["active"] = bool(link.active)
         except Exception:
             pass
-        return d
-
-    def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.user_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        return super().get_related(obj, rel_name)
+        return res
 
 
 class ExperienceSerializer(BaseSerializer):
@@ -886,6 +780,7 @@ class ExperienceSerializer(BaseSerializer):
         },
     }
     relationship_fks = {"company": "company_id"}
+    linked_relationships = ["descriptions"]
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
@@ -905,42 +800,14 @@ class ExperienceSerializer(BaseSerializer):
                 rid = None
             if rid is not None:
                 res.setdefault("attributes", {})["resume_id"] = rid
-
-        # Add data linkage for descriptions so Ember Data can resolve from included
-        try:
-            _, items = self.get_related(obj, "descriptions")
-            linkage = [{"type": "description", "id": str(d.id)} for d in items]
-        except Exception:
-            linkage = []
-        existing_links = res.get("relationships", {}).get("descriptions", {}).get("links", {
-            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/descriptions",
-            "related": f"{_resource_base_path(self.type)}/{obj.id}/descriptions",
-        })
-        res.setdefault("relationships", {})["descriptions"] = {
-            "data": linkage,
-            "links": existing_links,
-        }
-
         return res
 
     def parse_payload(self, payload):
         out = super().parse_payload(payload)
-
-        def _dp(val):
-            if val is None or val == "":
-                return None
-            if isinstance(val, (datetime, date)):
-                return val.date() if isinstance(val, datetime) else val
-            try:
-                dt = dateparser.parse(str(val))
-                return dt.date() if dt else None
-            except Exception:
-                return None
-
         if "start_date" in out:
-            out["start_date"] = _dp(out["start_date"])
+            out["start_date"] = _parse_date(out["start_date"])
         if "end_date" in out:
-            out["end_date"] = _dp(out["end_date"])
+            out["end_date"] = _parse_date(out["end_date"])
         return out
 
 
@@ -1087,6 +954,7 @@ class ApiKeySerializer(BaseSerializer):
         "expires_at",
         "created_at",
     ]
+    user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
     }
@@ -1099,33 +967,14 @@ class ApiKeySerializer(BaseSerializer):
             res["attributes"]["scopes"] = obj.get_scopes()
         else:
             res["attributes"]["scopes"] = []
-
-        # Ensure user relationship linkage points to Django user
-        if hasattr(obj, "user_id") and obj.user_id:
-            res.setdefault("relationships", {})["user"] = {
-                "data": {"type": "user", "id": str(obj.user_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.user_id}",
-                },
-            }
         return res
-
-    def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "user_id") and obj.user_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.user_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        return super().get_related(obj, rel_name)
 
 
 class QuestionSerializer(BaseSerializer):
     type = "question"
     model = Question
     attributes = ["content", "created_at", "favorite"]
+    user_fk = "created_by_id"
     relationships = {
         "application": {
             "attr": "application",
@@ -1184,27 +1033,7 @@ class QuestionSerializer(BaseSerializer):
         except Exception:
             # Non-fatal; omit 'answer' on error
             pass
-
-        # Ensure user relationship linkage points to Django user
-        if hasattr(obj, "created_by_id") and obj.created_by_id:
-            res.setdefault("relationships", {})["user"] = {
-                "data": {"type": "user", "id": str(obj.created_by_id)},
-                "links": {
-                    "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/user",
-                    "related": f"{_resource_base_path('user')}/{obj.created_by_id}",
-                },
-            }
         return res
-
-    def get_related(self, obj, rel_name):
-        if rel_name == "user" and hasattr(obj, "created_by_id") and obj.created_by_id:
-            User = get_user_model()
-            try:
-                user = User.objects.get(id=obj.created_by_id)
-                return "user", [user]
-            except User.DoesNotExist:
-                return "user", []
-        return super().get_related(obj, rel_name)
 
     def parse_payload(self, payload):
         out = super().parse_payload(payload)
@@ -1221,26 +1050,7 @@ class ProjectSerializer(BaseSerializer):
         "descriptions": {"attr": "descriptions", "type": "description", "uselist": True},
     }
     relationship_fks = {"user": "user_id"}
-
-    def to_resource(self, obj):
-        res = super().to_resource(obj)
-        if self.slim:
-            return res
-        # Add data linkage for descriptions so Ember Data can resolve from included
-        try:
-            _, items = self.get_related(obj, "descriptions")
-            linkage = [{"type": "description", "id": str(d.id)} for d in items]
-        except Exception:
-            linkage = []
-        existing_links = res.get("relationships", {}).get("descriptions", {}).get("links", {
-            "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/descriptions",
-            "related": f"{_resource_base_path(self.type)}/{obj.id}/descriptions",
-        })
-        res.setdefault("relationships", {})["descriptions"] = {
-            "data": linkage,
-            "links": existing_links,
-        }
-        return res
+    linked_relationships = ["descriptions"]
 
 
 class AiUsageSerializer(BaseSerializer):
