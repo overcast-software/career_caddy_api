@@ -4317,9 +4317,24 @@ class ScrapeViewSet(BaseViewSet):
         denied = self._check_scrape_ownership(request, pk)
         if denied:
             return denied
+        # Capture status before update for change detection
+        old_status = None
+        obj = Scrape.objects.filter(pk=int(pk)).first()
+        if obj:
+            old_status = obj.status
         response = super().partial_update(request, pk=pk)
         self._sync_associations(pk)
         self._maybe_trigger_extraction(pk)
+        # Log status change to history
+        if obj:
+            obj.refresh_from_db()
+            if obj.status != old_status:
+                data = request.data if isinstance(request.data, dict) else {}
+                node = data.get("data") or {}
+                attrs = node.get("attributes") or {}
+                note = attrs.get("note")
+                from job_hunting.lib.scraper import _log_scrape_status
+                _log_scrape_status(int(pk), obj.status, note=note)
         return response
 
     def destroy(self, request, pk=None):
@@ -4559,9 +4574,21 @@ class ScrapeViewSet(BaseViewSet):
         scrape_resource = scr_ser.to_resource(obj)
         return Response({"data": scrape_resource})
 
-    @action(detail=True, methods=["get"], url_path="screenshots")
+    @action(detail=True, methods=["get", "post"], url_path="screenshots")
     def screenshots(self, request, pk=None):
-        """List screenshot filenames for a scrape. Staff only."""
+        """GET: list screenshot filenames. POST: upload a screenshot PNG."""
+        if request.method == "POST":
+            uploaded = request.FILES.get("file")
+            if not uploaded:
+                return Response(
+                    {"errors": [{"detail": "No file provided"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            from job_hunting.lib.screenshot_store import ScreenshotStore
+            store = ScreenshotStore(settings.SCREENSHOT_DIR)
+            store.save(int(pk), uploaded.name, uploaded)
+            return Response({"data": {"filename": uploaded.name}}, status=status.HTTP_201_CREATED)
+
         if not request.user.is_staff:
             return Response(
                 {"errors": [{"detail": "Staff access required"}]},
@@ -4578,7 +4605,7 @@ class ScrapeViewSet(BaseViewSet):
         url_path="screenshots/(?P<filename>[^/]+)",
         url_name="screenshot-file",
     )
-    def screenshot_file(self, request, pk=None, filename=None):
+    def screenshot_file(self, request, pk=None, filename=None, **kwargs):
         """Serve a screenshot PNG. Staff only."""
         if not request.user.is_staff:
             return Response(
@@ -4588,7 +4615,7 @@ class ScrapeViewSet(BaseViewSet):
         from django.http import FileResponse
         from job_hunting.lib.screenshot_store import ScreenshotStore
         store = ScreenshotStore(settings.SCREENSHOT_DIR)
-        path = store.read(filename)
+        path = store.read(int(pk), filename)
         if not path:
             return Response(
                 {"errors": [{"detail": "Screenshot not found"}]},

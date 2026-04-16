@@ -39,8 +39,8 @@ RUN SECRET_KEY=${SECRET_KEY} python manage.py collectstatic --noinput || true
 
 # Create non-root user and data directory
 RUN useradd -m appuser && \
-    mkdir -p /data && \
-    chown -R appuser:appuser /data
+    mkdir -p /data /app/screenshots && \
+    chown -R appuser:appuser /data /app/screenshots
 
 # Copy configuration files
 COPY gunicorn.conf.py /app/gunicorn.conf.py

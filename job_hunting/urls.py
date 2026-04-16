@@ -126,6 +126,11 @@ urlpatterns = [
         CompanyViewSet.as_view({"get": "job_posts"}),
         name="company-job-posts-noslash",
     ),
+    re_path(
+        r"^api/v1/scrapes/(?P<pk>\d+)/screenshots/(?P<filename>.+\.png)$",
+        ScrapeViewSet.as_view({"get": "screenshot_file"}),
+        name="scrape-screenshot-file-direct",
+    ),
     path("api/v1/", include(router.urls)),
     path(
         "api/v1/auth/register/",
