@@ -248,11 +248,7 @@ class IngestResume:
         result = None
         if self.agent is None:
             self.agent = self.get_agent()
-        try:
-            result = self.agent.run_sync(resume_md)
-        except Exception as e:
-            print(e)
-
+        result = self.agent.run_sync(resume_md)
         output = result.output
         if isinstance(output, dict):
             parsed_resume = ParsedResume(**output)

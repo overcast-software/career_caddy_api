@@ -3487,7 +3487,16 @@ class ResumeViewSet(BaseViewSet):
                 Resume.objects.filter(pk=resume_id).update(status="failed")
 
         import threading
-        threading.Thread(target=_ingest, daemon=True).start()
+
+        def _ingest_with_timeout():
+            t = threading.Thread(target=_ingest, daemon=True)
+            t.start()
+            t.join(timeout=300)  # 5 minute ceiling
+            if t.is_alive():
+                logger.error("Resume ingest timed out for resume_id=%s", resume_id)
+                Resume.objects.filter(pk=resume_id).update(status="failed")
+
+        threading.Thread(target=_ingest_with_timeout, daemon=True).start()
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(resume)}
