@@ -880,7 +880,7 @@ class BaseViewSet(viewsets.ViewSet):
                         # an already-authorized parent, e.g. a summary linked to the user's resume).
                         t_user_id = getattr(t, "user_id", None)
                         if (
-                            effective_type in ("cover-letter", "score", "summary", "job-application")
+                            effective_type in ("cover-letter", "score", "summary", "job-application", "resume", "project")
                             and t_user_id is not None
                             and request
                             and hasattr(request, "user")
@@ -1916,6 +1916,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
     )
     @action(detail=True, methods=["get"])
     def resumes(self, request, pk=None):
+        if not request.user.is_staff and int(pk) != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         User = get_user_model()
         try:
             user = User.objects.get(id=int(pk))
@@ -1935,6 +1937,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
     )
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
+        if not request.user.is_staff and int(pk) != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         User = get_user_model()
         try:
             user = User.objects.get(id=int(pk))
@@ -1954,6 +1958,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
     )
     @action(detail=True, methods=["get"], url_path="cover-letters")
     def cover_letters(self, request, pk=None):
+        if not request.user.is_staff and int(pk) != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         User = get_user_model()
         try:
             user = User.objects.get(id=int(pk))
@@ -1973,6 +1979,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
     )
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
+        if not request.user.is_staff and int(pk) != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         User = get_user_model()
         try:
             user = User.objects.get(id=int(pk))
@@ -1992,6 +2000,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
     )
     @action(detail=True, methods=["get"])
     def summaries(self, request, pk=None):
+        if not request.user.is_staff and int(pk) != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         User = get_user_model()
         try:
             user = User.objects.get(id=int(pk))
@@ -4308,17 +4318,41 @@ class ScrapeViewSet(BaseViewSet):
         if scrape:
             _maybe_caddy_extract(scrape)
 
+    def _check_scrape_ownership(self, request, pk):
+        obj = Scrape.objects.filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff:
+            if obj.created_by_id and obj.created_by_id != request.user.id:
+                return Response({"errors": [{"detail": "Not found"}]}, status=404)
+            if obj.job_post_id and obj.job_post.created_by_id and obj.job_post.created_by_id != request.user.id:
+                return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        return None
+
     def update(self, request, pk=None):
+        denied = self._check_scrape_ownership(request, pk)
+        if denied:
+            return denied
         response = super().update(request, pk=pk)
         self._sync_associations(pk)
         self._maybe_trigger_extraction(pk)
         return response
 
     def partial_update(self, request, pk=None):
+        denied = self._check_scrape_ownership(request, pk)
+        if denied:
+            return denied
         response = super().partial_update(request, pk=pk)
         self._sync_associations(pk)
         self._maybe_trigger_extraction(pk)
         return response
+
+    def destroy(self, request, pk=None):
+        denied = self._check_scrape_ownership(request, pk)
+        if denied:
+            return denied
+        Scrape.objects.filter(pk=int(pk)).delete()
+        return Response(status=204)
 
     @extend_schema(
         tags=["Scrapes"],
@@ -6156,6 +6190,41 @@ class ExperienceViewSet(BaseViewSet):
     model = Experience
     serializer_class = ExperienceSerializer
 
+    def _owned_qs(self, request):
+        if request.user.is_staff:
+            return Experience.objects.all()
+        return Experience.objects.filter(
+            resumeexperience__resume__user_id=request.user.id
+        ).distinct()
+
+    def list(self, request):
+        items = list(self._owned_qs(request))
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def destroy(self, request, pk=None):
+        if not self._owned_qs(request).filter(pk=int(pk)).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        Experience.objects.filter(pk=int(pk)).delete()
+        return Response(status=204)
+
     @extend_schema(
         tags=["Experiences"],
         summary="List descriptions for an experience",
@@ -6163,7 +6232,7 @@ class ExperienceViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def descriptions(self, request, pk=None):
-        obj = Experience.objects.filter(pk=int(pk)).first()
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = DescriptionSerializer()
@@ -6263,7 +6332,7 @@ class ExperienceViewSet(BaseViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
-        exp = Experience.objects.filter(pk=int(pk)).first()
+        exp = self._owned_qs(request).filter(pk=int(pk)).first()
         if not exp:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -6343,10 +6412,15 @@ class EducationViewSet(BaseViewSet):
     model = Education
     serializer_class = EducationSerializer
 
-
+    def _owned_qs(self, request):
+        if request.user.is_staff:
+            return Education.objects.all()
+        return Education.objects.filter(
+            resumeeducation__resume__user_id=request.user.id
+        ).distinct()
 
     def list(self, request):
-        items = list(Education.objects.all())
+        items = list(self._owned_qs(request))
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -6357,7 +6431,7 @@ class EducationViewSet(BaseViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = Education.objects.filter(pk=int(pk)).first()
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -6368,6 +6442,8 @@ class EducationViewSet(BaseViewSet):
         return Response(payload)
 
     def destroy(self, request, pk=None):
+        if not self._owned_qs(request).filter(pk=int(pk)).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
         Education.objects.filter(pk=int(pk)).delete()
         return Response(status=204)
 
@@ -6452,10 +6528,15 @@ class CertificationViewSet(BaseViewSet):
     model = Certification
     serializer_class = CertificationSerializer
 
-
+    def _owned_qs(self, request):
+        if request.user.is_staff:
+            return Certification.objects.all()
+        return Certification.objects.filter(
+            resumecertification__resume__user_id=request.user.id
+        ).distinct()
 
     def list(self, request):
-        items = list(Certification.objects.all())
+        items = list(self._owned_qs(request))
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -6466,7 +6547,7 @@ class CertificationViewSet(BaseViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = Certification.objects.filter(pk=int(pk)).first()
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -6477,6 +6558,8 @@ class CertificationViewSet(BaseViewSet):
         return Response(payload)
 
     def destroy(self, request, pk=None):
+        if not self._owned_qs(request).filter(pk=int(pk)).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
         Certification.objects.filter(pk=int(pk)).delete()
         return Response(status=204)
 
@@ -6571,10 +6654,19 @@ class DescriptionViewSet(BaseViewSet):
     model = Description
     serializer_class = DescriptionSerializer
 
-
+    def _owned_qs(self, request):
+        if request.user.is_staff:
+            return Description.objects.all()
+        via_experience = Description.objects.filter(
+            experiencedescription__experience__resumeexperience__resume__user_id=request.user.id
+        )
+        via_project = Description.objects.filter(
+            projectdescription__project__user_id=request.user.id
+        )
+        return (via_experience | via_project).distinct()
 
     def list(self, request):
-        items = list(Description.objects.all())
+        items = list(self._owned_qs(request))
         items = self.paginate(items)
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -6585,7 +6677,7 @@ class DescriptionViewSet(BaseViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = Description.objects.filter(pk=int(pk)).first()
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -6596,7 +6688,9 @@ class DescriptionViewSet(BaseViewSet):
         return Response(payload)
 
     def destroy(self, request, pk=None):
-        deleted, _ = Description.objects.filter(pk=int(pk)).delete()
+        if not self._owned_qs(request).filter(pk=int(pk)).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        Description.objects.filter(pk=int(pk)).delete()
         return Response(status=204)
 
     @extend_schema(
@@ -6694,7 +6788,7 @@ class DescriptionViewSet(BaseViewSet):
         return Response(payload, status=status.HTTP_201_CREATED)
 
     def _upsert(self, request, pk, partial=False):
-        desc = Description.objects.filter(pk=int(pk)).first()
+        desc = self._owned_qs(request).filter(pk=int(pk)).first()
         if not desc:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -6779,7 +6873,7 @@ class DescriptionViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
-        obj = Description.objects.filter(pk=int(pk)).first()
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         exp_ids = list(
@@ -7008,6 +7102,39 @@ class ProjectViewSet(BaseViewSet):
     model = Project
     serializer_class = ProjectSerializer
 
+    def _owned_qs(self, request):
+        if request.user.is_staff:
+            return Project.objects.all()
+        return Project.objects.filter(user_id=request.user.id)
+
+    def list(self, request):
+        items = list(self._owned_qs(request))
+        items = self.paginate(items)
+        ser = self.get_serializer()
+        data = [ser.to_resource(o) for o in items]
+        payload = {"data": data}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included(items, include_rels, request)
+        return Response(payload)
+
+    def retrieve(self, request, pk=None):
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        ser = self.get_serializer()
+        payload = {"data": ser.to_resource(obj)}
+        include_rels = self._parse_include(request)
+        if include_rels:
+            payload["included"] = self._build_included([obj], include_rels, request)
+        return Response(payload)
+
+    def destroy(self, request, pk=None):
+        if not self._owned_qs(request).filter(pk=int(pk)).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        Project.objects.filter(pk=int(pk)).delete()
+        return Response(status=204)
+
     @extend_schema(
         tags=["Projects"],
         summary="List descriptions for a project",
@@ -7015,7 +7142,7 @@ class ProjectViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def descriptions(self, request, pk=None):
-        obj = Project.objects.filter(pk=int(pk)).first()
+        obj = self._owned_qs(request).filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = DescriptionSerializer()
@@ -7062,9 +7189,8 @@ def career_data(request, user_id=None):
 
     # If accessing another user's data, ensure proper authorization
     if user_id is not None and user_id != request.user.id:
-        # This would be for API key usage - add authorization logic here if needed
-        # For now, allow access (you may want to add API key validation)
-        pass
+        if not request.user.is_staff:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
 
     career_data = CareerData.for_user(target_user_id)
 
