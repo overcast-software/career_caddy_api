@@ -4777,6 +4777,11 @@ class CompanyViewSet(BaseViewSet):
         return self.update(request, pk=pk)
 
     def destroy(self, request, pk=None):
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Only staff may delete companies."}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         obj = Company.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)

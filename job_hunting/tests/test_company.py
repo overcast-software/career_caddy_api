@@ -67,7 +67,15 @@ class TestCompanyAPI(TestCase):
         )
         self.assertIn(response.status_code, [201, 200])
 
-    def test_delete_company(self):
+    def test_delete_company_forbidden_for_non_staff(self):
+        c = Company.objects.create(name="ToDelete")
+        response = self.client.delete(f"/api/v1/companies/{c.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Company.objects.filter(pk=c.id).exists())
+
+    def test_delete_company_allowed_for_staff(self):
+        self.user.is_staff = True
+        self.user.save()
         c = Company.objects.create(name="ToDelete")
         response = self.client.delete(f"/api/v1/companies/{c.id}/")
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
