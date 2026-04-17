@@ -251,11 +251,19 @@ class ScrapeViewSet(BaseViewSet):
             scrape = Scrape.objects.create(url=url, status="hold", created_by=request.user)
             from job_hunting.lib.scraper import _log_scrape_status
             _log_scrape_status(scrape.id, "hold")
-            # Link to existing job post if URL matches
-            existing_jp = JobPost.objects.filter(link=url).first()
-            if existing_jp:
-                scrape.job_post = existing_jp
-                scrape.company_id = existing_jp.company_id
+            # Bind to an explicit job_post relationship if provided, else fall back
+            # to matching by URL. Inherit the job post's company when none supplied.
+            rels = (data.get("data") or {}).get("relationships") or {} if isinstance(data.get("data"), dict) else {}
+            jp_rel = rels.get("job-post") or rels.get("job_post")
+            linked_jp = None
+            if jp_rel and isinstance(jp_rel.get("data"), dict):
+                linked_jp = JobPost.objects.filter(pk=int(jp_rel["data"]["id"])).first()
+            if not linked_jp:
+                linked_jp = JobPost.objects.filter(link=url).first()
+            if linked_jp:
+                scrape.job_post = linked_jp
+                if not scrape.company_id and linked_jp.company_id:
+                    scrape.company_id = linked_jp.company_id
                 scrape.save()
             logger.info("ScrapeViewSet.create: hold scrape id=%s url=%s", scrape.id, url)
             scr_ser = self.get_serializer()

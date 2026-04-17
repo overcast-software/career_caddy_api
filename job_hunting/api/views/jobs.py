@@ -237,10 +237,7 @@ class JobPostViewSet(BaseViewSet):
         if attrs.get("link"):
             existing = JobPost.objects.filter(link=attrs["link"]).first()
             if existing:
-                return Response(
-                    {"errors": [{"detail": f"A job post with this URL already exists (ID {existing.pk})."}]},
-                    status=409,
-                )
+                return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         obj = JobPost(**attrs)
         obj.save()
         if not obj.posted_date:
