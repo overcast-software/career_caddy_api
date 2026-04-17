@@ -31,6 +31,12 @@ else:
     # Development default
     ALLOWED_HOSTS = ["localhost", "127.0.0.1"] if DEBUG else []
 
+# Internal docker service name — the MCP and chat sidecars reach Django via
+# http://api:8000, so Django must accept "api" as a Host header or it returns
+# 400 DisallowedHost before auth even runs.
+if "api" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("api")
+
 # Ensure test-friendly hosts when testing
 if TESTING:
     test_hosts = ["testserver", "localhost", "127.0.0.1"]
