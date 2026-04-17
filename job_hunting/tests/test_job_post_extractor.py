@@ -4,10 +4,11 @@ from unittest.mock import patch
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 
-from job_hunting.models import Company, JobPost, Scrape
+from job_hunting.models import Company, JobPost, Scrape, ScrapeProfile
 from job_hunting.lib.parsers.job_post_extractor import (
     JobPostExtractor,
     ParsedJobData,
+    _update_scrape_profile,
     parse_scrape,
 )
 
@@ -181,3 +182,71 @@ class TestParseScrape(TestCase):
         self.scrape.refresh_from_db()
         job = JobPost.objects.get(pk=self.scrape.job_post_id)
         self.assertEqual(job.created_by, self.user)
+
+
+class TestUpdateScrapeProfile(TestCase):
+    """_update_scrape_profile records successes AND failures, auto-demotes Tier 0."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="profileuser", password="pass")
+        self.scrape = Scrape.objects.create(
+            url="https://example.com/job/1",
+            status="completed",
+            job_content="x" * 100,
+            created_by=self.user,
+        )
+
+    def test_success_creates_profile(self):
+        _update_scrape_profile(self.scrape, self.user, success=True)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.scrape_count, 1)
+        self.assertEqual(profile.failure_count, 0)
+        self.assertEqual(profile.success_rate, 1.0)
+        self.assertIsNotNone(profile.last_success_at)
+
+    def test_failure_creates_profile_with_zero_rate(self):
+        _update_scrape_profile(self.scrape, self.user, success=False)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.failure_count, 1)
+        self.assertEqual(profile.success_rate, 0.0)
+        self.assertIsNone(profile.last_success_at)
+
+    def test_failures_pull_success_rate_down(self):
+        _update_scrape_profile(self.scrape, self.user, success=True)
+        _update_scrape_profile(self.scrape, self.user, success=False)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.scrape_count, 2)
+        self.assertEqual(profile.failure_count, 1)
+        self.assertAlmostEqual(profile.success_rate, 0.5)
+
+    def test_tier0_miss_bumps_counter(self):
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.tier0_miss_count, 1)
+
+    def test_tier0_hit_does_not_bump_miss(self):
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=True)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.tier0_miss_count, 0)
+
+    def test_auto_demotes_after_repeated_misses(self):
+        # Seed with 6 tier0 misses on an existing auto-tier profile
+        for _ in range(6):
+            _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.tier0_miss_count, 6)
+        self.assertEqual(profile.preferred_tier, "1")
+
+    def test_does_not_demote_when_misses_below_threshold(self):
+        for _ in range(4):
+            _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.preferred_tier, "auto")
+
+    def test_does_not_demote_when_explicit_tier_set(self):
+        _update_scrape_profile(self.scrape, self.user, success=True)
+        ScrapeProfile.objects.filter(hostname="example.com").update(preferred_tier="0")
+        for _ in range(6):
+            _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
+        profile = ScrapeProfile.objects.get(hostname="example.com")
+        self.assertEqual(profile.preferred_tier, "0")

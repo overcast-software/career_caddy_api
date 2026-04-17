@@ -72,15 +72,23 @@ class JobPostExtractor:
     def __init__(self, client=None):
         self.client = client
         self.agent = None
+        # None = tier 0 not attempted; True = tier 0 produced data;
+        # False = tier 0 selectors present but didn't match required fields.
+        self.last_tier0_hit: Optional[bool] = None
 
-    def parse(self, scrape: Scrape, user=None):
+    def parse(self, scrape: Scrape, user=None) -> bool:
+        """Run extraction; return True if a valid JobPost was produced."""
         # Try Tier 0 (deterministic CSS extraction) first — $0 cost
-        validated_data = self._try_tier0_extraction(scrape)
+        validated_data, tier0_attempted = self._try_tier0_extraction(scrape)
+        if tier0_attempted:
+            self.last_tier0_hit = validated_data is not None
+        else:
+            self.last_tier0_hit = None
         if validated_data:
             logger.info("Tier 0 extraction succeeded for scrape %s", scrape.id)
         else:
             validated_data = self.analyze_with_ai(scrape)
-        self.process_evaluation(scrape, validated_data, user=user)
+        return self.process_evaluation(scrape, validated_data, user=user)
 
     def _resolve_model_name(self) -> str:
         """Role-specific env var -> fallback env var -> default."""
@@ -115,17 +123,17 @@ class JobPostExtractor:
     def _is_placeholder(self, value: str) -> bool:
         return (value or "").strip().lower() in self._PLACEHOLDER_NAMES
 
-    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None):
+    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None) -> bool:
         if self._is_placeholder(validated_data.title):
             logger.warning("Scrape %s: extracted title is a placeholder (%r), skipping", scrape.id, validated_data.title)
             scrape.status = "failed"
             scrape.save()
-            return
+            return False
         if self._is_placeholder(validated_data.company_name):
             logger.warning("Scrape %s: extracted company is a placeholder (%r), skipping", scrape.id, validated_data.company_name)
             scrape.status = "failed"
             scrape.save()
-            return
+            return False
 
         # Find or create company — Company is a shared resource (no user scoping).
         try:
@@ -191,6 +199,7 @@ class JobPostExtractor:
             update_fields.append("company_id")
         if update_fields:
             scrape.save(update_fields=update_fields)
+        return True
 
     def _get_model_name(self) -> str:
         if self.agent is None:
@@ -229,14 +238,18 @@ class JobPostExtractor:
             logger.debug("Could not load scrape profile hints", exc_info=True)
             return ""
 
-    def _try_tier0_extraction(self, scrape: Scrape) -> Optional[ParsedJobData]:
+    def _try_tier0_extraction(self, scrape: Scrape) -> tuple[Optional[ParsedJobData], bool]:
         """Attempt deterministic extraction using CSS selectors from ScrapeProfile.
 
-        Returns ParsedJobData if all required fields (title, company_name) are found,
-        None otherwise (caller should fall back to LLM).
+        Returns a (data, attempted) tuple:
+          - (ParsedJobData, True)  — Tier 0 matched title + company.
+          - (None, True)           — Selectors were present but didn't match
+                                     required fields (Tier 0 miss).
+          - (None, False)          — Tier 0 wasn't tried (no html, no profile,
+                                     no selectors, or profile opted out).
         """
         if not scrape.html:
-            return None
+            return None, False
 
         try:
             from bs4 import BeautifulSoup
@@ -246,24 +259,23 @@ class JobPostExtractor:
             if hostname.startswith("www."):
                 hostname = hostname[4:]
             if not hostname:
-                return None
+                return None, False
 
             profile = ScrapeProfile.objects.filter(
                 hostname=hostname, enabled=True
             ).first()
             if not profile or not profile.css_selectors:
-                return None
+                return None, False
             if profile.preferred_tier not in ("auto", "0"):
-                return None
+                return None, False
 
             selectors = profile.css_selectors
             if not isinstance(selectors, dict):
-                return None
+                return None, False
 
-            # Extract job_data selectors from nested schema
             job_selectors = selectors.get("job_data", {})
             if not job_selectors:
-                return None
+                return None, False
 
             soup = BeautifulSoup(scrape.html, "html.parser")
             extracted = {}
@@ -275,27 +287,31 @@ class JobPostExtractor:
             title = extracted.get("title", "")
             company = extracted.get("company_name", "") or extracted.get("company", "")
             if not title or not company:
-                return None
+                # Selectors ran but didn't produce required fields — this is a miss.
+                return None, True
 
             logger.info(
                 "Tier 0 extraction for %s: title=%s, company=%s",
                 hostname, title[:50], company[:50],
             )
 
-            return ParsedJobData(
-                title=title,
-                company_name=company,
-                description=extracted.get("description"),
-                location=extracted.get("location"),
-                remote=None,
-                salary_min=None,
-                salary_max=None,
-                link=scrape.url,
-                extraction_date=datetime.now(),
+            return (
+                ParsedJobData(
+                    title=title,
+                    company_name=company,
+                    description=extracted.get("description"),
+                    location=extracted.get("location"),
+                    remote=None,
+                    salary_min=None,
+                    salary_max=None,
+                    link=scrape.url,
+                    extraction_date=datetime.now(),
+                ),
+                True,
             )
         except Exception:
             logger.debug("Tier 0 extraction failed", exc_info=True)
-            return None
+            return None, False
 
     def analyze_with_ai(self, scrape: Scrape) -> ParsedJobData:
         content = scrape.job_content or ""
@@ -399,42 +415,47 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
         from job_hunting.lib.scraper import _log_scrape_status
         from django.contrib.auth import get_user_model
 
+        scrape = ScrapeModel.objects.filter(pk=scrape_id).first()
+        if not scrape:
+            logger.warning("parse_scrape: scrape_id=%s not found", scrape_id)
+            return
+        if scrape.job_post_id:
+            logger.info("parse_scrape: scrape_id=%s already has job_post, skipping", scrape_id)
+            return
+        if not (scrape.job_content or scrape.html):
+            logger.warning("parse_scrape: scrape_id=%s has no content", scrape_id)
+            return
+
+        user = None
+        if user_id:
+            User = get_user_model()
+            user = User.objects.filter(pk=user_id).first()
+        if not user:
+            user = scrape.created_by
+
+        _log_scrape_status(scrape_id, "extracting")
+
+        parser = JobPostExtractor()
+        success = False
         try:
-            scrape = ScrapeModel.objects.filter(pk=scrape_id).first()
-            if not scrape:
-                logger.warning("parse_scrape: scrape_id=%s not found", scrape_id)
-                return
-            if scrape.job_post_id:
-                logger.info("parse_scrape: scrape_id=%s already has job_post, skipping", scrape_id)
-                return
-            if not (scrape.job_content or scrape.html):
-                logger.warning("parse_scrape: scrape_id=%s has no content", scrape_id)
-                return
-
-            user = None
-            if user_id:
-                User = get_user_model()
-                user = User.objects.filter(pk=user_id).first()
-            if not user:
-                user = scrape.created_by
-
-            _log_scrape_status(scrape_id, "extracting")
-
-            parser = JobPostExtractor()
-            parser.parse(scrape, user=user)
-
-            _log_scrape_status(scrape_id, "updating_profile", note="Updating scrape profile")
-
-            # Auto-populate scrape profile for this domain
-            try:
-                _update_scrape_profile(scrape, user)
-            except Exception:
-                logger.debug("Failed to update scrape profile", exc_info=True)
-
-            _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
-
+            success = bool(parser.parse(scrape, user=user))
         except Exception:
             logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
+
+        _log_scrape_status(scrape_id, "updating_profile", note="Updating scrape profile")
+
+        try:
+            _update_scrape_profile(
+                scrape, user,
+                success=success,
+                tier0_hit=parser.last_tier0_hit,
+            )
+        except Exception:
+            logger.debug("Failed to update scrape profile", exc_info=True)
+
+        if success:
+            _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
+        else:
             try:
                 _log_scrape_status(scrape_id, "failed", note="Extraction failed")
             except Exception:
@@ -446,8 +467,23 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
         threading.Thread(target=_run, daemon=True).start()
 
 
-def _update_scrape_profile(scrape, user=None):
-    """Create or update ScrapeProfile for this scrape's hostname after successful extraction."""
+_TIER0_DEMOTE_MIN_MISSES = 5
+_TIER0_DEMOTE_MISS_RATIO = 0.5
+
+
+def _update_scrape_profile(scrape, user=None, success: bool = True, tier0_hit: Optional[bool] = None):
+    """Create or update ScrapeProfile for this scrape's hostname.
+
+    Args:
+        success: True on a fully-extracted JobPost, False on any failure
+                 (exception, placeholder title/company, etc.). Failures
+                 pull success_rate down toward 0.0.
+        tier0_hit: True = tier 0 matched; False = tier 0 selectors ran but
+                   missed required fields; None = tier 0 not attempted.
+                   A False bumps tier0_miss_count and may auto-demote
+                   preferred_tier from 'auto' to '1' so future extractions
+                   skip Tier 0 until selectors are refreshed.
+    """
     from django.utils import timezone
     from job_hunting.models import ScrapeProfile
 
@@ -458,44 +494,71 @@ def _update_scrape_profile(scrape, user=None):
         hostname = hostname[4:]
 
     content_len = len(scrape.job_content or "")
+    outcome_value = 1.0 if success else 0.0
 
     profile, created = ScrapeProfile.objects.get_or_create(
         hostname=hostname,
         defaults={
             "requires_auth": False,
             "avg_content_length": content_len,
-            "success_rate": 1.0,
+            "success_rate": outcome_value,
             "scrape_count": 1,
-            "last_success_at": timezone.now(),
+            "failure_count": 0 if success else 1,
+            "tier0_miss_count": 1 if tier0_hit is False else 0,
+            "last_success_at": timezone.now() if success else None,
             "created_by": user,
         },
     )
 
     if not created:
-        profile.scrape_count += 1
-        profile.last_success_at = timezone.now()
-        # Rolling average of content length
+        prev_count = profile.scrape_count
+        profile.scrape_count = prev_count + 1
+        if success:
+            profile.last_success_at = timezone.now()
+        else:
+            profile.failure_count = (profile.failure_count or 0) + 1
+        if tier0_hit is False:
+            profile.tier0_miss_count = (profile.tier0_miss_count or 0) + 1
+
         if profile.avg_content_length:
             profile.avg_content_length = int(
-                (profile.avg_content_length * (profile.scrape_count - 1) + content_len)
+                (profile.avg_content_length * prev_count + content_len)
                 / profile.scrape_count
             )
         else:
             profile.avg_content_length = content_len
-        # Update success rate (simple: successes / total)
-        profile.success_rate = min(
-            1.0,
-            (profile.success_rate * (profile.scrape_count - 1) + 1.0)
-            / profile.scrape_count,
+        profile.success_rate = max(
+            0.0,
+            min(
+                1.0,
+                (profile.success_rate * prev_count + outcome_value) / profile.scrape_count,
+            ),
         )
+
+        # Auto-demote Tier 0 when selectors stop matching often enough.
+        if (
+            profile.preferred_tier == "auto"
+            and profile.tier0_miss_count >= _TIER0_DEMOTE_MIN_MISSES
+            and profile.tier0_miss_count / profile.scrape_count >= _TIER0_DEMOTE_MISS_RATIO
+        ):
+            logger.warning(
+                "Auto-demoting %s from tier=auto → tier=1 "
+                "(tier0_miss_count=%d/%d)",
+                hostname, profile.tier0_miss_count, profile.scrape_count,
+            )
+            profile.preferred_tier = "1"
+
         profile.save()
 
     logger.info(
-        "Scrape profile %s for %s (count=%d, rate=%.0f%%)",
+        "Scrape profile %s for %s (count=%d, fail=%d, miss=%d, rate=%.0f%%, tier=%s)",
         "created" if created else "updated",
         hostname,
         profile.scrape_count,
+        profile.failure_count or 0,
+        profile.tier0_miss_count or 0,
         profile.success_rate * 100,
+        profile.preferred_tier,
     )
 
     # Generate extraction hints with a cheap LLM call (only on first scrape or if hints are empty)

@@ -22,6 +22,8 @@ class ScrapeProfile(GetMixin, models.Model):
     page_structure = models.TextField(blank=True, default="")
     last_success_at = models.DateTimeField(null=True, blank=True)
     scrape_count = models.IntegerField(default=0)
+    failure_count = models.IntegerField(default=0)
+    tier0_miss_count = models.IntegerField(default=0)
     preferred_tier = models.CharField(
         max_length=10, choices=TIER_CHOICES, default="auto"
     )
