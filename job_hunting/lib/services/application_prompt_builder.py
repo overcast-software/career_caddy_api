@@ -130,8 +130,10 @@ class ApplicationPromptBuilder:
         for qa in qas:
             q_text = qa.get("question", "") if isinstance(qa, dict) else getattr(getattr(qa, "question", None), "content", "")
             a_text = qa.get("answer", "") if isinstance(qa, dict) else getattr(qa, "content", "")
-            lines.append(f"Q: {q_text}")
-            lines.append(f"A: {a_text}")
+            lines.append(f"Question: {q_text}")
+            lines.append("")
+            lines.append(f"Answer: {a_text}")
+            lines.append("")
             lines.append("")
         return "\n".join(lines).strip()
 

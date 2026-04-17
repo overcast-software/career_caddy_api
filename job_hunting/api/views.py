@@ -4768,7 +4768,19 @@ class CompanyViewSet(BaseViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
-        payload = {"data": ser.to_resource(obj)}
+        resource = ser.to_resource(obj)
+        resource["meta"] = {
+            "job_posts_count": obj.job_posts.count(),
+            "job_applications_count": JobApplication.objects.filter(
+                job_post__company_id=obj.id
+            ).count(),
+            "scrapes_count": obj.scrapes.count(),
+            "questions_count": obj.questions.count(),
+            "scores_count": Score.objects.filter(
+                job_post__company_id=obj.id
+            ).count(),
+        }
+        payload = {"data": resource}
         include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included([obj], include_rels, request)
@@ -4845,6 +4857,38 @@ class CompanyViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         scrapes_list = list(Scrape.objects.filter(company_id=int(pk)))
         data = [ScrapeSerializer().to_resource(s) for s in scrapes_list]
+        return Response({"data": data})
+
+    @extend_schema(
+        tags=["Companies"],
+        summary="List scores for a company",
+        responses={200: _JSONAPI_LIST},
+    )
+    @action(detail=True, methods=["get"])
+    def scores(self, request, pk=None):
+        if not Company.objects.filter(pk=pk).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        scores_list = list(
+            Score.objects.filter(
+                job_post__company_id=int(pk), user_id=request.user.id
+            )
+        )
+        data = [ScoreSerializer().to_resource(s) for s in scores_list]
+        return Response({"data": data})
+
+    @extend_schema(
+        tags=["Companies"],
+        summary="List questions for a company",
+        responses={200: _JSONAPI_LIST},
+    )
+    @action(detail=True, methods=["get"])
+    def questions(self, request, pk=None):
+        if not Company.objects.filter(pk=pk).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        questions_list = list(
+            Question.objects.filter(company_id=int(pk))
+        )
+        data = [QuestionSerializer().to_resource(q) for q in questions_list]
         return Response({"data": data})
 
 

@@ -622,6 +622,9 @@ class CompanySerializer(BaseSerializer):
             "type": "job-application",
             "uselist": True,
         },
+        "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
+        "questions": {"attr": "questions", "type": "question", "uselist": True},
+        "scores": {"attr": "scores", "type": "score", "uselist": True},
     }
 
     def get_related(self, obj, rel_name):
