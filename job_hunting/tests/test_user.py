@@ -236,3 +236,51 @@ class TestUserCreate(TestCase):
         }
         response = self.client.post("/api/v1/users/", data=payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestUpdatePreservesPassword(TestCase):
+    """PATCH with password=null must NOT wipe the user's password.
+
+    Regression: the Settings > Profile form ships password as null when the
+    user saves non-password fields. Previous code ran set_password(None)
+    which marks the hash unusable and locks the user out on next login.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="preserve", password="originalpw123", email="a@b.c"
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def _patch(self, attrs):
+        return self.client.patch(
+            f"/api/v1/users/{self.user.id}/",
+            data={"data": {"type": "user", "attributes": attrs}},
+            format="json",
+        )
+
+    def test_patch_with_null_password_preserves_hash(self):
+        self._patch({"first_name": "Changed", "password": None})
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.has_usable_password())
+        self.assertTrue(self.user.check_password("originalpw123"))
+
+    def test_patch_with_empty_password_preserves_hash(self):
+        self._patch({"first_name": "Changed", "password": ""})
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.has_usable_password())
+        self.assertTrue(self.user.check_password("originalpw123"))
+
+    def test_patch_with_real_password_updates_hash(self):
+        resp = self._patch({"password": "newpassword456"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("newpassword456"))
+        self.assertFalse(self.user.check_password("originalpw123"))
+
+    def test_patch_with_weak_password_returns_400(self):
+        resp = self._patch({"password": "a"})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("originalpw123"))

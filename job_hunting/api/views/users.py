@@ -458,7 +458,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
             user.first_name = attrs["first_name"]
         if "last_name" in attrs:
             user.last_name = attrs["last_name"]
-        if "password" in attrs:
+        if attrs.get("password"):
+            from django.contrib.auth.password_validation import validate_password
+            from django.core.exceptions import ValidationError
+            try:
+                validate_password(attrs["password"], user=user)
+            except ValidationError as e:
+                return Response(
+                    {"errors": [{"detail": msg} for msg in e.messages]}, status=400
+                )
             user.set_password(attrs["password"])
 
         # Staff-only fields
