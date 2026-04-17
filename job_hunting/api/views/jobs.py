@@ -1,6 +1,6 @@
 import math
 
-from django.db.models import Q
+from django.db.models import Q, F
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -152,9 +152,9 @@ class JobPostViewSet(BaseViewSet):
             for field in sort_param.split(","):
                 field = field.strip()
                 if field.startswith("-"):
-                    sort_fields.append(f"-{field[1:]}")
+                    sort_fields.append(F(field[1:]).desc(nulls_last=True))
                 else:
-                    sort_fields.append(field)
+                    sort_fields.append(F(field).asc(nulls_last=True))
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 
@@ -594,11 +594,9 @@ class JobApplicationViewSet(BaseViewSet):
             for field in sort_param.split(","):
                 field = field.strip()
                 if field.startswith("-"):
-                    # Descending order
-                    sort_fields.append(f"-{field[1:]}")
+                    sort_fields.append(F(field[1:]).desc(nulls_last=True))
                 else:
-                    # Ascending order
-                    sort_fields.append(field)
+                    sort_fields.append(F(field).asc(nulls_last=True))
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 
