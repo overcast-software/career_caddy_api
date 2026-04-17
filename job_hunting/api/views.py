@@ -3963,6 +3963,9 @@ class JobPostViewSet(BaseViewSet):
         for k, v in attrs.items():
             setattr(obj, k, v)
         obj.save()
+        if not obj.posted_date:
+            obj.posted_date = obj.created_at.date()
+            obj.save(update_fields=["posted_date"])
         return Response({"data": ser.to_resource(obj)})
 
     def destroy(self, request, pk=None):

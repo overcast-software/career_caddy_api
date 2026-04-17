@@ -306,14 +306,14 @@ class JSONAPITests(APITransactionTestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Invalid extraction_date", str(resp.data))
 
-    def test_job_post_null_datetime_allowed(self):
+    def test_job_post_null_posted_date_backfilled(self):
         company = Company.objects.create(name="TestCorp", display_name="Test Corp")
         job = JobPost.objects.create(
             title="Engineer", description="Build things", company=company,
             created_by=self.user,
         )
 
-        # Test null posted_date (should be allowed)
+        # Patch with null posted_date — should be backfilled to created_at
         payload = {
             "data": {
                 "type": "job-posts",
@@ -326,6 +326,6 @@ class JSONAPITests(APITransactionTestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-        # Reload and verify
+        # Reload and verify posted_date was backfilled
         job.refresh_from_db()
-        self.assertIsNone(job.posted_date)
+        self.assertEqual(job.posted_date, job.created_at.date())
