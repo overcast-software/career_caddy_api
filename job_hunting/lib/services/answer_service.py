@@ -258,6 +258,12 @@ class AnswerService:
         else:
             return self.load_context()
 
+    # Max seconds to wait for the LLM before giving up. A stuck completions
+    # call would otherwise block the daemon thread forever and leave the
+    # answer pending. Generous enough for long generations, strict enough
+    # that "stuck forever" becomes "failed in 2 min" so the UI can react.
+    _AI_CALL_TIMEOUT = 120
+
     def _call_ai(self, prompt: str) -> str:
         messages = [
             {
@@ -267,38 +273,41 @@ class AnswerService:
             {"role": "user", "content": prompt},
         ]
 
-        try:
-            # Try OpenAI chat completions API
-            if hasattr(self.ai_client, "chat") and hasattr(
-                self.ai_client.chat, "completions"
-            ):
-                response = self.ai_client.chat.completions.create(
-                    model=self.model, messages=messages, temperature=self.temperature
-                )
+        # Raise on any error so the caller (AnswerViewSet._generate) can
+        # mark the answer 'failed' instead of writing empty content as
+        # 'completed'. The previous `except Exception: pass` masked
+        # timeouts, auth errors, and rate limits — users saw "completed"
+        # answers with empty bodies OR indefinite pending states.
+        if hasattr(self.ai_client, "chat") and hasattr(
+            self.ai_client.chat, "completions"
+        ):
+            response = self.ai_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                timeout=self._AI_CALL_TIMEOUT,
+            )
+            return response.choices[0].message.content or ""
+
+        if hasattr(self.ai_client, "responses"):
+            response = self.ai_client.responses.create(
+                model=self.model,
+                input=prompt,
+                timeout=self._AI_CALL_TIMEOUT,
+            )
+            if hasattr(response, "output_text"):
+                return response.output_text or ""
+            if hasattr(response, "choices") and response.choices:
                 return response.choices[0].message.content or ""
+            return str(response) if response else ""
 
-            # Try responses API
-            elif hasattr(self.ai_client, "responses"):
-                response = self.ai_client.responses.create(
-                    model=self.model, input=prompt
-                )
-                # Handle different response formats
-                if hasattr(response, "output_text"):
-                    return response.output_text or ""
-                elif hasattr(response, "choices") and response.choices:
-                    return response.choices[0].message.content or ""
-                else:
-                    return str(response) if response else ""
+        if callable(self.ai_client):
+            result = self.ai_client(prompt)
+            return str(result) if result else ""
 
-            # Fallback: callable client
-            elif callable(self.ai_client):
-                result = self.ai_client(prompt)
-                return str(result) if result else ""
-
-        except Exception:
-            pass
-
-        return ""
+        raise RuntimeError(
+            f"AnswerService: unsupported ai_client type {type(self.ai_client).__name__}"
+        )
 
     def generate_answer(self, question: Question, save=True, injected_prompt=None, career_markdown: str = None) -> Answer:
         self.question = question
