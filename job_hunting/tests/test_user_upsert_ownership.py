@@ -94,3 +94,51 @@ class UserUpsertOwnershipTests(TestCase):
         self.client.force_authenticate(user=self.alice)
         resp = self._patch(999999, {"phone": "555-0000"})
         self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_non_staff_self_patch_echoing_is_staff_false_succeeds(self):
+        """Ember Data serializes the full user on save, so PATCH from the
+        settings form includes `is-staff: false` (the user's current value).
+        That must NOT 403 — silently drop unchanged-value writes to
+        staff-only fields. Regression guard for the PATCH /users/12/ 403
+        that blocked Remi's profile save during AW e2e testing."""
+        self.client.force_authenticate(user=self.alice)
+        resp = self.client.patch(
+            f"/api/v1/users/{self.alice.id}/",
+            data=json.dumps({
+                "data": {
+                    "type": "user",
+                    "id": str(self.alice.id),
+                    "attributes": {
+                        "last_name": "Lovelace",
+                        "is-staff": False,  # echo of current value
+                        "is-active": True,  # echo of current value
+                    },
+                }
+            }),
+            content_type="application/vnd.api+json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.alice.refresh_from_db()
+        self.assertEqual(self.alice.last_name, "Lovelace")
+        # Values must stay untouched — non-staff cannot flip their own flags.
+        self.assertFalse(self.alice.is_staff)
+        self.assertTrue(self.alice.is_active)
+
+    def test_non_staff_attempting_to_elevate_is_staff_still_403(self):
+        """Regression guard: the 'echo unchanged, drop silently' rule must
+        NOT open an elevation hole."""
+        self.client.force_authenticate(user=self.alice)
+        resp = self.client.patch(
+            f"/api/v1/users/{self.alice.id}/",
+            data=json.dumps({
+                "data": {
+                    "type": "user",
+                    "id": str(self.alice.id),
+                    "attributes": {"is-staff": True},
+                }
+            }),
+            content_type="application/vnd.api+json",
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+        self.alice.refresh_from_db()
+        self.assertFalse(self.alice.is_staff)

@@ -477,15 +477,30 @@ class DjangoUserViewSet(viewsets.ViewSet):
                 )
             user.set_password(attrs["password"])
 
-        # Staff-only fields
+        # Staff-only fields. Non-staff self-patches routinely include these
+        # because the Ember user model serializes every attribute on save
+        # (e.g. echoing `is-staff: false`). A hard 403 would block those
+        # legitimate saves. Instead: if the requester isn't staff and the
+        # value matches current, silently drop; only 403 on attempted
+        # elevation (value ≠ current). For staff, apply the change.
         if "is_staff" in attrs:
+            desired = bool(attrs["is_staff"])
             if not request.user.is_staff:
-                return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
-            user.is_staff = bool(attrs["is_staff"])
+                if desired != bool(user.is_staff):
+                    return Response(
+                        {"errors": [{"detail": "Forbidden"}]}, status=403
+                    )
+            else:
+                user.is_staff = desired
         if "is_active" in attrs:
+            desired = bool(attrs["is_active"])
             if not request.user.is_staff:
-                return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
-            user.is_active = bool(attrs["is_active"])
+                if desired != bool(user.is_active):
+                    return Response(
+                        {"errors": [{"detail": "Forbidden"}]}, status=403
+                    )
+            else:
+                user.is_active = desired
 
         user.save()
 
