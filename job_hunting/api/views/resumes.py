@@ -1411,12 +1411,12 @@ class ResumeViewSet(BaseViewSet):
 
     @extend_schema(
         tags=["Resumes"],
-        summary="Ingest a resume from an uploaded DOCX file",
+        summary="Ingest a resume from an uploaded DOCX or PDF file",
         request=inline_serializer(
             name="IngestResumeRequest",
             fields={
                 "file": drf_serializers.FileField(
-                    help_text="DOCX resume file (multipart/form-data)"
+                    help_text="DOCX or PDF resume file (multipart/form-data)"
                 )
             },
         ),
@@ -1441,9 +1441,10 @@ class ResumeViewSet(BaseViewSet):
 
         uploaded_file = request.FILES["file"]
 
-        if not uploaded_file.name.lower().endswith(".docx"):
+        lower_name = uploaded_file.name.lower()
+        if not (lower_name.endswith(".docx") or lower_name.endswith(".pdf")):
             return Response(
-                {"errors": [{"detail": "Only .docx files are supported"}]},
+                {"errors": [{"detail": "Only .docx and .pdf files are supported"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1452,8 +1453,10 @@ class ResumeViewSet(BaseViewSet):
 
         # Derive a display name from the filename
         base_name = resume_name
-        if base_name.lower().endswith(".docx"):
+        if lower_name.endswith(".docx"):
             base_name = base_name[:-5]
+        elif lower_name.endswith(".pdf"):
+            base_name = base_name[:-4]
         derived_name = base_name.strip()[:100] or "Imported Resume"
 
         # Create placeholder resume immediately

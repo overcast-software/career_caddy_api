@@ -89,7 +89,7 @@ class TestIngestEndpointBlob(APITestCase):
             format="multipart",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("Only .docx files are supported", str(response.data))
+        self.assertIn("Only .docx and .pdf files are supported", str(response.data))
 
     def test_ingest_requires_auth(self):
         self.client.credentials()

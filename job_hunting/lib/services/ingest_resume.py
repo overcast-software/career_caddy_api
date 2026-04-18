@@ -243,8 +243,40 @@ class IngestResume:
                 except Exception:
                     pass  # Best effort cleanup
 
+    def extract_text_from_pdf(self, source):
+        """
+        Extract text from a PDF via pypdf. Handles path (str) or blob (bytes-like).
+        Returns plain text (one page per blank-line-separated block).
+        """
+        import io
+        from pypdf import PdfReader
+
+        if isinstance(source, str):
+            if not os.path.exists(source):
+                raise ValueError(f"File not found: {source}")
+            reader = PdfReader(source)
+        else:
+            blob_data = source.read() if hasattr(source, "read") else source
+            reader = PdfReader(io.BytesIO(blob_data))
+
+        try:
+            pages = [page.extract_text() or "" for page in reader.pages]
+        except Exception as e:
+            raise RuntimeError(f"Failed to extract text from PDF: {e}") from e
+        return "\n\n".join(pages)
+
+    def _extract_text(self, source, resume_name=None):
+        """Dispatch to the right extractor based on filename/path extension."""
+        name = (
+            source.lower() if isinstance(source, str)
+            else (resume_name or "").lower()
+        )
+        if name.endswith(".pdf"):
+            return self.extract_text_from_pdf(source)
+        return self.extract_text_from_docx(source)
+
     def process(self):
-        resume_md = self.extract_text_from_docx(self.resume)
+        resume_md = self._extract_text(self.resume, self.resume_name)
         result = None
         if self.agent is None:
             self.agent = self.get_agent()
