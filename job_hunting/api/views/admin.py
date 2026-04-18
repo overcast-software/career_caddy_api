@@ -1,10 +1,11 @@
 import logging
 import math
+import os
 
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from rest_framework import status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from drf_spectacular.utils import (
@@ -35,6 +36,73 @@ from job_hunting.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_DEFAULT_MODEL = "openai:gpt-4o-mini"
+
+
+def _resume_ingest_default() -> str:
+    """Mirror IngestResume.get_agent() fallback chain."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic:claude-sonnet-4-6"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai:gpt-5"
+    return "ollama:qwen3-coder"
+
+
+def _agent_role_specs():
+    """Each entry: (role, purpose, env_var, default_fn) — any env var is overridable."""
+    global_default = os.environ.get("CADDY_DEFAULT_MODEL") or _DEFAULT_MODEL
+    return [
+        # ai/ agents — route through agent_factory.get_model()
+        ("caddy", "Career Caddy CRUD agent", "CADDY_MODEL", global_default),
+        ("chat", "In-app chat sidebar", "CHAT_MODEL", global_default),
+        ("job_extractor", "Structured extraction from job text", "JOB_EXTRACTOR_MODEL", global_default),
+        ("browser_scraper", "Browser-driven scrape agent", "BROWSER_SCRAPER_MODEL", global_default),
+        # Django-side parsers — own resolution
+        ("resume_ingest", "Parses uploaded resume into structured records", "RESUME_INGEST_MODEL", _resume_ingest_default()),
+        ("job_parser", "Extracts JobPost fields from scraped HTML", "JOB_PARSER_MODEL", global_default if os.environ.get("CADDY_DEFAULT_MODEL") else "gpt-4o"),
+        ("hint_generator", "Suggests scrape selectors / tier-0 hints", "HINT_GENERATOR_MODEL", "openai:gpt-4o-mini"),
+    ]
+
+
+@extend_schema(
+    tags=["Admin"],
+    summary="List agent roles with the model each currently resolves to",
+    responses={200: OpenApiResponse(description="Per-role model resolution")},
+)
+@api_view(["GET"])
+@permission_classes([IsAdminUser])
+def agent_models(request):
+    """Return per-role model resolution as Django sees it.
+
+    Every row's env var is overridable — a `default` source label just means
+    no env value is currently set, so the built-in fallback applies.
+    """
+    global_default = os.environ.get("CADDY_DEFAULT_MODEL") or _DEFAULT_MODEL
+    rows = []
+    for role, purpose, env_var, default in _agent_role_specs():
+        val = os.environ.get(env_var)
+        if val:
+            resolved, source = val, "env"
+        else:
+            resolved, source = default, "default"
+        rows.append({
+            "role": role,
+            "purpose": purpose,
+            "env_var": env_var,
+            "resolved": resolved,
+            "source": source,
+        })
+    return Response({
+        "data": rows,
+        "meta": {
+            "global_default": global_default,
+            "global_default_source": (
+                "env" if os.environ.get("CADDY_DEFAULT_MODEL") else "default"
+            ),
+        },
+    })
 
 
 class ApiKeyViewSet(BaseViewSet):

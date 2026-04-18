@@ -35,6 +35,7 @@ from .admin import (
     AiUsageViewSet,
     WaitlistViewSet,
     InvitationViewSet,
+    agent_models,
 )
 from .career_data import (
     career_data,
@@ -76,6 +77,7 @@ __all__ = [
     # Function views
     "healthcheck",
     "guest_session",
+    "agent_models",
     "initialize",
     "waitlist_signup",
     "password_reset_request",
