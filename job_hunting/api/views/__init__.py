@@ -42,6 +42,11 @@ from .career_data import (
     career_data_export,
     career_data_import,
 )
+from .markdown import (
+    cover_letter_markdown,
+    resume_markdown,
+)
+from .onboarding import reconcile_onboarding
 
 __all__ = [
     # ViewSets
@@ -82,4 +87,7 @@ __all__ = [
     "career_data_export",
     "career_data_import",
     "generate_prompt",
+    "resume_markdown",
+    "cover_letter_markdown",
+    "reconcile_onboarding",
 ]

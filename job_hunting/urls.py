@@ -63,6 +63,9 @@ from job_hunting.api.views import (
     career_data_export,
     career_data_import,
     generate_prompt,
+    resume_markdown,
+    cover_letter_markdown,
+    reconcile_onboarding,
 )
 
 
@@ -149,6 +152,9 @@ urlpatterns = [
     path("api/v1/career-data/export/", career_data_export, name="career-data-export"),
     path("api/v1/career-data/import/", career_data_import, name="career-data-import"),
     path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
+    path("api/v1/resumes/<int:pk>/markdown/", resume_markdown, name="resume-markdown"),
+    path("api/v1/cover-letters/<int:pk>/markdown/", cover_letter_markdown, name="cover-letter-markdown"),
+    path("api/v1/onboarding/reconcile/", reconcile_onboarding, name="onboarding-reconcile"),
     path("api/v1/chat/", chat_proxy, name="chat"),
     path("api/v1/token/", UnthrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", UnthrottledTokenRefreshView.as_view(), name="token_refresh"),

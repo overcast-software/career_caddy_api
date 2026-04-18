@@ -280,6 +280,7 @@ class DjangoUserSerializer:
         github = ""
         address = ""
         links = []
+        onboarding = None
         try:
             from job_hunting.models import Profile
             prof = Profile.objects.filter(user_id=obj.id).first()
@@ -290,8 +291,18 @@ class DjangoUserSerializer:
                 github = prof.github or ""
                 address = prof.address or ""
                 links = prof.links if prof.links is not None else []
+                onboarding = prof.resolved_onboarding()
         except Exception:
             phone = ""
+        if onboarding is None:
+            from job_hunting.models import Profile
+            onboarding = Profile.default_onboarding()
+        # Derive `profile_basics` from User fields so fresh users aren't told
+        # to fill in their name when they already did at signup. Kept as a
+        # read-time derivation; reconcile remains authoritative for the rest.
+        onboarding["profile_basics"] = bool(
+            obj.first_name and obj.last_name and (obj.email or "")
+        )
 
         res = {
             "type": self.type,
@@ -309,6 +320,7 @@ class DjangoUserSerializer:
                 "github": github,
                 "address": address,
                 "links": links,
+                "onboarding": onboarding,
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
@@ -372,7 +384,7 @@ class DjangoUserSerializer:
         for k in [
             "username", "email", "first_name", "last_name", "password",
             "phone", "linkedin", "github", "address", "links",
-            "is_staff", "is_active",
+            "is_staff", "is_active", "onboarding",
         ]:
             if k in attrs_in:
                 out[k] = attrs_in[k]

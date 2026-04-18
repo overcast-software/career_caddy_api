@@ -382,6 +382,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
             if "links" in profile_fields:
                 val = profile_fields["links"]
                 prof.links = val if isinstance(val, (dict, list)) else {}
+            if "onboarding" in profile_fields:
+                prof.merge_onboarding(profile_fields["onboarding"])
             prof.save()
 
         # Send welcome email (non-blocking — don't fail registration on email error)
@@ -439,6 +441,12 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
+        # Ownership guard — mirrors retrieve() at this view (non-staff can
+        # only PATCH themselves). Without this, any authenticated user could
+        # overwrite another account's password/email/profile.
+        if not request.user.is_staff and user.id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
         ser = self.get_serializer()
         try:
             attrs = ser.parse_payload(request.data)
@@ -447,7 +455,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         # Extract profile fields before user updates
         profile_fields = {}
-        for pf in ("phone", "linkedin", "github", "address", "links"):
+        for pf in ("phone", "linkedin", "github", "address", "links", "onboarding"):
             if pf in attrs:
                 profile_fields[pf] = attrs.pop(pf)
 
@@ -500,6 +508,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
             if "links" in profile_fields:
                 val = profile_fields["links"]
                 prof.links = val if isinstance(val, (dict, list)) else {}
+            if "onboarding" in profile_fields:
+                prof.merge_onboarding(profile_fields["onboarding"])
             prof.save()
 
         return Response({"data": ser.to_resource(user)})
