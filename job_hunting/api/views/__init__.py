@@ -48,6 +48,7 @@ from .markdown import (
     resume_markdown,
 )
 from .onboarding import reconcile_onboarding
+from .reports import application_flow_report
 
 __all__ = [
     # ViewSets
@@ -92,4 +93,5 @@ __all__ = [
     "resume_markdown",
     "cover_letter_markdown",
     "reconcile_onboarding",
+    "application_flow_report",
 ]
