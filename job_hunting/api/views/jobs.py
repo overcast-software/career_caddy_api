@@ -1,4 +1,5 @@
 import math
+from decimal import Decimal, InvalidOperation
 
 from django.db.models import Q, F
 from rest_framework import viewsets, status
@@ -52,6 +53,15 @@ from job_hunting.models import (
     JobApplicationStatus,
     ResumeSummary,
 )
+
+
+def _to_decimal_safe(value):
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        return None
 
 
 @extend_schema_view(
@@ -299,6 +309,77 @@ class JobPostViewSet(BaseViewSet):
             )
         obj.delete()
         return Response(status=204)
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="Re-extract job post fields from pasted text",
+        request={"application/json": {"type": "object", "properties": {"text": {"type": "string"}}}},
+        responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="reextract")
+    def reextract(self, request, pk=None):
+        """Run the AI extractor on pasted text and merge non-None fields onto
+        this JobPost. Skips company reassignment to avoid surprise rebinds."""
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        text = (data.get("text") or "").strip()
+        if not text:
+            return Response(
+                {"errors": [{"detail": "text is required"}]}, status=400
+            )
+
+        from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
+
+        scrape = Scrape(
+            url=obj.link or "",
+            job_content=text,
+            status="success",
+            created_by=request.user,
+            job_post=obj,
+        )
+        scrape.save()
+
+        try:
+            extracted = JobPostExtractor().analyze_with_ai(scrape)
+        except Exception as e:
+            scrape.status = "failed"
+            scrape.save(update_fields=["status"])
+            return Response(
+                {"errors": [{"detail": f"Extraction failed: {e}"}]}, status=400
+            )
+
+        update_fields = []
+        mapping = {
+            "title": extracted.title,
+            "description": extracted.description,
+            "posted_date": extracted.posted_date,
+            "salary_min": (
+                _to_decimal_safe(extracted.salary_min)
+                if extracted.salary_min is not None else None
+            ),
+            "salary_max": (
+                _to_decimal_safe(extracted.salary_max)
+                if extracted.salary_max is not None else None
+            ),
+            "location": extracted.location,
+            "remote": extracted.remote,
+        }
+        for field, value in mapping.items():
+            if value is None:
+                continue
+            if getattr(obj, field) != value:
+                setattr(obj, field, value)
+                update_fields.append(field)
+        if update_fields:
+            obj.save(update_fields=update_fields)
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
 
     @extend_schema(
         tags=["Job Posts"],
