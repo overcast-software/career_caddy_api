@@ -74,7 +74,11 @@ class ScrapeViewSet(BaseViewSet):
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
         else:
-            qs = qs.order_by(F("created_at").desc(nulls_last=True), F("id").desc())
+            # Scrape has no created_at; scraped_at is nullable (pending/hold
+            # rows). Default: scraped_at DESC nulls-last, then -id so newest
+            # completed scrapes lead, unfinished ones sit below, and same-
+            # timestamp rows tie-break deterministically by id.
+            qs = qs.order_by(F("scraped_at").desc(nulls_last=True), F("id").desc())
 
         # Status filter
         status_filter = request.query_params.get("filter[status]")
@@ -149,11 +153,11 @@ class ScrapeViewSet(BaseViewSet):
                 scrape.company_id = jp.company_id
                 scrape.save(update_fields=["company_id"])
 
-    def _maybe_trigger_extraction(self, pk):
+    def _maybe_trigger_extraction(self, pk, force: bool = False):
         from job_hunting.lib.scraper import _maybe_caddy_extract
         scrape = Scrape.objects.filter(pk=int(pk)).first()
         if scrape:
-            _maybe_caddy_extract(scrape)
+            _maybe_caddy_extract(scrape, force=force)
 
     def _check_scrape_ownership(self, request, pk):
         obj = Scrape.objects.filter(pk=int(pk)).first()
@@ -172,7 +176,7 @@ class ScrapeViewSet(BaseViewSet):
             return denied
         response = super().update(request, pk=pk)
         self._sync_associations(pk)
-        self._maybe_trigger_extraction(pk)
+        self._maybe_trigger_extraction(pk, force=self._reparse_force(pk))
         return response
 
     def partial_update(self, request, pk=None):
@@ -186,7 +190,7 @@ class ScrapeViewSet(BaseViewSet):
             old_status = obj.status
         response = super().partial_update(request, pk=pk)
         self._sync_associations(pk)
-        self._maybe_trigger_extraction(pk)
+        self._maybe_trigger_extraction(pk, force=self._reparse_force(pk))
         # Log status change to history
         if obj:
             obj.refresh_from_db()
@@ -198,6 +202,13 @@ class ScrapeViewSet(BaseViewSet):
                 from job_hunting.lib.scraper import _log_scrape_status
                 _log_scrape_status(int(pk), obj.status, note=note)
         return response
+
+    def _reparse_force(self, pk) -> bool:
+        """Force re-parse when a scrape that's already linked to a JobPost
+        transitions back through the extraction pipeline (poller finishing
+        a user-triggered re-scrape)."""
+        scrape = Scrape.objects.filter(pk=int(pk)).first()
+        return bool(scrape and scrape.job_post_id and scrape.status == "completed")
 
     def destroy(self, request, pk=None):
         denied = self._check_scrape_ownership(request, pk)
@@ -435,10 +446,12 @@ class ScrapeViewSet(BaseViewSet):
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
-        logger.info("ScrapeViewSet.parse: id=%s", obj.id)
+        logger.info("ScrapeViewSet.parse: id=%s force=True", obj.id)
 
         from job_hunting.lib.parsers.job_post_extractor import parse_scrape
-        parse_scrape(obj.id, user_id=request.user.id)
+        # User-initiated Parse always forces — even if a JobPost is already
+        # linked, they've told us to refresh it from current scrape content.
+        parse_scrape(obj.id, user_id=request.user.id, force=True)
 
         scr_ser = self.get_serializer()
         scrape_resource = scr_ser.to_resource(obj)

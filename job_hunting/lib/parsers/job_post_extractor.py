@@ -76,8 +76,13 @@ class JobPostExtractor:
         # False = tier 0 selectors present but didn't match required fields.
         self.last_tier0_hit: Optional[bool] = None
 
-    def parse(self, scrape: Scrape, user=None) -> bool:
-        """Run extraction; return True if a valid JobPost was produced."""
+    def parse(self, scrape: Scrape, user=None, force: bool = False) -> bool:
+        """Run extraction; return True if a valid JobPost was produced.
+
+        When force=True, re-parse and merge fresh fields onto an already-
+        linked JobPost (overwrite non-None extracted values, preserve
+        company). Use for explicit re-scrape / re-parse / re-extract flows.
+        """
         # Try Tier 0 (deterministic CSS extraction) first — $0 cost
         validated_data, tier0_attempted = self._try_tier0_extraction(scrape)
         if tier0_attempted:
@@ -88,7 +93,7 @@ class JobPostExtractor:
             logger.info("Tier 0 extraction succeeded for scrape %s", scrape.id)
         else:
             validated_data = self.analyze_with_ai(scrape)
-        return self.process_evaluation(scrape, validated_data, user=user)
+        return self.process_evaluation(scrape, validated_data, user=user, force=force)
 
     def _resolve_model_name(self) -> str:
         """Role-specific env var -> fallback env var -> default."""
@@ -123,7 +128,7 @@ class JobPostExtractor:
     def _is_placeholder(self, value: str) -> bool:
         return (value or "").strip().lower() in self._PLACEHOLDER_NAMES
 
-    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None) -> bool:
+    def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None, force: bool = False) -> bool:
         if self._is_placeholder(validated_data.title):
             logger.warning("Scrape %s: extracted title is a placeholder (%r), skipping", scrape.id, validated_data.title)
             scrape.status = "failed"
@@ -166,9 +171,32 @@ class JobPostExtractor:
         # The LLM-extracted link may be an apply URL, redirect, or null.
         link = scrape.url or validated_data.link
 
-        # Prefer link-based lookup since link is unique
+        # When force=True and the scrape is already linked to a JobPost,
+        # merge fresh fields onto THAT specific post — overwrite non-None
+        # extracted values, preserve the existing company. Used by explicit
+        # re-parse / re-extract flows where the user asked for an update.
         job = None
-        if link:
+        if force and scrape.job_post_id:
+            job = JobPost.objects.filter(pk=scrape.job_post_id).first()
+            if job is not None:
+                update_fields = []
+                # Title is validated as non-empty above but lives outside
+                # job_defaults (it's a get_or_create lookup key on the cold
+                # path); pull it in explicitly for the force-merge path.
+                if validated_data.title and job.title != validated_data.title:
+                    job.title = validated_data.title
+                    update_fields.append("title")
+                for field, value in job_defaults.items():
+                    if value is None or field == "created_by":
+                        continue
+                    if getattr(job, field) != value:
+                        setattr(job, field, value)
+                        update_fields.append(field)
+                if update_fields:
+                    job.save(update_fields=update_fields)
+
+        # Prefer link-based lookup since link is unique
+        if job is None and link:
             job = JobPost.objects.filter(link=link).first()
         if job is None:
             job, _ = JobPost.objects.get_or_create(
@@ -176,7 +204,7 @@ class JobPostExtractor:
                 company=company,
                 defaults={**job_defaults, "link": link},
             )
-        else:
+        elif not force or not scrape.job_post_id:
             # Update fields that may have been missing on a prior pass
             update_fields = []
             if not job.company_id:
@@ -394,13 +422,15 @@ def _get_genesis_user():
     return User.objects.filter(is_staff=True).order_by("id").first()
 
 
-def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> None:
+def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force: bool = False) -> None:
     """
     Single entry point for parsing a scrape into a JobPost + Company.
 
     Handles status transitions (extracting -> completed/failed), error logging,
-    and user resolution.  Safe to call even if already extracted — bails out if
-    job_post_id is already set.
+    and user resolution. By default, bails out if scrape.job_post_id is
+    already set (idempotency guard for the first-pass pipeline). Pass
+    `force=True` to re-parse and merge fresh fields onto the linked JobPost
+    — used by explicit Re-run scrape / manual Parse / Re-extract flows.
 
     Args:
         scrape_id: PK of the Scrape record.
@@ -408,6 +438,8 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
                  Falls back to scrape.created_by if None.
         sync: If True, run inline (use when already in a background thread).
               If False, spawn a daemon thread.
+        force: If True, overwrite non-None fields on the already-linked
+               JobPost (company preserved). Skips the early-bail check.
     """
 
     def _run():
@@ -419,7 +451,7 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
         if not scrape:
             logger.warning("parse_scrape: scrape_id=%s not found", scrape_id)
             return
-        if scrape.job_post_id:
+        if scrape.job_post_id and not force:
             logger.info("parse_scrape: scrape_id=%s already has job_post, skipping", scrape_id)
             return
         if not (scrape.job_content or scrape.html):
@@ -438,7 +470,7 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False) -> Non
         parser = JobPostExtractor()
         success = False
         try:
-            success = bool(parser.parse(scrape, user=user))
+            success = bool(parser.parse(scrape, user=user, force=force))
         except Exception:
             logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
 
