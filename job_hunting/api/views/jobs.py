@@ -302,6 +302,11 @@ class JobPostViewSet(BaseViewSet):
         attrs = self.pre_save_payload(request, attrs, creating=False)
         attrs.pop("created_by_id", None)
         attrs.pop("created_at", None)  # never allow overriding auto timestamp
+        # Computed read-only properties on the JobPost model — clients echo
+        # them back in PATCH bodies from the prior GET; setattr would raise
+        # because they have no setter.
+        attrs.pop("top_score", None)
+        attrs.pop("active_application_status", None)
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(
