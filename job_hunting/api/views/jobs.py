@@ -149,12 +149,20 @@ class JobPostViewSet(BaseViewSet):
         sort_param = request.query_params.get("sort")
         if sort_param:
             sort_fields = []
+            sort_field_names: set[str] = set()
             for field in sort_param.split(","):
                 field = field.strip()
+                name = field.lstrip("-")
+                sort_field_names.add(name)
                 if field.startswith("-"):
-                    sort_fields.append(F(field[1:]).desc(nulls_last=True))
+                    sort_fields.append(F(name).desc(nulls_last=True))
                 else:
-                    sort_fields.append(F(field).asc(nulls_last=True))
+                    sort_fields.append(F(name).asc(nulls_last=True))
+            # Deterministic tiebreak: fall through to -id when the user's
+            # sort could otherwise leave same-day rows in index-random order
+            # (e.g. sort=-posted_date with many rows sharing today's date).
+            if sort_fields and "id" not in sort_field_names:
+                sort_fields.append(F("id").desc())
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 
@@ -591,12 +599,20 @@ class JobApplicationViewSet(BaseViewSet):
         sort_param = request.query_params.get("sort")
         if sort_param:
             sort_fields = []
+            sort_field_names: set[str] = set()
             for field in sort_param.split(","):
                 field = field.strip()
+                name = field.lstrip("-")
+                sort_field_names.add(name)
                 if field.startswith("-"):
-                    sort_fields.append(F(field[1:]).desc(nulls_last=True))
+                    sort_fields.append(F(name).desc(nulls_last=True))
                 else:
-                    sort_fields.append(F(field).asc(nulls_last=True))
+                    sort_fields.append(F(name).asc(nulls_last=True))
+            # Deterministic tiebreak: fall through to -id when the user's
+            # sort could otherwise leave same-day rows in index-random order
+            # (e.g. sort=-posted_date with many rows sharing today's date).
+            if sort_fields and "id" not in sort_field_names:
+                sort_fields.append(F("id").desc())
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 
