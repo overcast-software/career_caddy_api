@@ -535,7 +535,12 @@ class ScrapeViewSet(BaseViewSet):
         from job_hunting.lib.screenshot_store import ScreenshotStore
         store = ScreenshotStore(settings.SCREENSHOT_DIR)
         files = store.list_for_scrape(int(pk))
-        return Response({"data": files})
+        resp = Response({"data": files})
+        # The poller writes screenshots mid-lifecycle; any cached empty list
+        # would persist until the user hard-refreshes. Force revalidation
+        # by telling browsers/proxies not to store this response.
+        resp["Cache-Control"] = "no-store"
+        return resp
 
     @action(
         detail=True,
