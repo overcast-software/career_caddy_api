@@ -591,6 +591,22 @@ class JobPostSerializer(BaseSerializer):
         "cover-letters", "job-applications",
     ]
 
+    def get_related(self, obj, rel_name):
+        # `Summary.job_post_id` is a plain IntegerField (not a ForeignKey), so
+        # there is no `obj.summaries` reverse accessor — query manually and
+        # scope to the requesting user when we have one.
+        if rel_name == "summaries":
+            request = getattr(self, "request", None)
+            user_id = (
+                getattr(getattr(request, "user", None), "id", None)
+                if request else None
+            )
+            qs = Summary.objects.filter(job_post_id=obj.id)
+            if user_id:
+                qs = qs.filter(user_id=user_id)
+            return "summary", list(qs)
+        return super().get_related(obj, rel_name)
+
 
 class ScrapeSerializer(BaseSerializer):
     type = "scrape"
