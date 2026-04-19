@@ -341,6 +341,47 @@ class JobPostViewSet(BaseViewSet):
 
     @extend_schema(
         tags=["Job Posts"],
+        summary="Triage a job post — log a quick status on the user's application",
+        request={"application/json": {"type": "object", "properties": {"status": {"type": "string"}}}},
+        responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="triage")
+    def triage(self, request, pk=None):
+        """Log a pre-application triage status (Vetted Good / Vetted Bad) on
+        the user's own JobApplication for this post. Creates the application
+        on first triage. Idempotent on repeats of the same status."""
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        status_name = (data.get("status") or "").strip()
+        allowed = {"Vetted Good", "Vetted Bad"}
+        if status_name not in allowed:
+            return Response(
+                {"errors": [{"detail": f"status must be one of {sorted(allowed)}"}]},
+                status=400,
+            )
+
+        app = (
+            JobApplication.objects.filter(job_post=obj, user=request.user).first()
+            or JobApplication.objects.create(job_post=obj, user=request.user)
+        )
+        status_row = Status.objects.get_or_create(status=status_name)[0]
+        from django.utils import timezone as _tz
+        from job_hunting.models import JobApplicationStatus
+        JobApplicationStatus.objects.create(
+            application=app,
+            status=status_row,
+            logged_at=_tz.now(),
+        )
+
+        obj._active_application_status = status_name
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    @extend_schema(
+        tags=["Job Posts"],
         summary="Re-extract job post fields from pasted text",
         request={"application/json": {"type": "object", "properties": {"text": {"type": "string"}}}},
         responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
