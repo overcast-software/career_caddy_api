@@ -584,6 +584,7 @@ class JobPostSerializer(BaseSerializer):
         "summaries": {"attr": "summaries", "type": "summary", "uselist": True},
         "questions": {"attr": "questions", "type": "question", "uselist": True},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
+        "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
         "top-score": {"attr": "top_score_record", "type": "score", "uselist": False},
     }
     relationship_fks = {"company": "company_id"}
