@@ -48,7 +48,11 @@ from .markdown import (
     resume_markdown,
 )
 from .onboarding import reconcile_onboarding
-from .reports import application_flow_report, sources_report
+from .reports import (
+    application_flow_report,
+    sources_report,
+    report_filter_options,
+)
 
 __all__ = [
     # ViewSets
@@ -95,4 +99,5 @@ __all__ = [
     "reconcile_onboarding",
     "application_flow_report",
     "sources_report",
+    "report_filter_options",
 ]

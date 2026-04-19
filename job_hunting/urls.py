@@ -69,6 +69,7 @@ from job_hunting.api.views import (
     reconcile_onboarding,
     application_flow_report,
     sources_report,
+    report_filter_options,
 )
 
 
@@ -162,6 +163,7 @@ urlpatterns = [
     path("api/v1/onboarding/reconcile/", reconcile_onboarding, name="onboarding-reconcile"),
     path("api/v1/reports/application-flow/", application_flow_report, name="reports-application-flow"),
     path("api/v1/reports/sources/", sources_report, name="reports-sources"),
+    path("api/v1/reports/filter-options/", report_filter_options, name="reports-filter-options"),
     path("api/v1/chat/", chat_proxy, name="chat"),
     path("api/v1/token/", UnthrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", UnthrottledTokenRefreshView.as_view(), name="token_refresh"),
