@@ -2,8 +2,9 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db.models import Q
+from django.db.models.functions import Length
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from job_hunting.lib.services.application_flow import build_flow
@@ -55,6 +56,13 @@ def _apply_report_filters(qs, request):
         # Make the right bound inclusive of the whole day.
         qs = qs.filter(created_at__lt=date_to + timedelta(days=1))
 
+    # Char-length approximation of STUB_MIN_WORDS=20 word threshold. Same
+    # shape as filter[stub] on JobPostViewSet.list.
+    if str(params.get("exclude_stubs", "")).lower() in ("1", "true", "yes"):
+        qs = qs.annotate(_desc_len=Length("description")).exclude(
+            Q(description__isnull=True) | Q(description="") | Q(_desc_len__lt=150)
+        )
+
     return qs, None
 
 
@@ -81,35 +89,45 @@ def _person_filter_effective_user_id(request):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def application_flow_report(request):
     """GET /api/v1/reports/application-flow/?scope=mine|all&source=&from=&to=&user=
 
     Sankey funnel payload. Filters: source (provenance), date range
     (JobPost.created_at), user (staff-only, scopes to that person).
+
+    Public: anonymous viewers get the global aggregate (scope=all,
+    user_id=None) — the funnel is marketing-visible; clickthroughs land
+    on auth-guarded pages so no per-user data leaks.
     """
+    is_authed = request.user and request.user.is_authenticated
     scope = (request.query_params.get("scope") or "mine").lower()
     if scope not in ("mine", "all"):
         scope = "mine"
 
-    person_user_id, err = _person_filter_effective_user_id(request)
-    if err:
-        return err
-
-    if scope == "all":
-        if not request.user.is_staff:
-            return Response(
-                {"errors": [{"detail": "Staff only"}]}, status=403
-            )
-        if person_user_id is not None:
-            qs = _user_scoped_job_posts(person_user_id)
-            effective_user_id = person_user_id
-        else:
-            qs = JobPost.objects.all()
-            effective_user_id = None
+    if not is_authed:
+        scope = "all"
+        qs = JobPost.objects.all()
+        effective_user_id = None
     else:
-        qs = _user_scoped_job_posts(request.user.id)
-        effective_user_id = request.user.id
+        person_user_id, err = _person_filter_effective_user_id(request)
+        if err:
+            return err
+
+        if scope == "all":
+            if not request.user.is_staff:
+                return Response(
+                    {"errors": [{"detail": "Staff only"}]}, status=403
+                )
+            if person_user_id is not None:
+                qs = _user_scoped_job_posts(person_user_id)
+                effective_user_id = person_user_id
+            else:
+                qs = JobPost.objects.all()
+                effective_user_id = None
+        else:
+            qs = _user_scoped_job_posts(request.user.id)
+            effective_user_id = request.user.id
 
     qs, err = _apply_report_filters(qs, request)
     if err:

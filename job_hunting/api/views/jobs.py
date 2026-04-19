@@ -1,6 +1,10 @@
 import math
 
-from django.db.models import Q, F
+from datetime import timedelta
+
+from django.db.models import Q, F, OuterRef, Subquery
+from django.db.models.functions import Length
+from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -150,6 +154,95 @@ class JobPostViewSet(BaseViewSet):
         link_filter = request.query_params.get("filter[link]")
         if link_filter is not None:
             qs = qs.filter(link=link_filter)
+
+        hostname_filter = request.query_params.get("filter[hostname]")
+        if hostname_filter is not None:
+            if hostname_filter == "(direct)":
+                qs = qs.filter(Q(link__isnull=True) | Q(link=""))
+            else:
+                qs = qs.filter(link__icontains=hostname_filter)
+
+        scored_filter = request.query_params.get("filter[scored]")
+        if scored_filter is not None:
+            wants_scored = str(scored_filter).lower() in ("1", "true", "yes")
+            scored_ids = qs.filter(scores__user_id=request.user.id).values("id")
+            if wants_scored:
+                qs = qs.filter(id__in=scored_ids)
+            else:
+                qs = qs.exclude(id__in=scored_ids)
+
+        source_filter = request.query_params.get("filter[source]")
+        if source_filter is not None and source_filter != "all":
+            qs = qs.filter(source=source_filter)
+
+        # Sankey bucket filter (applied/interview/offer/ghosted/rejected/
+        # withdrew/accepted/declined/no_application). Scopes posts where
+        # the caller's application's LATEST status falls in the bucket.
+        # Mirrors the mapping in
+        # job_hunting.lib.services.application_flow.BUCKETS so clicking a
+        # sankey node and landing here keeps the same population.
+        bucket_filter = request.query_params.get("filter[bucket]")
+        if bucket_filter:
+            from job_hunting.lib.services.application_flow import (
+                BUCKETS,
+                BUCKET_GHOSTED,
+                GHOST_AFTER_DAYS,
+                STAGE_BUCKETS,
+            )
+            from job_hunting.models import JobApplicationStatus
+
+            if bucket_filter == "no_application":
+                qs = qs.exclude(applications__user_id=request.user.id)
+            else:
+                status_names = [
+                    name for name, b in BUCKETS.items() if b == bucket_filter
+                ]
+                latest = (
+                    JobApplicationStatus.objects.filter(
+                        application__job_post=OuterRef("pk"),
+                        application__user_id=request.user.id,
+                    )
+                    .order_by("-logged_at", "-created_at")
+                )
+                latest_status = latest.values("status__status")[:1]
+                qs = qs.annotate(_latest_status=Subquery(latest_status))
+
+                if bucket_filter == BUCKET_GHOSTED:
+                    stage_names = [
+                        n for n, b in BUCKETS.items() if b in STAGE_BUCKETS
+                    ]
+                    latest_time = latest.values("logged_at")[:1]
+                    cutoff = timezone.now() - timedelta(days=GHOST_AFTER_DAYS)
+                    qs = qs.annotate(
+                        _latest_time=Subquery(latest_time)
+                    ).filter(
+                        _latest_status__in=stage_names,
+                        _latest_time__lt=cutoff,
+                    )
+                elif status_names:
+                    qs = qs.filter(_latest_status__in=status_names)
+                else:
+                    qs = qs.none()
+
+        # Stub = thin/empty description. Sankey's stub bucket uses a
+        # word-count threshold (STUB_MIN_WORDS=20); SQL-side we approximate
+        # via char length (~150 chars ≈ 20 words). Good enough for a list
+        # filter; the canonical definition still lives in
+        # job_hunting.lib.services.application_flow._is_thin_description.
+        stub_filter = request.query_params.get("filter[stub]")
+        if stub_filter is not None:
+            wants_stub = str(stub_filter).lower() in ("1", "true", "yes")
+            annotated = qs.annotate(_desc_len=Length("description"))
+            if wants_stub:
+                qs = annotated.filter(
+                    Q(description__isnull=True)
+                    | Q(description="")
+                    | Q(_desc_len__lt=150)
+                )
+            else:
+                qs = annotated.filter(
+                    description__isnull=False, _desc_len__gte=150
+                ).exclude(description="")
 
         company_id_filter = request.query_params.get("filter[company_id]")
         if company_id_filter is not None:
