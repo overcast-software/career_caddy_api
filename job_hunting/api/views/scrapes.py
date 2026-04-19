@@ -430,6 +430,61 @@ class ScrapeViewSet(BaseViewSet):
         scrape_resource = scr_ser.to_resource(obj)
         return Response({"data": scrape_resource})
 
+    @extend_schema(
+        tags=["Scrapes"],
+        summary="Create a Scrape from pasted text (skips browser fetch)",
+        request=inline_serializer(
+            name="ScrapeFromTextRequest",
+            fields={
+                "text": drf_serializers.CharField(
+                    help_text="Raw job-post text pasted by the user"
+                ),
+                "link": drf_serializers.CharField(
+                    required=False,
+                    allow_blank=True,
+                    help_text="Optional source URL for deduplication",
+                ),
+            },
+        ),
+        responses={
+            202: OpenApiResponse(description="Parse dispatched"),
+            400: OpenApiResponse(description="Empty text"),
+        },
+    )
+    @action(detail=False, methods=["post"], url_path="from-text")
+    def from_text(self, request):
+        """Create a Scrape with job_content pre-filled from pasted text and
+        kick off parse_scrape directly. No browser fetch, no hold-poller —
+        status='pending' transitions through 'extracting' → terminal inside
+        the daemon thread parse_scrape spawns."""
+        data = request.data if isinstance(request.data, dict) else {}
+        text = (data.get("text") or "").strip()
+        link = (data.get("link") or "").strip() or None
+
+        if not text:
+            return Response(
+                {"errors": [{"detail": "text is required"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        scrape = Scrape.objects.create(
+            url=link,
+            job_content=text,
+            status="pending",
+            created_by=request.user,
+        )
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(scrape.id, "pending", note="paste ingest")
+
+        from job_hunting.lib.parsers.job_post_extractor import parse_scrape
+        parse_scrape(scrape.id, user_id=request.user.id)
+
+        scr_ser = self.get_serializer()
+        return Response(
+            {"data": scr_ser.to_resource(scrape)},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
     @action(detail=True, methods=["get", "post"], url_path="screenshots")
     def screenshots(self, request, pk=None):
         """GET: list screenshot filenames. POST: upload a screenshot PNG."""
