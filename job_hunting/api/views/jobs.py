@@ -225,10 +225,10 @@ class JobPostViewSet(BaseViewSet):
                     qs = qs.none()
 
         # Stub = thin/empty description. Sankey's stub bucket uses a
-        # word-count threshold (STUB_MIN_WORDS=20); SQL-side we approximate
-        # via char length (~150 chars ≈ 20 words). Good enough for a list
-        # filter; the canonical definition still lives in
-        # job_hunting.lib.services.application_flow._is_thin_description.
+        # word-count threshold (STUB_MIN_WORDS=60); SQL-side we approximate
+        # via char length (~450 chars ≈ 60 words at ~7.5 chars/word incl.
+        # whitespace). Good enough for a list filter; canonical definition
+        # still lives in application_flow._is_thin_description.
         stub_filter = request.query_params.get("filter[stub]")
         if stub_filter is not None:
             wants_stub = str(stub_filter).lower() in ("1", "true", "yes")
@@ -237,11 +237,11 @@ class JobPostViewSet(BaseViewSet):
                 qs = annotated.filter(
                     Q(description__isnull=True)
                     | Q(description="")
-                    | Q(_desc_len__lt=150)
+                    | Q(_desc_len__lt=450)
                 )
             else:
                 qs = annotated.filter(
-                    description__isnull=False, _desc_len__gte=150
+                    description__isnull=False, _desc_len__gte=450
                 ).exclude(description="")
 
         company_id_filter = request.query_params.get("filter[company_id]")
