@@ -45,7 +45,7 @@ BUCKET_GHOSTED = "ghosted"
 # description. Separates "email-pipeline junk" from "full description but
 # never got around to scoring it".
 BUCKET_STUB = "stub"
-STUB_MIN_WORDS = 20
+STUB_MIN_WORDS = 60
 
 STAGE_BUCKETS = {BUCKET_APPLIED, BUCKET_INTERVIEW, BUCKET_OFFER}
 TERMINAL_BUCKETS = {

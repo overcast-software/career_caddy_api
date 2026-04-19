@@ -56,11 +56,11 @@ def _apply_report_filters(qs, request):
         # Make the right bound inclusive of the whole day.
         qs = qs.filter(created_at__lt=date_to + timedelta(days=1))
 
-    # Char-length approximation of STUB_MIN_WORDS=20 word threshold. Same
+    # Char-length approximation of STUB_MIN_WORDS=60 word threshold. Same
     # shape as filter[stub] on JobPostViewSet.list.
     if str(params.get("exclude_stubs", "")).lower() in ("1", "true", "yes"):
         qs = qs.annotate(_desc_len=Length("description")).exclude(
-            Q(description__isnull=True) | Q(description="") | Q(_desc_len__lt=150)
+            Q(description__isnull=True) | Q(description="") | Q(_desc_len__lt=450)
         )
 
     return qs, None

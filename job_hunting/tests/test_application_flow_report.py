@@ -65,7 +65,7 @@ class TestApplicationFlowReport(TestCase):
         # job_posts → unscored → no_application.
         JobPost.objects.create(
             title="No app",
-            description=" ".join(["word"] * 30),
+            description=" ".join(["word"] * 80),
             company=self.company,
             created_by=self.user,
         )
