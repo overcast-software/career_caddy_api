@@ -21,6 +21,13 @@ NODE_JOB_POSTS = "job_posts"
 NODE_NO_APPLICATION = "no_application"
 NODE_APPLICATIONS = "applications"
 
+# Hub layer between job_posts and the downstream branches. Every post
+# flows through exactly one. d3-sankey stacks same-depth nodes as a
+# vertical column, so this renders like the Thermal-generation hub in
+# https://observablehq.com/@d3/sankey/2.
+NODE_SCORED = "scored"
+NODE_UNSCORED = "unscored"
+
 # Stage buckets (pass-through). An application sits in one of these until it
 # reaches a terminal bucket or ages out to "ghosted".
 BUCKET_APPLIED = "applied"
@@ -34,10 +41,9 @@ BUCKET_REJECTED = "rejected"
 BUCKET_WITHDREW = "withdrew"
 BUCKET_GHOSTED = "ghosted"
 
-# Pre-application terminal: the post arrived too thin to even score (empty
-# description, or < STUB_MIN_WORDS tokens) AND the user never ran a Score.
-# Surfaces the "dead on arrival" volume that would otherwise hide in
-# no_application.
+# Pre-application terminal under the unscored hub: post has thin/empty
+# description. Separates "email-pipeline junk" from "full description but
+# never got around to scoring it".
 BUCKET_STUB = "stub"
 STUB_MIN_WORDS = 20
 
@@ -118,17 +124,19 @@ def _app_bucket_sequence(application, now) -> list[str]:
     return sequence
 
 
-def _is_stub(post, user_id: int | None) -> bool:
-    """Post is a 'stub' when description is empty/too thin AND no Score
-    exists (for the user, or anyone in all-scope). Means the row arrived
-    too incomplete for scoring and the user hasn't bothered."""
+def _is_thin_description(post) -> bool:
+    """True when description is empty or has fewer than STUB_MIN_WORDS
+    whitespace tokens. Used inside the unscored branch to split 'thin
+    junk' (→ stub) from 'full-description but never scored' (→ rest)."""
     desc = (post.description or "").strip()
-    if desc and len(desc.split()) >= STUB_MIN_WORDS:
-        return False
+    return not desc or len(desc.split()) < STUB_MIN_WORDS
+
+
+def _has_score(post, user_id: int | None) -> bool:
     scores = post.scores
     if user_id is not None:
         scores = scores.filter(user_id=user_id)
-    return not scores.exists()
+    return scores.exists()
 
 
 def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
@@ -152,20 +160,25 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         if user_id is not None:
             apps = [a for a in apps if a.user_id == user_id]
 
-        # Stub detection: description missing / too thin AND no Score yet.
-        # Triggers before the no_application branch so "incoming junk"
-        # stays visually distinct from "I haven't applied yet."
-        if not apps and _is_stub(post, user_id):
-            edge_counts[(NODE_JOB_POSTS, BUCKET_STUB)] += 1
-            continue
+        # Hub layer: every post flows through scored OR unscored before
+        # reaching the application branches. Makes the split visible as a
+        # vertical column mid-graph.
+        hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
+        edge_counts[(NODE_JOB_POSTS, hub)] += 1
 
         if not apps:
-            edge_counts[(NODE_JOB_POSTS, NODE_NO_APPLICATION)] += 1
+            # 'Stub' only applies to unscored + thin-description posts —
+            # email-pipeline junk that never got reviewed. A full-
+            # description unscored post falls through to no_application.
+            if hub == NODE_UNSCORED and _is_thin_description(post):
+                edge_counts[(hub, BUCKET_STUB)] += 1
+            else:
+                edge_counts[(hub, NODE_NO_APPLICATION)] += 1
             continue
 
         for app in apps:
             total_apps += 1
-            edge_counts[(NODE_JOB_POSTS, NODE_APPLICATIONS)] += 1
+            edge_counts[(hub, NODE_APPLICATIONS)] += 1
             sequence = _app_bucket_sequence(app, now)
             prev = NODE_APPLICATIONS
             for bucket in sequence:
@@ -175,6 +188,8 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
     # Stable ordering: keep the visual left-to-right the same each render.
     node_order = [
         NODE_JOB_POSTS,
+        NODE_SCORED,
+        NODE_UNSCORED,
         BUCKET_STUB,
         NODE_NO_APPLICATION,
         NODE_APPLICATIONS,
