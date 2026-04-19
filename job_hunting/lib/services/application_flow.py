@@ -57,10 +57,13 @@ TERMINAL_BUCKETS = {
 }
 
 # Status name → bucket. Case-insensitive match on Status.status.
+#
+# Pre-application triage labels (Unvetted, Vetted Good) are deliberately
+# absent — they represent "I saw this post and it's worth considering",
+# not "I applied". Applications whose only statuses are triage labels
+# collapse to no_application in build_flow below.
 BUCKETS: dict[str, str] = {
     # applied / applied-adjacent stages
-    "Unvetted": BUCKET_APPLIED,
-    "Vetted Good": BUCKET_APPLIED,
     "Applied": BUCKET_APPLIED,
     "Submitted": BUCKET_APPLIED,
     "Contact": BUCKET_APPLIED,
@@ -166,20 +169,25 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
         edge_counts[(NODE_JOB_POSTS, hub)] += 1
 
-        if not apps:
-            # 'Stub' only applies to unscored + thin-description posts —
-            # email-pipeline junk that never got reviewed. A full-
-            # description unscored post falls through to no_application.
+        # Resolve each app's bucket sequence. Apps whose only statuses
+        # are pre-application triage labels (Unvetted, Vetted Good —
+        # deliberately unmapped in BUCKETS above) produce an empty
+        # sequence and don't count as real applications — they're
+        # "worth considering", not "applied". The post collapses to
+        # no_application just like a post with no JobApplication row.
+        real_apps = [(app, _app_bucket_sequence(app, now)) for app in apps]
+        real_apps = [(app, seq) for app, seq in real_apps if seq]
+
+        if not real_apps:
             if hub == NODE_UNSCORED and _is_thin_description(post):
                 edge_counts[(hub, BUCKET_STUB)] += 1
             else:
                 edge_counts[(hub, NODE_NO_APPLICATION)] += 1
             continue
 
-        for app in apps:
+        for _app, sequence in real_apps:
             total_apps += 1
             edge_counts[(hub, NODE_APPLICATIONS)] += 1
-            sequence = _app_bucket_sequence(app, now)
             prev = NODE_APPLICATIONS
             for bucket in sequence:
                 edge_counts[(prev, bucket)] += 1
