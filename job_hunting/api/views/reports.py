@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db.models import Q
 from django.db.models.functions import Length
 from rest_framework.decorators import api_view, permission_classes
@@ -10,6 +11,62 @@ from rest_framework.response import Response
 from job_hunting.lib.services.application_flow import build_flow
 from job_hunting.lib.services.source_flow import build_sources
 from job_hunting.models import JobPost
+
+
+# Cache TTL for the precomputed anonymous demo report. Short enough
+# that `seed_demo_pipeline --reset` shows up quickly in local dev;
+# long enough that public traffic doesn't re-derive the sankey on
+# every load. Bust with `flush_demo_report_cache`.
+PUBLIC_DEMO_CACHE_SECONDS = 300
+PUBLIC_DEMO_FLOW_KEY = "reports:public_demo:application_flow:v1"
+PUBLIC_DEMO_SOURCES_KEY = "reports:public_demo:sources:v1"
+
+
+def _guest_user_id():
+    """Return the guest user's id (demo data owner), or None if the
+    guest user doesn't exist on this instance."""
+    User = get_user_model()
+    guest = User.objects.filter(username="guest").only("id").first()
+    return guest.id if guest else None
+
+
+def _build_public_demo_flow():
+    """Derive the anonymous sankey payload from the guest user's data.
+
+    Anonymous visitors see ONLY the guest user's pipeline — never
+    other users' data — even if the caller tries to override scope.
+    Result is cached; bust via `flush_demo_report_cache`.
+    """
+    cached = cache.get(PUBLIC_DEMO_FLOW_KEY)
+    if cached is not None:
+        return cached
+    guest_id = _guest_user_id()
+    if guest_id is None:
+        payload = {
+            "nodes": [],
+            "links": [],
+            "total_job_posts": 0,
+            "total_applications": 0,
+        }
+    else:
+        qs = _user_scoped_job_posts(guest_id)
+        payload = build_flow(qs, user_id=guest_id)
+    cache.set(PUBLIC_DEMO_FLOW_KEY, payload, PUBLIC_DEMO_CACHE_SECONDS)
+    return payload
+
+
+def _build_public_demo_sources():
+    cached = cache.get(PUBLIC_DEMO_SOURCES_KEY)
+    if cached is not None:
+        return cached
+    guest_id = _guest_user_id()
+    if guest_id is None:
+        payload = {"rows": [], "bucket_order": [], "total_job_posts": 0}
+    else:
+        qs = _user_scoped_job_posts(guest_id)
+        payload = build_sources(qs, user_id=guest_id)
+    cache.set(PUBLIC_DEMO_SOURCES_KEY, payload, PUBLIC_DEMO_CACHE_SECONDS)
+    return payload
 
 
 # Canonical list of JobPost.source values we know about. Kept here so the
@@ -96,38 +153,46 @@ def application_flow_report(request):
     Sankey funnel payload. Filters: source (provenance), date range
     (JobPost.created_at), user (staff-only, scopes to that person).
 
-    Public: anonymous viewers get the global aggregate (scope=all,
-    user_id=None) — the funnel is marketing-visible; clickthroughs land
-    on auth-guarded pages so no per-user data leaks.
+    Public: anonymous viewers get a precomputed payload derived from
+    the guest user's demo pipeline (seeded via `seed_demo_pipeline`).
+    Real user data is never exposed on this endpoint for unauthenticated
+    callers — any filter params they pass are ignored.
     """
     is_authed = request.user and request.user.is_authenticated
+    if not is_authed:
+        flow = _build_public_demo_flow()
+        return Response(
+            {
+                "data": {
+                    "type": "report",
+                    "id": "application-flow",
+                    "attributes": {**flow, "scope": "public_demo"},
+                }
+            }
+        )
+
     scope = (request.query_params.get("scope") or "mine").lower()
     if scope not in ("mine", "all"):
         scope = "mine"
 
-    if not is_authed:
-        scope = "all"
-        qs = JobPost.objects.all()
-        effective_user_id = None
-    else:
-        person_user_id, err = _person_filter_effective_user_id(request)
-        if err:
-            return err
+    person_user_id, err = _person_filter_effective_user_id(request)
+    if err:
+        return err
 
-        if scope == "all":
-            if not request.user.is_staff:
-                return Response(
-                    {"errors": [{"detail": "Staff only"}]}, status=403
-                )
-            if person_user_id is not None:
-                qs = _user_scoped_job_posts(person_user_id)
-                effective_user_id = person_user_id
-            else:
-                qs = JobPost.objects.all()
-                effective_user_id = None
+    if scope == "all":
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Staff only"}]}, status=403
+            )
+        if person_user_id is not None:
+            qs = _user_scoped_job_posts(person_user_id)
+            effective_user_id = person_user_id
         else:
-            qs = _user_scoped_job_posts(request.user.id)
-            effective_user_id = request.user.id
+            qs = JobPost.objects.all()
+            effective_user_id = None
+    else:
+        qs = _user_scoped_job_posts(request.user.id)
+        effective_user_id = request.user.id
 
     qs, err = _apply_report_filters(qs, request)
     if err:

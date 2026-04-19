@@ -1,16 +1,16 @@
 """
 Management command: seed_demo_pipeline
 
-Seeds the *guest* user with a rich application funnel so the public
-/reports/application-flow sankey has something eye-catching for
-anonymous visitors. Creates ~50 JobPosts distributed across every
-sankey bucket (applied/interview/offer/ghosted/rejected/withdrew/
-accepted/declined/no_application/stub) with matching
-JobApplicationStatus histories and a mix of scored/unscored posts.
+Seeds the *guest* user with a rich, eye-catching application funnel so
+the public /reports/application-flow sankey has something worth looking
+at for anonymous visitors. Every sankey bucket is populated; a wide
+set of hostnames drives the sources stacked bar; descriptions are
+verbose enough to clear the STUB_MIN_WORDS=60 threshold (except for
+deliberate stubs in the stub bucket).
 
-Idempotent with `--reset`: clears prior demo data first. Without
-`--reset` it appends, which is usually what you want on a fresh DB.
-Requires the `guest` user to exist — run `seed_guest` first.
+Idempotent with `--reset`: clears prior demo posts (title prefix
+`Demo:`) first. Without `--reset` it appends. Requires the `guest`
+user to exist — run `seed_guest` first.
 """
 import random
 from datetime import timedelta
@@ -31,45 +31,84 @@ from job_hunting.models import (
 User = get_user_model()
 
 # Funnel shape. Tuned so the anonymous sankey looks like a healthy
-# pipeline rather than a sad flatline — plenty at the top, tapering
-# through stages, a real offer/accepted path visible at the end.
+# pipeline — plenty at the top, meaningful flow through every stage,
+# clear offer/accepted outcomes so the story lands.
 FUNNEL_SHAPE = {
-    "applied": 14,
-    "interview": 8,
-    "offer": 3,
-    "accepted": 2,
-    "declined": 1,
-    "rejected": 5,
-    "withdrew": 2,
-    "ghosted": 4,
-    "no_application": 10,
-    "stub": 7,
+    "applied": 28,
+    "interview": 18,
+    "offer": 7,
+    "accepted": 3,
+    "declined": 2,
+    "rejected": 12,
+    "withdrew": 5,
+    "ghosted": 9,
+    "no_application": 22,
+    "stub": 14,
 }
 
-# Paths through statuses for each terminal bucket. Mirrors the bucket
-# mapping in job_hunting.lib.services.application_flow.BUCKETS — each
-# status name must be one the sankey knows about. Dates are 'days ago'
-# so the test's GHOST_AFTER_DAYS=30 derivation fires naturally for the
-# ghosted entries (first event far in the past, no follow-up).
+# Status-name paths for each terminal bucket. Mirrors BUCKETS in
+# job_hunting.lib.services.application_flow. Numbers are "days ago".
+# Tuned so the full pipeline history fits inside the last 30 days,
+# with ghosted pushed just past GHOST_AFTER_DAYS=30 so the sankey
+# still derives that bucket.
 PATHS = {
-    "applied":     [("Applied", 12)],
-    "interview":   [("Applied", 25), ("Phone Screen", 18), ("Interview Scheduled", 8)],
-    "offer":       [("Applied", 40), ("Phone Screen", 30), ("Interviewed", 18), ("Offer", 4)],
-    "accepted":    [("Applied", 50), ("Phone Screen", 42), ("Interviewed", 28), ("Offer", 14), ("Accepted", 6)],
-    "declined":    [("Applied", 55), ("Phone Screen", 45), ("Interviewed", 30), ("Offer", 15), ("Declined", 7)],
-    "rejected":    [("Applied", 20), ("Rejected", 10)],
-    "withdrew":    [("Applied", 22), ("Withdrawn", 12)],
-    "ghosted":     [("Applied", 60)],  # no follow-up → sankey derives ghosted
+    "applied":     [("Applied", 5)],
+    "interview":   [("Applied", 18), ("Phone Screen", 12), ("Interview Scheduled", 5)],
+    "offer":       [("Applied", 26), ("Phone Screen", 19), ("Interviewed", 12), ("Offer", 3)],
+    "accepted":    [("Applied", 28), ("Phone Screen", 22), ("Interviewed", 14), ("Offer", 7), ("Accepted", 2)],
+    "declined":    [("Applied", 28), ("Phone Screen", 22), ("Interviewed", 14), ("Offer", 7), ("Declined", 2)],
+    "rejected":    [("Applied", 16), ("Rejected", 7)],
+    "withdrew":    [("Applied", 20), ("Withdrawn", 9)],
+    # Ghosted needs a log entry older than GHOST_AFTER_DAYS=30 with no
+    # follow-up. Keep it just past the threshold so the bucket pops but
+    # the event still feels recent.
+    "ghosted":     [("Applied", 38)],
 }
 
-SOURCES = ["email", "email", "email", "scrape", "paste", "manual"]
+# Mix of provenance values — the Sources stacked bar colours each
+# segment of each hostname by bucket, so we want several sources so
+# the legend does real work.
+SOURCES = [
+    "email", "email", "email", "email",
+    "scrape", "scrape", "scrape",
+    "paste", "paste",
+    "manual",
+    "chat",
+    "import",
+]
 
-COMPANY_NAMES = [
-    "Bluebird Labs", "Meridian Health", "Copper Canyon Robotics",
-    "Northwind Analytics", "Sycamore AI", "Ridgeline Payments",
-    "Turnstile Data", "Forge Networks", "Harbor & Main",
-    "Verdant Software", "Lantern Systems", "Cascade Biotech",
-    "Pearl Street Games", "Summit Logistics", "Delta Parallel",
+# Varied hostnames so the sources report has something to rank.
+HOSTNAMES = [
+    "greenhouse.io", "lever.co", "workable.com", "ashbyhq.com",
+    "bamboohr.com", "smartrecruiters.com", "jobvite.com",
+    "linkedin.com", "indeed.com", "builtin.com", "angel.co",
+    "ycombinator.com", "otta.com", "wellfound.com",
+    "careers.meridian.example", "jobs.copper-canyon.example",
+    "apply.sycamore-ai.example", "careers.harbor-and-main.example",
+    "jobs.verdant.example", "apply.lantern-systems.example",
+]
+
+COMPANIES = [
+    ("Bluebird Labs",            "bluebirdlabs.example"),
+    ("Meridian Health",          "meridianhealth.example"),
+    ("Copper Canyon Robotics",   "coppercanyon.example"),
+    ("Northwind Analytics",      "northwind-analytics.example"),
+    ("Sycamore AI",              "sycamore-ai.example"),
+    ("Ridgeline Payments",       "ridgelinepayments.example"),
+    ("Turnstile Data",           "turnstiledata.example"),
+    ("Forge Networks",           "forgenetworks.example"),
+    ("Harbor & Main",            "harborandmain.example"),
+    ("Verdant Software",         "verdant.example"),
+    ("Lantern Systems",          "lanternsystems.example"),
+    ("Cascade Biotech",          "cascadebio.example"),
+    ("Pearl Street Games",       "pearlstreetgames.example"),
+    ("Summit Logistics",         "summitlogistics.example"),
+    ("Delta Parallel",           "deltaparallel.example"),
+    ("Nimbus Compute",           "nimbuscompute.example"),
+    ("Ironclad Research",        "ironcladresearch.example"),
+    ("Keystone Security",        "keystonesec.example"),
+    ("Polaris Robotics",         "polarisrobotics.example"),
+    ("Outrigger Studios",        "outriggerstudios.example"),
 ]
 
 ROLE_TITLES = [
@@ -77,20 +116,75 @@ ROLE_TITLES = [
     "Platform Engineer", "Staff Engineer", "Engineering Manager",
     "Site Reliability Engineer", "Data Engineer", "API Engineer",
     "Developer Advocate", "Infrastructure Engineer", "Applications Engineer",
+    "Principal Engineer", "Engineering Lead", "Machine Learning Engineer",
+    "Security Engineer", "Mobile Engineer", "DevOps Engineer",
 ]
 
-FULL_DESCRIPTION = (
-    "We're hiring a senior engineer to own a core part of our platform end "
-    "to end. You'll design APIs, write the services behind them, deploy to "
-    "production, and own the on-call rotation for what you ship. Day to day "
-    "you'll work in Python and TypeScript, PostgreSQL, and AWS. We value "
-    "shipping over perfection, strong written communication, and engineers "
-    "who can see past their own code to the customer problem. Compensation "
-    "is competitive, healthcare is fully covered, and the team is small "
-    "enough that your opinions actually move things."
-)
+# Each full description clears the 60-word STUB_MIN_WORDS threshold
+# comfortably. Pool of five flavours so the feed doesn't read like a
+# photocopy.
+DESCRIPTIONS = [
+    (
+        "We're hiring a senior engineer to own a core service that touches "
+        "every customer interaction. You'll design the public API, implement "
+        "the services behind it, run it in production, and be on-call for "
+        "what you ship. Stack is Python, PostgreSQL, Redis, and a thin React "
+        "admin console. Our team is small, we ship daily, and we expect "
+        "strong written communication because most decisions happen in "
+        "docs, not meetings. Remote-first, US timezones. We cover healthcare "
+        "in full and give real equity — not the performative kind."
+    ),
+    (
+        "Join a mid-sized platform team that keeps the lights on for a "
+        "multi-tenant SaaS serving 30k+ businesses. You'll spend most of "
+        "your time in Django and Go, some time in Kubernetes, and occasional "
+        "time in the PostgreSQL query planner when the slow-log lights up. "
+        "We value people who can reduce operational pain as much as ship "
+        "features — if you enjoy deleting code and untangling systems, "
+        "you'll fit in. Hybrid role, three days in Austin. Comp is above "
+        "market for the region."
+    ),
+    (
+        "Full-stack role on a product squad of six. You'll build features "
+        "end to end: React + TypeScript on the front, Django REST on the "
+        "back, PostgreSQL with judicious use of views and window functions. "
+        "We care a lot about test coverage, uptime, and keeping our "
+        "CI green — flaky tests get fixed, not retried. The team runs "
+        "without a dedicated PM; engineers talk directly to customers and "
+        "own their roadmap. Fully remote within North America."
+    ),
+    (
+        "Backend-focused position with real scope: you'll lead the rewrite "
+        "of our billing subsystem, which currently handles ~$40M ARR and "
+        "has accumulated seven years of edge cases. Experience with "
+        "double-entry accounting concepts, Stripe webhooks, and "
+        "reconciliation batch jobs is a big plus. You'll work closely with "
+        "our finance lead and have latitude to redesign from first "
+        "principles. New York or remote. Senior-only role, target comp "
+        "350–420k total."
+    ),
+    (
+        "SRE role on a 20-person infrastructure org. Primary responsibility "
+        "is our multi-region PostgreSQL fleet and the services that "
+        "depend on it. You'll own failover playbooks, drive p95 latency "
+        "work, and help other teams ship observability that actually "
+        "helps during incidents. Comfort with Terraform, AWS, and writing "
+        "runbooks that humans can follow at 3am is assumed. Rotation is "
+        "one week in five; we pay the rotation bonus whether or not you "
+        "get paged."
+    ),
+]
 
-STUB_DESCRIPTION = "Senior Engineer role, apply here."
+# Deliberately thin stubs — sub-20 words — to land in the stub bucket
+# even if someone later tunes the threshold tighter.
+STUBS = [
+    "Senior Engineer. Apply now.",
+    "Hiring — frontend dev. Details inside.",
+    "Backend role at growing startup.",
+    "Platform engineer wanted.",
+    "Remote-friendly. Competitive pay.",
+    "Full-time engineering role.",
+]
 
 
 class Command(BaseCommand):
@@ -100,16 +194,14 @@ class Command(BaseCommand):
         parser.add_argument(
             "--reset",
             action="store_true",
-            help="Delete existing demo-pipeline posts (titled with 'Demo:' prefix) first",
+            help="Delete existing demo posts (title prefix 'Demo:') first",
         )
 
     def handle(self, *args, **options):
         guest = User.objects.filter(username="guest").first()
         if guest is None:
             self.stderr.write(
-                self.style.ERROR(
-                    "guest user not found — run `seed_guest` first."
-                )
+                self.style.ERROR("guest user not found — run `seed_guest` first.")
             )
             return
 
@@ -122,51 +214,68 @@ class Command(BaseCommand):
         rng = random.Random(42)
         now = timezone.now()
 
-        # Pre-materialise statuses + companies
-        status_cache = {}
+        status_cache: dict = {}
 
         def _status(name):
             if name not in status_cache:
                 status_cache[name] = Status.objects.get_or_create(status=name)[0]
             return status_cache[name]
 
-        companies = [
-            Company.objects.get_or_create(name=n)[0] for n in COMPANY_NAMES
-        ]
+        companies = [Company.objects.get_or_create(name=n)[0] for n, _ in COMPANIES]
+        company_domain_map = dict(COMPANIES)
 
         created_posts = 0
         created_apps = 0
         created_statuses = 0
+        scored = 0
 
         for bucket, count in FUNNEL_SHAPE.items():
             for i in range(count):
                 company = rng.choice(companies)
                 title = f"Demo: {rng.choice(ROLE_TITLES)}"
-                description = (
-                    STUB_DESCRIPTION if bucket == "stub" else FULL_DESCRIPTION
-                )
-                posted_days_ago = rng.randint(5, 80)
+                if bucket == "stub":
+                    description = rng.choice(STUBS)
+                else:
+                    description = rng.choice(DESCRIPTIONS)
+
+                # Link: mostly use per-company domain; occasionally use
+                # one of the board hostnames so the sources stacked bar
+                # shows greenhouse/lever/etc. as distinct rows.
+                if rng.random() < 0.35:
+                    host = rng.choice(HOSTNAMES)
+                    link = f"https://{host}/jobs/{bucket}-{i}-{rng.randint(1000, 9999)}"
+                else:
+                    host = company_domain_map.get(company.name, "example.com")
+                    link = f"https://careers.{host}/{bucket}-{i}"
+
+                # Keep posted_date within the last 30 days for the
+                # "recent activity" feel, except for ghosted where
+                # we deliberately age the post out.
+                if bucket == "ghosted":
+                    posted_days_ago = rng.randint(35, 45)
+                else:
+                    posted_days_ago = rng.randint(1, 29)
                 post = JobPost.objects.create(
                     title=title,
                     company=company,
                     description=description,
                     posted_date=(now - timedelta(days=posted_days_ago)).date(),
                     source=rng.choice(SOURCES),
-                    link=f"https://jobs.{company.name.lower().replace(' ', '')}.example/{bucket}-{i}",
+                    link=link,
                     created_by=guest,
                 )
                 created_posts += 1
 
-                # About 40% of non-stub posts get a score, giving the
-                # scored/unscored hub layer meaningful volume on both
-                # sides.
-                if bucket != "stub" and rng.random() < 0.4:
+                # ~55% of non-stub posts are scored — gives both the
+                # scored hub and the unscored hub meaningful volume.
+                if bucket != "stub" and rng.random() < 0.55:
                     Score.objects.create(
                         job_post=post,
                         user=guest,
-                        score=rng.randint(55, 95),
+                        score=rng.randint(55, 96),
                         status="complete",
                     )
+                    scored += 1
 
                 if bucket in ("no_application", "stub"):
                     continue
@@ -179,17 +288,24 @@ class Command(BaseCommand):
                 created_apps += 1
 
                 for status_name, days_ago in PATHS[bucket]:
+                    # Jitter logged_at so a single bucket doesn't look
+                    # like it happened all on the same day.
+                    jitter = rng.randint(-3, 3)
                     JobApplicationStatus.objects.create(
                         application=app,
                         status=_status(status_name),
-                        logged_at=now - timedelta(days=days_ago),
+                        logged_at=now - timedelta(days=max(0, days_ago + jitter)),
                     )
                     created_statuses += 1
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Seeded demo pipeline: {created_posts} posts, "
-                f"{created_apps} applications, {created_statuses} status rows "
-                "(all attached to the guest user)."
+                "Seeded demo pipeline:\n"
+                f"  posts:        {created_posts}\n"
+                f"  applications: {created_apps}\n"
+                f"  status rows:  {created_statuses}\n"
+                f"  scored:       {scored}\n"
+                "All attached to the guest user. Bust the public report cache "
+                "with `flush_demo_report_cache` (or just wait 5 min)."
             )
         )
