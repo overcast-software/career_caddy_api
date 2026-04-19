@@ -81,6 +81,56 @@ def _attach_active_application_status(job_posts, user_id):
         jp._active_application_status = status_map.get(jp.id)
 
 
+def _run_reextract_async(scrape_id, job_post_id, user_id):
+    """Spawn a daemon thread that runs the AI extractor on a Scrape and
+    merges non-None fields onto the existing JobPost. Updates scrape.status
+    to 'completed' or 'failed' when done so the client poller stops."""
+    import threading
+
+    def _run():
+        from job_hunting.lib.scraper import _log_scrape_status
+        from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
+
+        scrape = Scrape.objects.filter(pk=scrape_id).first()
+        post = JobPost.objects.filter(pk=job_post_id).first()
+        if not scrape or not post:
+            return
+        _log_scrape_status(scrape_id, "extracting")
+        try:
+            extracted = JobPostExtractor().analyze_with_ai(scrape)
+        except Exception:
+            _log_scrape_status(scrape_id, "failed", note="reextract: extraction error")
+            return
+
+        update_fields = []
+        mapping = {
+            "title": extracted.title,
+            "description": extracted.description,
+            "posted_date": extracted.posted_date,
+            "salary_min": (
+                _to_decimal_safe(extracted.salary_min)
+                if extracted.salary_min is not None else None
+            ),
+            "salary_max": (
+                _to_decimal_safe(extracted.salary_max)
+                if extracted.salary_max is not None else None
+            ),
+            "location": extracted.location,
+            "remote": extracted.remote,
+        }
+        for field, value in mapping.items():
+            if value is None:
+                continue
+            if getattr(post, field) != value:
+                setattr(post, field, value)
+                update_fields.append(field)
+        if update_fields:
+            post.save(update_fields=update_fields)
+        _log_scrape_status(scrape_id, "completed", note="reextract: merged")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _to_decimal_safe(value):
     if value is None:
         return None
@@ -382,14 +432,17 @@ class JobPostViewSet(BaseViewSet):
 
     @extend_schema(
         tags=["Job Posts"],
-        summary="Re-extract job post fields from pasted text",
+        summary="Queue async re-extraction of job post fields from pasted text",
         request={"application/json": {"type": "object", "properties": {"text": {"type": "string"}}}},
-        responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+        responses={202: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
     )
     @action(detail=True, methods=["post"], url_path="reextract")
     def reextract(self, request, pk=None):
-        """Run the AI extractor on pasted text and merge non-None fields onto
-        this JobPost. Skips company reassignment to avoid surprise rebinds."""
+        """Queue an async re-extraction of pasted text. Creates a Scrape with
+        status='pending' linked to this JobPost, spawns a daemon thread that
+        runs the AI extractor and merges non-None fields onto the existing
+        JobPost (company is preserved). Returns the Scrape immediately so the
+        client can poll for status transitions."""
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -403,53 +456,23 @@ class JobPostViewSet(BaseViewSet):
                 {"errors": [{"detail": "text is required"}]}, status=400
             )
 
-        from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
-
-        scrape = Scrape(
+        scrape = Scrape.objects.create(
             url=obj.link or "",
             job_content=text,
-            status="success",
+            status="pending",
             created_by=request.user,
             job_post=obj,
         )
-        scrape.save()
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(scrape.id, "pending", note="reextract from paste")
 
-        try:
-            extracted = JobPostExtractor().analyze_with_ai(scrape)
-        except Exception as e:
-            scrape.status = "failed"
-            scrape.save(update_fields=["status"])
-            return Response(
-                {"errors": [{"detail": f"Extraction failed: {e}"}]}, status=400
-            )
+        _run_reextract_async(scrape.id, obj.id, request.user.id)
 
-        update_fields = []
-        mapping = {
-            "title": extracted.title,
-            "description": extracted.description,
-            "posted_date": extracted.posted_date,
-            "salary_min": (
-                _to_decimal_safe(extracted.salary_min)
-                if extracted.salary_min is not None else None
-            ),
-            "salary_max": (
-                _to_decimal_safe(extracted.salary_max)
-                if extracted.salary_max is not None else None
-            ),
-            "location": extracted.location,
-            "remote": extracted.remote,
-        }
-        for field, value in mapping.items():
-            if value is None:
-                continue
-            if getattr(obj, field) != value:
-                setattr(obj, field, value)
-                update_fields.append(field)
-        if update_fields:
-            obj.save(update_fields=update_fields)
-
-        ser = self.get_serializer()
-        return Response({"data": ser.to_resource(obj)})
+        scr_ser = ScrapeSerializer()
+        return Response(
+            {"data": scr_ser.to_resource(scrape)},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @extend_schema(
         tags=["Job Posts"],
