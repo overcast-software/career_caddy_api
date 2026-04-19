@@ -75,6 +75,28 @@ class TestJobPostAPI(TestCase):
         self.job_post.refresh_from_db()
         self.assertEqual(self.job_post.title, "Senior Dev")
 
+    def test_patch_ignores_readonly_computed_attributes(self):
+        """Regression: the frontend echoes back attributes from a prior GET.
+        Computed properties (top_score, active_application_status) have no
+        setter, so setattr would 500 the PATCH unless we pop them first."""
+        payload = {
+            "data": {
+                "type": "job-post",
+                "id": str(self.job_post.id),
+                "attributes": {
+                    "title": "Renamed",
+                    "active_application_status": "Vetted Bad",
+                    "top_score": 42,
+                },
+            }
+        }
+        response = self.client.patch(
+            f"/api/v1/job-posts/{self.job_post.id}/", data=payload, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.job_post.refresh_from_db()
+        self.assertEqual(self.job_post.title, "Renamed")
+
     def test_delete_job_post(self):
         jp = JobPost.objects.create(title="ToDelete", created_by=self.user)
         response = self.client.delete(f"/api/v1/job-posts/{jp.id}/")
