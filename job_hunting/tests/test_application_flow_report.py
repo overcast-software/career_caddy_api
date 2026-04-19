@@ -60,9 +60,9 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(attrs["nodes"], [])
         self.assertEqual(attrs["links"], [])
 
-    def test_job_post_without_application_routes_to_no_application(self):
-        # Evaluable post (has a full description) but no application lands
-        # in the no_application bucket — distinct from stub.
+    def test_unscored_full_description_no_app_routes_via_unscored(self):
+        # Evaluable post (full description) but no score, no application:
+        # job_posts → unscored → no_application.
         JobPost.objects.create(
             title="No app",
             description=" ".join(["word"] * 30),
@@ -71,37 +71,40 @@ class TestApplicationFlowReport(TestCase):
         )
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(attrs["total_job_posts"], 1)
-        self.assertEqual(attrs["total_applications"], 0)
-        self.assertEqual(self._edge(attrs, "job_posts", "no_application"), 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 1)
+        self.assertEqual(self._edge(attrs, "unscored", "no_application"), 1)
+        self.assertEqual(self._edge(attrs, "unscored", "stub"), 0)
 
     def test_thin_unscored_post_with_no_application_is_stub(self):
-        # Email-pipeline-style post: title + link only, no description,
-        # no score, no application. Should land in the 'stub' terminal.
+        # Email-pipeline-style post: title + link only, thin description.
+        # Routes job_posts → unscored → stub terminal.
         JobPost.objects.create(
             title="Stub", company=self.company, created_by=self.user
         )
         attrs = self._attrs(self.client.get(URL))
-        self.assertEqual(attrs["total_job_posts"], 1)
-        self.assertEqual(self._edge(attrs, "job_posts", "stub"), 1)
-        self.assertEqual(self._edge(attrs, "job_posts", "no_application"), 0)
+        self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 1)
+        self.assertEqual(self._edge(attrs, "unscored", "stub"), 1)
+        self.assertEqual(self._edge(attrs, "unscored", "no_application"), 0)
 
-    def test_scored_thin_post_is_not_stub(self):
-        # User scored it — no longer "dead on arrival" even with thin desc.
+    def test_scored_thin_post_routes_via_scored_hub(self):
+        # User scored it — goes through scored hub regardless of desc.
         from job_hunting.models import Score
         jp = JobPost.objects.create(
             title="Scored but thin", company=self.company, created_by=self.user
         )
         Score.objects.create(job_post=jp, user=self.user, score=75)
         attrs = self._attrs(self.client.get(URL))
-        self.assertEqual(self._edge(attrs, "job_posts", "stub"), 0)
-        self.assertEqual(self._edge(attrs, "job_posts", "no_application"), 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "scored"), 1)
+        self.assertEqual(self._edge(attrs, "scored", "no_application"), 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 0)
 
     def test_single_applied_application_no_ghost_yet(self):
         jp = JobPost.objects.create(title="P", company=self.company, created_by=self.user)
         app = JobApplication.objects.create(job_post=jp, user=self.user)
         _log(app, "Applied", days_ago=5)
         attrs = self._attrs(self.client.get(URL))
-        self.assertEqual(self._edge(attrs, "job_posts", "applications"), 1)
+        # Hub layer: post has no Score → flows via unscored hub.
+        self.assertEqual(self._edge(attrs, "unscored", "applications"), 1)
         self.assertEqual(self._edge(attrs, "applications", "applied"), 1)
         self.assertEqual(self._edge(attrs, "applied", "ghosted"), 0)
 
@@ -144,7 +147,8 @@ class TestApplicationFlowReport(TestCase):
         _log(a2, "Rejected", days_ago=2)
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(attrs["total_applications"], 2)
-        self.assertEqual(self._edge(attrs, "job_posts", "applications"), 2)
+        # Both applications pass through the unscored hub on the same post.
+        self.assertEqual(self._edge(attrs, "unscored", "applications"), 2)
 
     def test_scope_all_requires_staff(self):
         response = self.client.get(URL + "?scope=all")
