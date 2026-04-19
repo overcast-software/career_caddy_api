@@ -7,11 +7,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _maybe_caddy_extract(scrape) -> None:
-    """Parse job_content and create JobPost + Company via JobPostExtractor."""
+def _maybe_caddy_extract(scrape, force: bool = False) -> None:
+    """Parse job_content and create JobPost + Company via JobPostExtractor.
+
+    By default, skips when scrape.job_post_id is set (first-pass idempotency).
+    Pass force=True to re-parse and merge fresh fields onto the linked post
+    — used when the user explicitly re-scraped or pressed Parse.
+    """
     from job_hunting.lib.parsers.job_post_extractor import parse_scrape
-    if scrape.job_content and not scrape.job_post_id:
-        parse_scrape(scrape.id, user_id=getattr(scrape.created_by, "id", None), sync=True)
+    if not scrape.job_content:
+        return
+    if scrape.job_post_id and not force:
+        return
+    parse_scrape(
+        scrape.id,
+        user_id=getattr(scrape.created_by, "id", None),
+        sync=True,
+        force=force,
+    )
 
 
 def _set_scrape_status(scrape_id: int, status: str) -> None:

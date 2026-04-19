@@ -1,5 +1,4 @@
 import math
-from decimal import Decimal, InvalidOperation
 
 from django.db.models import Q, F
 from rest_framework import viewsets, status
@@ -79,65 +78,6 @@ def _attach_active_application_status(job_posts, user_id):
         status_map[pid] = jas.status.status if jas.status_id else None
     for jp in job_posts:
         jp._active_application_status = status_map.get(jp.id)
-
-
-def _run_reextract_async(scrape_id, job_post_id, user_id):
-    """Spawn a daemon thread that runs the AI extractor on a Scrape and
-    merges non-None fields onto the existing JobPost. Updates scrape.status
-    to 'completed' or 'failed' when done so the client poller stops."""
-    import threading
-
-    def _run():
-        from job_hunting.lib.scraper import _log_scrape_status
-        from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
-
-        scrape = Scrape.objects.filter(pk=scrape_id).first()
-        post = JobPost.objects.filter(pk=job_post_id).first()
-        if not scrape or not post:
-            return
-        _log_scrape_status(scrape_id, "extracting")
-        try:
-            extracted = JobPostExtractor().analyze_with_ai(scrape)
-        except Exception:
-            _log_scrape_status(scrape_id, "failed", note="reextract: extraction error")
-            return
-
-        update_fields = []
-        mapping = {
-            "title": extracted.title,
-            "description": extracted.description,
-            "posted_date": extracted.posted_date,
-            "salary_min": (
-                _to_decimal_safe(extracted.salary_min)
-                if extracted.salary_min is not None else None
-            ),
-            "salary_max": (
-                _to_decimal_safe(extracted.salary_max)
-                if extracted.salary_max is not None else None
-            ),
-            "location": extracted.location,
-            "remote": extracted.remote,
-        }
-        for field, value in mapping.items():
-            if value is None:
-                continue
-            if getattr(post, field) != value:
-                setattr(post, field, value)
-                update_fields.append(field)
-        if update_fields:
-            post.save(update_fields=update_fields)
-        _log_scrape_status(scrape_id, "completed", note="reextract: merged")
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def _to_decimal_safe(value):
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value)).quantize(Decimal("0.01"))
-    except InvalidOperation:
-        return None
 
 
 @extend_schema_view(
@@ -446,10 +386,10 @@ class JobPostViewSet(BaseViewSet):
     @action(detail=True, methods=["post"], url_path="reextract")
     def reextract(self, request, pk=None):
         """Queue an async re-extraction of pasted text. Creates a Scrape with
-        status='pending' linked to this JobPost, spawns a daemon thread that
-        runs the AI extractor and merges non-None fields onto the existing
-        JobPost (company is preserved). Returns the Scrape immediately so the
-        client can poll for status transitions."""
+        status='pending' linked to this JobPost and hands off to the shared
+        parse_scrape pipeline with force=True so the extractor merges fresh
+        fields into the existing JobPost (company preserved). Returns the
+        Scrape immediately so the client can poll for status transitions."""
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -471,9 +411,9 @@ class JobPostViewSet(BaseViewSet):
             job_post=obj,
         )
         from job_hunting.lib.scraper import _log_scrape_status
+        from job_hunting.lib.parsers.job_post_extractor import parse_scrape
         _log_scrape_status(scrape.id, "pending", note="reextract from paste")
-
-        _run_reextract_async(scrape.id, obj.id, request.user.id)
+        parse_scrape(scrape.id, user_id=request.user.id, force=True)
 
         scr_ser = ScrapeSerializer()
         return Response(
