@@ -55,6 +55,32 @@ from job_hunting.models import (
 )
 
 
+def _attach_active_application_status(job_posts, user_id):
+    """Pre-attach `_active_application_status` (string or None) on each
+    JobPost: the latest JobApplicationStatus.status name on the user's own
+    application for that post. One query for the whole batch."""
+    if not job_posts or not user_id:
+        for jp in job_posts:
+            jp._active_application_status = None
+        return
+    post_ids = [jp.id for jp in job_posts]
+    from job_hunting.models import JobApplicationStatus
+    rows = (
+        JobApplicationStatus.objects
+        .filter(application__job_post_id__in=post_ids, application__user_id=user_id)
+        .select_related("status", "application")
+        .order_by("application__job_post_id", "-logged_at", "-created_at")
+    )
+    status_map = {}
+    for jas in rows:
+        pid = jas.application.job_post_id
+        if pid in status_map:
+            continue
+        status_map[pid] = jas.status.status if jas.status_id else None
+    for jp in job_posts:
+        jp._active_application_status = status_map.get(jp.id)
+
+
 def _to_decimal_safe(value):
     if value is None:
         return None
@@ -195,6 +221,8 @@ class JobPostViewSet(BaseViewSet):
             for jp in items:
                 jp._top_score = top_score_map.get(jp.id)
 
+            _attach_active_application_status(items, request.user.id)
+
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
         payload = {
@@ -232,6 +260,7 @@ class JobPostViewSet(BaseViewSet):
         )
         if not has_access:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        _attach_active_application_status([obj], request.user.id)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)

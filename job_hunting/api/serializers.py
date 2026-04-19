@@ -567,6 +567,7 @@ class JobPostSerializer(BaseSerializer):
         "location",
         "remote",
         "top_score",
+        "active_application_status",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
