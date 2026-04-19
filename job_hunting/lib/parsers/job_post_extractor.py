@@ -166,6 +166,11 @@ class JobPostExtractor:
             job_defaults["location"] = validated_data.location
         if validated_data.remote is not None:
             job_defaults["remote"] = validated_data.remote
+        # Carry scrape provenance onto the JobPost so downstream analytics
+        # (sankey 'stub' detection, per-source funnel) can attribute the
+        # post to its origin. Falls back to 'manual' if somehow unset.
+        scrape_source = getattr(scrape, "source", None) or "manual"
+        job_defaults["source"] = scrape_source
 
         # Use the scrape URL as the canonical link — it's the known-good source.
         # The LLM-extracted link may be an apply URL, redirect, or null.
