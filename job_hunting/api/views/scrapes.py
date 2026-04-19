@@ -78,6 +78,17 @@ class ScrapeViewSet(BaseViewSet):
         if status_filter:
             qs = qs.filter(status=status_filter)
 
+        # Free-text search across URL, job-post title, company name, and content.
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter:
+            qs = qs.filter(
+                Q(url__icontains=query_filter)
+                | Q(job_content__icontains=query_filter)
+                | Q(job_post__title__icontains=query_filter)
+                | Q(job_post__company__name__icontains=query_filter)
+                | Q(job_post__company__display_name__icontains=query_filter)
+            ).distinct()
+
         # Pagination
         total = qs.count()
         page_number, page_size = self._page_params()
