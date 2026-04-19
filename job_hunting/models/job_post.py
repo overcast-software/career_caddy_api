@@ -34,6 +34,13 @@ class JobPost(GetMixin, models.Model):
         db_table = "job_post"
 
     @property
+    def active_application_status(self):
+        """Latest JobApplicationStatus.status name for the request user's
+        application on this post. Pre-attached by JobPostViewSet for list/
+        retrieve; returns None if not pre-attached."""
+        return getattr(self, "_active_application_status", None)
+
+    @property
     def top_score(self):
         """Highest integer score value for this job post, or None."""
         best = getattr(self, "_top_score", None) or self.scores.order_by("-score").first()
