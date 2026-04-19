@@ -1,7 +1,7 @@
 import logging
 import math
 
-from django.db.models import Q
+from django.db.models import F, Q
 from django.conf import settings
 from rest_framework import status
 from rest_framework.decorators import action
@@ -53,25 +53,28 @@ class ScrapeViewSet(BaseViewSet):
             | Q(job_post__isnull=True, created_by__isnull=True)
         )
 
-        # Sorting
+        # Sorting — explicit sort wins, with -id as deterministic tiebreak so
+        # rows sharing the same sort-key value (e.g. several scrapes created
+        # in the same second, or sorting by status) don't reshuffle across
+        # pages. Default sort is created_at DESC nulls-last, then -id.
         sort_param = request.query_params.get("sort")
         if sort_param:
             sort_fields = []
+            sort_field_names: set[str] = set()
             for field in sort_param.split(","):
                 field = field.strip()
+                name = field.lstrip("-")
+                sort_field_names.add(name)
                 if field.startswith("-"):
-                    sort_fields.append(f"-{field[1:]}")
+                    sort_fields.append(F(name).desc(nulls_last=True))
                 else:
-                    sort_fields.append(field)
+                    sort_fields.append(F(name).asc(nulls_last=True))
+            if sort_fields and "id" not in sort_field_names:
+                sort_fields.append(F("id").desc())
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
         else:
-            # Default: latest first
-            try:
-                Scrape._meta.get_field("created_at")
-                qs = qs.order_by("-created_at")
-            except Exception:
-                qs = qs.order_by("-id")
+            qs = qs.order_by(F("created_at").desc(nulls_last=True), F("id").desc())
 
         # Status filter
         status_filter = request.query_params.get("filter[status]")
