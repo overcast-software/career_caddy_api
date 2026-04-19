@@ -34,6 +34,13 @@ BUCKET_REJECTED = "rejected"
 BUCKET_WITHDREW = "withdrew"
 BUCKET_GHOSTED = "ghosted"
 
+# Pre-application terminal: the post arrived too thin to even score (empty
+# description, or < STUB_MIN_WORDS tokens) AND the user never ran a Score.
+# Surfaces the "dead on arrival" volume that would otherwise hide in
+# no_application.
+BUCKET_STUB = "stub"
+STUB_MIN_WORDS = 20
+
 STAGE_BUCKETS = {BUCKET_APPLIED, BUCKET_INTERVIEW, BUCKET_OFFER}
 TERMINAL_BUCKETS = {
     BUCKET_ACCEPTED,
@@ -111,6 +118,19 @@ def _app_bucket_sequence(application, now) -> list[str]:
     return sequence
 
 
+def _is_stub(post, user_id: int | None) -> bool:
+    """Post is a 'stub' when description is empty/too thin AND no Score
+    exists (for the user, or anyone in all-scope). Means the row arrived
+    too incomplete for scoring and the user hasn't bothered."""
+    desc = (post.description or "").strip()
+    if desc and len(desc.split()) >= STUB_MIN_WORDS:
+        return False
+    scores = post.scores
+    if user_id is not None:
+        scores = scores.filter(user_id=user_id)
+    return not scores.exists()
+
+
 def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
     """Aggregate a JobPost queryset into a sankey-shaped payload.
 
@@ -132,6 +152,13 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         if user_id is not None:
             apps = [a for a in apps if a.user_id == user_id]
 
+        # Stub detection: description missing / too thin AND no Score yet.
+        # Triggers before the no_application branch so "incoming junk"
+        # stays visually distinct from "I haven't applied yet."
+        if not apps and _is_stub(post, user_id):
+            edge_counts[(NODE_JOB_POSTS, BUCKET_STUB)] += 1
+            continue
+
         if not apps:
             edge_counts[(NODE_JOB_POSTS, NODE_NO_APPLICATION)] += 1
             continue
@@ -148,6 +175,7 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
     # Stable ordering: keep the visual left-to-right the same each render.
     node_order = [
         NODE_JOB_POSTS,
+        BUCKET_STUB,
         NODE_NO_APPLICATION,
         NODE_APPLICATIONS,
         BUCKET_APPLIED,

@@ -29,6 +29,12 @@ class JobPost(GetMixin, models.Model):
     salary_max = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     location = models.CharField(max_length=255, null=True, blank=True)
     remote = models.BooleanField(null=True, blank=True)
+    # Provenance: where the post entered the system. Values come from
+    # the calling code path (manual, paste, scrape, email, chat, ...);
+    # free-form CharField rather than an enum so future sources can
+    # appear without migrations. Defaults to 'manual' so historical
+    # rows backfill safely.
+    source = models.CharField(max_length=32, default="manual")
 
     class Meta:
         db_table = "job_post"

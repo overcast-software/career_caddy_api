@@ -61,10 +61,39 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(attrs["links"], [])
 
     def test_job_post_without_application_routes_to_no_application(self):
-        JobPost.objects.create(title="No app", company=self.company, created_by=self.user)
+        # Evaluable post (has a full description) but no application lands
+        # in the no_application bucket — distinct from stub.
+        JobPost.objects.create(
+            title="No app",
+            description=" ".join(["word"] * 30),
+            company=self.company,
+            created_by=self.user,
+        )
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(attrs["total_job_posts"], 1)
         self.assertEqual(attrs["total_applications"], 0)
+        self.assertEqual(self._edge(attrs, "job_posts", "no_application"), 1)
+
+    def test_thin_unscored_post_with_no_application_is_stub(self):
+        # Email-pipeline-style post: title + link only, no description,
+        # no score, no application. Should land in the 'stub' terminal.
+        JobPost.objects.create(
+            title="Stub", company=self.company, created_by=self.user
+        )
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(attrs["total_job_posts"], 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "stub"), 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "no_application"), 0)
+
+    def test_scored_thin_post_is_not_stub(self):
+        # User scored it — no longer "dead on arrival" even with thin desc.
+        from job_hunting.models import Score
+        jp = JobPost.objects.create(
+            title="Scored but thin", company=self.company, created_by=self.user
+        )
+        Score.objects.create(job_post=jp, user=self.user, score=75)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "job_posts", "stub"), 0)
         self.assertEqual(self._edge(attrs, "job_posts", "no_application"), 1)
 
     def test_single_applied_application_no_ghost_yet(self):

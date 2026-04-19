@@ -28,6 +28,10 @@ class Scrape(GetMixin, models.Model):
         blank=True,
         related_name="scrapes",
     )
+    # Provenance: how this scrape was created. Copied onto the JobPost
+    # when parse_scrape creates one so downstream analytics can attribute
+    # posts to their origin (email pipeline vs user paste vs user scrape).
+    source = models.CharField(max_length=32, default="manual")
     css_selectors = models.TextField(null=True, blank=True)
     job_content = models.TextField(null=True, blank=True)
     external_link = models.CharField(max_length=2000, null=True, blank=True)

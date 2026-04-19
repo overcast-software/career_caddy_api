@@ -414,6 +414,7 @@ class JobPostViewSet(BaseViewSet):
             status="pending",
             created_by=request.user,
             job_post=obj,
+            source="paste",
         )
         from job_hunting.lib.scraper import _log_scrape_status
         from job_hunting.lib.parsers.job_post_extractor import parse_scrape

@@ -273,7 +273,13 @@ class ScrapeViewSet(BaseViewSet):
                     {"errors": [{"detail": "URL is required"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            scrape = Scrape.objects.create(url=url, status="hold", created_by=request.user)
+            source = attrs.get("source") or data.get("source") or "scrape"
+            scrape = Scrape.objects.create(
+                url=url,
+                status="hold",
+                created_by=request.user,
+                source=source,
+            )
             from job_hunting.lib.scraper import _log_scrape_status
             _log_scrape_status(scrape.id, "hold")
             # Bind to an explicit job_post relationship if provided, else fall back
@@ -351,7 +357,13 @@ class ScrapeViewSet(BaseViewSet):
             # If failed, we'll create a new scrape below
             logger.info("ScrapeViewSet.create: existing scrape status=%s, creating new scrape", existing_scrape.status)
 
-        scrape = Scrape.objects.create(url=url, status="pending", created_by=request.user)
+        source = attrs.get("source") or data.get("source") or "scrape"
+        scrape = Scrape.objects.create(
+            url=url,
+            status="pending",
+            created_by=request.user,
+            source=source,
+        )
         logger.info("ScrapeViewSet.create: created scrape id=%s", scrape.id)
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "pending")
@@ -499,6 +511,7 @@ class ScrapeViewSet(BaseViewSet):
             job_content=text,
             status="pending",
             created_by=request.user,
+            source="paste",
         )
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "pending", note="paste ingest")
