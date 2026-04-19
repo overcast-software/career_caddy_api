@@ -399,13 +399,16 @@ class JobPostViewSet(BaseViewSet):
     def triage(self, request, pk=None):
         """Log a pre-application triage status (Vetted Good / Vetted Bad) on
         the user's own JobApplication for this post. Creates the application
-        on first triage. Idempotent on repeats of the same status."""
+        on first triage. Also updates the denormalized JobApplication.status
+        cache so the app reflects the latest triage everywhere (not just via
+        the application_statuses history)."""
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         data = request.data if isinstance(request.data, dict) else {}
         status_name = (data.get("status") or "").strip()
+        note = (data.get("note") or "").strip() or None
         allowed = {"Vetted Good", "Vetted Bad"}
         if status_name not in allowed:
             return Response(
@@ -424,7 +427,11 @@ class JobPostViewSet(BaseViewSet):
             application=app,
             status=status_row,
             logged_at=_tz.now(),
+            note=note,
         )
+        if app.status != status_name:
+            app.status = status_name
+            app.save(update_fields=["status"])
 
         obj._active_application_status = status_name
         ser = self.get_serializer()

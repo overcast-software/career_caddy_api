@@ -33,10 +33,28 @@ class TestJobPostTriageAPI(TestCase):
         statuses = list(JobApplicationStatus.objects.filter(application=app))
         self.assertEqual(len(statuses), 1)
         self.assertEqual(statuses[0].status.status, "Vetted Good")
+        self.assertEqual(app.status, "Vetted Good")
         self.assertEqual(
             response.json()["data"]["attributes"]["active_application_status"],
             "Vetted Good",
         )
+
+    def test_triage_stores_note_on_application_status(self):
+        self.client.post(
+            self.url,
+            data={"status": "Vetted Bad", "note": "Salary too low"},
+            format="json",
+        )
+        app = JobApplication.objects.get(job_post=self.post, user=self.user)
+        jas = JobApplicationStatus.objects.get(application=app)
+        self.assertEqual(jas.note, "Salary too low")
+
+    def test_triage_updates_application_status_cache(self):
+        self.client.post(self.url, data={"status": "Vetted Good"}, format="json")
+        self.client.post(self.url, data={"status": "Vetted Bad"}, format="json")
+        app = JobApplication.objects.get(job_post=self.post, user=self.user)
+        self.assertEqual(app.status, "Vetted Bad")
+        self.assertEqual(JobApplicationStatus.objects.filter(application=app).count(), 2)
 
     def test_reuses_existing_application(self):
         app = JobApplication.objects.create(job_post=self.post, user=self.user)
