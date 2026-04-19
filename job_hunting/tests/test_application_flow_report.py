@@ -98,6 +98,43 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(self._edge(attrs, "scored", "no_application"), 1)
         self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 0)
 
+    def test_triage_only_app_does_not_count_as_application(self):
+        # 'Vetted Good' + 'Unvetted' are pre-application triage labels —
+        # they mean "I've seen this post and it's worth pursuing", not
+        # "I applied". An app whose only statuses are triage labels
+        # should collapse to no_application on the sankey, not inflate
+        # the applied bucket.
+        jp = JobPost.objects.create(
+            title="Triaged, not applied",
+            description=" ".join(["word"] * 80),
+            company=self.company,
+            created_by=self.user,
+        )
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Vetted Good", days_ago=3)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(attrs["total_applications"], 0)
+        self.assertEqual(self._edge(attrs, "unscored", "no_application"), 1)
+        self.assertEqual(self._edge(attrs, "unscored", "applications"), 0)
+        self.assertEqual(self._edge(attrs, "applications", "applied"), 0)
+
+    def test_triage_plus_applied_counts_as_application(self):
+        # Vetted Good logged first, then Applied — this IS a real
+        # application and should show up in the applied bucket.
+        jp = JobPost.objects.create(
+            title="Vetted then applied",
+            description=" ".join(["word"] * 80),
+            company=self.company,
+            created_by=self.user,
+        )
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Vetted Good", days_ago=10)
+        _log(app, "Applied", days_ago=5)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(attrs["total_applications"], 1)
+        self.assertEqual(self._edge(attrs, "unscored", "applications"), 1)
+        self.assertEqual(self._edge(attrs, "applications", "applied"), 1)
+
     def test_single_applied_application_no_ghost_yet(self):
         jp = JobPost.objects.create(title="P", company=self.company, created_by=self.user)
         app = JobApplication.objects.create(job_post=jp, user=self.user)
