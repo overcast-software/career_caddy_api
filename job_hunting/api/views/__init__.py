@@ -49,6 +49,7 @@ from .markdown import (
 )
 from .onboarding import reconcile_onboarding
 from .reports import (
+    activity_report,
     application_flow_report,
     sources_report,
     report_filter_options,
@@ -97,6 +98,7 @@ __all__ = [
     "resume_markdown",
     "cover_letter_markdown",
     "reconcile_onboarding",
+    "activity_report",
     "application_flow_report",
     "sources_report",
     "report_filter_options",
