@@ -21,13 +21,17 @@ NODE_JOB_POSTS = "job_posts"
 NODE_NO_APPLICATION = "no_application"
 NODE_APPLICATIONS = "applications"
 
-# Hub layer between job_posts and the downstream branches. Every post
-# flows through exactly one. d3-sankey stacks same-depth nodes as a
-# vertical column, so this renders like the Thermal-generation hub in
+# Two sequential hub layers between job_posts and the downstream
+# branches. Every post flows through one scoring hub then one vetting
+# hub. d3-sankey stacks same-depth nodes as a vertical column, so each
+# hub renders like the Thermal-generation hub in
 # https://observablehq.com/@d3/sankey/2.
 #
-# Variant: vetted_good / vetted_bad / unvetted, based on the post's
-# triage state (Vetted Good / Vetted Bad / neither).
+# Scoring hub: scored / unscored (algorithmic step).
+# Vetting hub: vetted_good / vetted_bad / unvetted (manual triage step).
+# A job can be vetted without a score, so the two axes are independent.
+NODE_SCORED = "scored"
+NODE_UNSCORED = "unscored"
 NODE_VETTED_GOOD = "vetted_good"
 NODE_VETTED_BAD = "vetted_bad"
 NODE_UNVETTED = "unvetted"
@@ -139,6 +143,13 @@ def _is_thin_description(post) -> bool:
     return not desc or len(desc.split()) < STUB_MIN_WORDS
 
 
+def _has_score(post, user_id: int | None) -> bool:
+    scores = post.scores
+    if user_id is not None:
+        scores = scores.filter(user_id=user_id)
+    return scores.exists()
+
+
 def _vetting_hub(post, user_id: int | None) -> str:
     """Classify the post into one of the three triage hubs. Picks the most
     recent Vetted-Good / Vetted-Bad status across the post's applications
@@ -185,12 +196,16 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         if user_id is not None:
             apps = [a for a in apps if a.user_id == user_id]
 
-        # Hub layer: every post flows through one of three vetting hubs
-        # (vetted_good / vetted_bad / unvetted) before reaching the
-        # application branches. Renders as a vertical column mid-graph —
-        # same role as 'Thermal generation' in the d3 energy sankey.
-        hub = _vetting_hub(post, user_id)
-        edge_counts[(NODE_JOB_POSTS, hub)] += 1
+        # Two sequential hub layers mid-graph. Each post flows
+        # job_posts → vetting_hub → scoring_hub → terminal branch.
+        # Vetting comes first because it's the manual triage step — you
+        # decide whether to pursue before running a score. Jobs can be
+        # vetted without ever being scored, so both axes are independent.
+        vet_hub = _vetting_hub(post, user_id)
+        score_hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
+        edge_counts[(NODE_JOB_POSTS, vet_hub)] += 1
+        edge_counts[(vet_hub, score_hub)] += 1
+        hub = score_hub
 
         # Resolve each app's bucket sequence. Apps whose only statuses
         # are pre-application triage labels (Unvetted, Vetted Good —
@@ -202,7 +217,15 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         real_apps = [(app, seq) for app, seq in real_apps if seq]
 
         if not real_apps:
-            if hub == NODE_UNVETTED and _is_thin_description(post):
+            # Stub terminal = thin-description post that's never been
+            # scored AND never been triaged. Hangs off the scoring hub
+            # since that's the downstream side of the chain.
+            is_raw_junk = (
+                vet_hub == NODE_UNVETTED
+                and score_hub == NODE_UNSCORED
+                and _is_thin_description(post)
+            )
+            if is_raw_junk:
                 edge_counts[(hub, BUCKET_STUB)] += 1
             else:
                 edge_counts[(hub, NODE_NO_APPLICATION)] += 1
@@ -222,6 +245,8 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         NODE_VETTED_GOOD,
         NODE_VETTED_BAD,
         NODE_UNVETTED,
+        NODE_SCORED,
+        NODE_UNSCORED,
         BUCKET_STUB,
         NODE_NO_APPLICATION,
         NODE_APPLICATIONS,
