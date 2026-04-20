@@ -11,14 +11,24 @@ def _maybe_caddy_extract(scrape, force: bool = False) -> None:
     """Parse job_content and create JobPost + Company via JobPostExtractor.
 
     By default, skips when scrape.job_post_id is set (first-pass idempotency).
-    Pass force=True to re-parse and merge fresh fields onto the linked post
-    — used when the user explicitly re-scraped or pressed Parse.
+    Exception: if the linked post has a thin/empty description, parse anyway
+    with force=True so the common \"click Run scrape on a stub to enrich it\"
+    flow actually updates the description. Fully-populated posts remain
+    idempotent — a repeat scrape is a no-op unless the caller passes
+    force=True explicitly.
     """
     from job_hunting.lib.parsers.job_post_extractor import parse_scrape
+    from job_hunting.lib.services.application_flow import STUB_MIN_WORDS
     if not scrape.job_content:
         return
     if scrape.job_post_id and not force:
-        return
+        from job_hunting.models import JobPost
+        linked = JobPost.objects.filter(pk=scrape.job_post_id).only("description").first()
+        desc = (linked.description or "").strip() if linked else ""
+        is_thin = not desc or len(desc.split()) < STUB_MIN_WORDS
+        if not is_thin:
+            return
+        force = True
     parse_scrape(
         scrape.id,
         user_id=getattr(scrape.created_by, "id", None),
