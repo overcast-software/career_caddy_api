@@ -60,9 +60,8 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(attrs["nodes"], [])
         self.assertEqual(attrs["links"], [])
 
-    def test_unscored_full_description_no_app_routes_via_unscored(self):
-        # Evaluable post (full description) but no score, no application:
-        # job_posts → unscored → no_application.
+    def test_unvetted_unscored_no_app_routes_through_both_hubs(self):
+        # job_posts → unvetted → unscored → no_application.
         JobPost.objects.create(
             title="No app",
             description=" ".join(["word"] * 80),
@@ -71,41 +70,39 @@ class TestApplicationFlowReport(TestCase):
         )
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(attrs["total_job_posts"], 1)
-        self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "unvetted"), 1)
+        self.assertEqual(self._edge(attrs, "unvetted", "unscored"), 1)
         self.assertEqual(self._edge(attrs, "unscored", "no_application"), 1)
-        self.assertEqual(self._edge(attrs, "unscored", "stub"), 0)
 
-    def test_thin_unscored_post_with_no_application_is_stub(self):
-        # Email-pipeline-style post: title + link only, thin description.
-        # Routes job_posts → unscored → stub terminal.
+    def test_thin_unscored_post_is_stub(self):
+        # Thin description + untriaged + no application: job_posts →
+        # unvetted → unscored → stub.
         JobPost.objects.create(
             title="Stub", company=self.company, created_by=self.user
         )
         attrs = self._attrs(self.client.get(URL))
-        self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 1)
+        self.assertEqual(self._edge(attrs, "unvetted", "unscored"), 1)
         self.assertEqual(self._edge(attrs, "unscored", "stub"), 1)
         self.assertEqual(self._edge(attrs, "unscored", "no_application"), 0)
 
-    def test_scored_thin_post_routes_via_scored_hub(self):
-        # User scored it — goes through scored hub regardless of desc.
+    def test_scored_post_routes_via_scored_hub(self):
         from job_hunting.models import Score
         jp = JobPost.objects.create(
-            title="Scored but thin", company=self.company, created_by=self.user
+            title="Scored",
+            description=" ".join(["word"] * 80),
+            company=self.company,
+            created_by=self.user,
         )
         Score.objects.create(job_post=jp, user=self.user, score=75)
         attrs = self._attrs(self.client.get(URL))
-        self.assertEqual(self._edge(attrs, "job_posts", "scored"), 1)
-        self.assertEqual(self._edge(attrs, "scored", "no_application"), 1)
-        self.assertEqual(self._edge(attrs, "job_posts", "unscored"), 0)
+        self.assertEqual(self._edge(attrs, "unvetted", "scored"), 1)
+        self.assertEqual(self._edge(attrs, "unvetted", "unscored"), 0)
 
-    def test_triage_only_app_does_not_count_as_application(self):
-        # 'Vetted Good' + 'Unvetted' are pre-application triage labels —
-        # they mean "I've seen this post and it's worth pursuing", not
-        # "I applied". An app whose only statuses are triage labels
-        # should collapse to no_application on the sankey, not inflate
-        # the applied bucket.
+    def test_vetted_good_without_score(self):
+        # Vetted without a score: unvetted → unscored path NOT taken;
+        # goes via vetted_good → unscored.
         jp = JobPost.objects.create(
-            title="Triaged, not applied",
+            title="Vetted not scored",
             description=" ".join(["word"] * 80),
             company=self.company,
             created_by=self.user,
@@ -113,14 +110,57 @@ class TestApplicationFlowReport(TestCase):
         app = JobApplication.objects.create(job_post=jp, user=self.user)
         _log(app, "Vetted Good", days_ago=3)
         attrs = self._attrs(self.client.get(URL))
-        self.assertEqual(attrs["total_applications"], 0)
+        self.assertEqual(self._edge(attrs, "job_posts", "vetted_good"), 1)
+        self.assertEqual(self._edge(attrs, "vetted_good", "unscored"), 1)
         self.assertEqual(self._edge(attrs, "unscored", "no_application"), 1)
-        self.assertEqual(self._edge(attrs, "unscored", "applications"), 0)
-        self.assertEqual(self._edge(attrs, "applications", "applied"), 0)
+
+    def test_vetted_good_and_scored(self):
+        from job_hunting.models import Score
+        jp = JobPost.objects.create(
+            title="Vetted + scored",
+            description=" ".join(["word"] * 80),
+            company=self.company,
+            created_by=self.user,
+        )
+        Score.objects.create(job_post=jp, user=self.user, score=80)
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Vetted Good", days_ago=1)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "job_posts", "vetted_good"), 1)
+        self.assertEqual(self._edge(attrs, "vetted_good", "scored"), 1)
+
+    def test_vetted_bad_routes_via_vetted_bad_hub(self):
+        jp = JobPost.objects.create(
+            title="Rejected at vet",
+            description=" ".join(["word"] * 80),
+            company=self.company,
+            created_by=self.user,
+        )
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Vetted Bad", days_ago=3)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "job_posts", "vetted_bad"), 1)
+        self.assertEqual(self._edge(attrs, "vetted_bad", "unscored"), 1)
+        # Vetted Bad also maps to BUCKET_REJECTED, so the app becomes
+        # real and flows applications → rejected.
+        self.assertEqual(self._edge(attrs, "unscored", "applications"), 1)
+        self.assertEqual(self._edge(attrs, "applications", "rejected"), 1)
+
+    def test_most_recent_triage_wins(self):
+        jp = JobPost.objects.create(
+            title="Changed mind",
+            description=" ".join(["word"] * 80),
+            company=self.company,
+            created_by=self.user,
+        )
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Vetted Bad", days_ago=10)
+        _log(app, "Vetted Good", days_ago=3)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "job_posts", "vetted_good"), 1)
+        self.assertEqual(self._edge(attrs, "job_posts", "vetted_bad"), 0)
 
     def test_triage_plus_applied_counts_as_application(self):
-        # Vetted Good logged first, then Applied — this IS a real
-        # application and should show up in the applied bucket.
         jp = JobPost.objects.create(
             title="Vetted then applied",
             description=" ".join(["word"] * 80),
@@ -140,7 +180,6 @@ class TestApplicationFlowReport(TestCase):
         app = JobApplication.objects.create(job_post=jp, user=self.user)
         _log(app, "Applied", days_ago=5)
         attrs = self._attrs(self.client.get(URL))
-        # Hub layer: post has no Score → flows via unscored hub.
         self.assertEqual(self._edge(attrs, "unscored", "applications"), 1)
         self.assertEqual(self._edge(attrs, "applications", "applied"), 1)
         self.assertEqual(self._edge(attrs, "applied", "ghosted"), 0)
@@ -164,7 +203,6 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(self._edge(attrs, "applied", "interview"), 1)
         self.assertEqual(self._edge(attrs, "interview", "offer"), 1)
         self.assertEqual(self._edge(attrs, "offer", "accepted"), 1)
-        # terminal reached — no ghost edge
         self.assertEqual(self._edge(attrs, "accepted", "ghosted"), 0)
 
     def test_rejection_after_applied(self):
@@ -184,7 +222,6 @@ class TestApplicationFlowReport(TestCase):
         _log(a2, "Rejected", days_ago=2)
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(attrs["total_applications"], 2)
-        # Both applications pass through the unscored hub on the same post.
         self.assertEqual(self._edge(attrs, "unscored", "applications"), 2)
 
     def test_scope_all_requires_staff(self):

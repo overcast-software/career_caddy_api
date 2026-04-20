@@ -21,12 +21,20 @@ NODE_JOB_POSTS = "job_posts"
 NODE_NO_APPLICATION = "no_application"
 NODE_APPLICATIONS = "applications"
 
-# Hub layer between job_posts and the downstream branches. Every post
-# flows through exactly one. d3-sankey stacks same-depth nodes as a
-# vertical column, so this renders like the Thermal-generation hub in
+# Two sequential hub layers between job_posts and the downstream
+# branches. Every post flows through one scoring hub then one vetting
+# hub. d3-sankey stacks same-depth nodes as a vertical column, so each
+# hub renders like the Thermal-generation hub in
 # https://observablehq.com/@d3/sankey/2.
+#
+# Scoring hub: scored / unscored (algorithmic step).
+# Vetting hub: vetted_good / vetted_bad / unvetted (manual triage step).
+# A job can be vetted without a score, so the two axes are independent.
 NODE_SCORED = "scored"
 NODE_UNSCORED = "unscored"
+NODE_VETTED_GOOD = "vetted_good"
+NODE_VETTED_BAD = "vetted_bad"
+NODE_UNVETTED = "unvetted"
 
 # Stage buckets (pass-through). An application sits in one of these until it
 # reaches a terminal bucket or ages out to "ghosted".
@@ -41,9 +49,9 @@ BUCKET_REJECTED = "rejected"
 BUCKET_WITHDREW = "withdrew"
 BUCKET_GHOSTED = "ghosted"
 
-# Pre-application terminal under the unscored hub: post has thin/empty
+# Pre-application terminal under the unvetted hub: post has thin/empty
 # description. Separates "email-pipeline junk" from "full description but
-# never got around to scoring it".
+# never triaged".
 BUCKET_STUB = "stub"
 STUB_MIN_WORDS = 60
 
@@ -129,8 +137,8 @@ def _app_bucket_sequence(application, now) -> list[str]:
 
 def _is_thin_description(post) -> bool:
     """True when description is empty or has fewer than STUB_MIN_WORDS
-    whitespace tokens. Used inside the unscored branch to split 'thin
-    junk' (→ stub) from 'full-description but never scored' (→ rest)."""
+    whitespace tokens. Used inside the unvetted branch to split 'thin
+    junk' (→ stub) from 'full-description but never triaged' (→ rest)."""
     desc = (post.description or "").strip()
     return not desc or len(desc.split()) < STUB_MIN_WORDS
 
@@ -140,6 +148,31 @@ def _has_score(post, user_id: int | None) -> bool:
     if user_id is not None:
         scores = scores.filter(user_id=user_id)
     return scores.exists()
+
+
+def _vetting_hub(post, user_id: int | None) -> str:
+    """Classify the post into one of the three triage hubs. Picks the most
+    recent Vetted-Good / Vetted-Bad status across the post's applications
+    (scoped to user_id when provided). Absence of either → unvetted."""
+    apps = post.applications.all()
+    if user_id is not None:
+        apps = [a for a in apps if a.user_id == user_id]
+    latest_good = None
+    latest_bad = None
+    for app in apps:
+        status_rows = list(app.application_statuses.all())
+        for s in status_rows:
+            name = s.status.status if s.status_id else None
+            ts = s.logged_at or s.created_at
+            if name == "Vetted Good" and (latest_good is None or ts > latest_good):
+                latest_good = ts
+            elif name == "Vetted Bad" and (latest_bad is None or ts > latest_bad):
+                latest_bad = ts
+    if latest_good and (not latest_bad or latest_good >= latest_bad):
+        return NODE_VETTED_GOOD
+    if latest_bad:
+        return NODE_VETTED_BAD
+    return NODE_UNVETTED
 
 
 def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
@@ -163,11 +196,16 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         if user_id is not None:
             apps = [a for a in apps if a.user_id == user_id]
 
-        # Hub layer: every post flows through scored OR unscored before
-        # reaching the application branches. Makes the split visible as a
-        # vertical column mid-graph.
-        hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
-        edge_counts[(NODE_JOB_POSTS, hub)] += 1
+        # Two sequential hub layers mid-graph. Each post flows
+        # job_posts → vetting_hub → scoring_hub → terminal branch.
+        # Vetting comes first because it's the manual triage step — you
+        # decide whether to pursue before running a score. Jobs can be
+        # vetted without ever being scored, so both axes are independent.
+        vet_hub = _vetting_hub(post, user_id)
+        score_hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
+        edge_counts[(NODE_JOB_POSTS, vet_hub)] += 1
+        edge_counts[(vet_hub, score_hub)] += 1
+        hub = score_hub
 
         # Resolve each app's bucket sequence. Apps whose only statuses
         # are pre-application triage labels (Unvetted, Vetted Good —
@@ -179,7 +217,15 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         real_apps = [(app, seq) for app, seq in real_apps if seq]
 
         if not real_apps:
-            if hub == NODE_UNSCORED and _is_thin_description(post):
+            # Stub terminal = thin-description post that's never been
+            # scored AND never been triaged. Hangs off the scoring hub
+            # since that's the downstream side of the chain.
+            is_raw_junk = (
+                vet_hub == NODE_UNVETTED
+                and score_hub == NODE_UNSCORED
+                and _is_thin_description(post)
+            )
+            if is_raw_junk:
                 edge_counts[(hub, BUCKET_STUB)] += 1
             else:
                 edge_counts[(hub, NODE_NO_APPLICATION)] += 1
@@ -196,6 +242,9 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
     # Stable ordering: keep the visual left-to-right the same each render.
     node_order = [
         NODE_JOB_POSTS,
+        NODE_VETTED_GOOD,
+        NODE_VETTED_BAD,
+        NODE_UNVETTED,
         NODE_SCORED,
         NODE_UNSCORED,
         BUCKET_STUB,
