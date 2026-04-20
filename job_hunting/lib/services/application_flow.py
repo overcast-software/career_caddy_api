@@ -202,8 +202,17 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         # decide whether to pursue before running a score. Jobs can be
         # vetted without ever being scored, so both axes are independent.
         vet_hub = _vetting_hub(post, user_id)
-        score_hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
         edge_counts[(NODE_JOB_POSTS, vet_hub)] += 1
+
+        # Vetted Bad is a terminal hub. Users triage tons of thin
+        # email-sourced posts as Vetted Bad; flowing them onward to
+        # unscored → applications → rejected triples the line weight
+        # for the same "I rejected this at triage" signal and drowns
+        # the rest of the funnel. Stop here.
+        if vet_hub == NODE_VETTED_BAD:
+            continue
+
+        score_hub = NODE_SCORED if _has_score(post, user_id) else NODE_UNSCORED
         edge_counts[(vet_hub, score_hub)] += 1
         hub = score_hub
 

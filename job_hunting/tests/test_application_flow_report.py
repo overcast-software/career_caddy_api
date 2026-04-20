@@ -129,7 +129,10 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(self._edge(attrs, "job_posts", "vetted_good"), 1)
         self.assertEqual(self._edge(attrs, "vetted_good", "scored"), 1)
 
-    def test_vetted_bad_routes_via_vetted_bad_hub(self):
+    def test_vetted_bad_is_terminal(self):
+        # Vetted Bad is a terminal hub in the sankey — the triage hit
+        # stops there instead of flowing via unscored → applications →
+        # rejected. Email-sourced bulk triage doesn't drown the funnel.
         jp = JobPost.objects.create(
             title="Rejected at vet",
             description=" ".join(["word"] * 80),
@@ -140,11 +143,10 @@ class TestApplicationFlowReport(TestCase):
         _log(app, "Vetted Bad", days_ago=3)
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(self._edge(attrs, "job_posts", "vetted_bad"), 1)
-        self.assertEqual(self._edge(attrs, "vetted_bad", "unscored"), 1)
-        # Vetted Bad also maps to BUCKET_REJECTED, so the app becomes
-        # real and flows applications → rejected.
-        self.assertEqual(self._edge(attrs, "unscored", "applications"), 1)
-        self.assertEqual(self._edge(attrs, "applications", "rejected"), 1)
+        # No downstream edges from vetted_bad.
+        self.assertEqual(self._edge(attrs, "vetted_bad", "unscored"), 0)
+        self.assertEqual(self._edge(attrs, "vetted_bad", "scored"), 0)
+        self.assertEqual(self._edge(attrs, "unscored", "applications"), 0)
 
     def test_most_recent_triage_wins(self):
         jp = JobPost.objects.create(
