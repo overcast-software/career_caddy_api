@@ -8,9 +8,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
+from job_hunting.lib.services.activity_flow import build_activity
 from job_hunting.lib.services.application_flow import build_flow
 from job_hunting.lib.services.source_flow import build_sources
-from job_hunting.models import JobPost
+from job_hunting.models import JobApplication, JobPost
 
 
 # Cache TTL for the precomputed anonymous demo report. Short enough
@@ -253,6 +254,51 @@ def sources_report(request):
                 "type": "report",
                 "id": "sources",
                 "attributes": {**rollup, "scope": scope},
+            }
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def activity_report(request):
+    """GET /api/v1/reports/activity/?scope=mine|all&from=&to=&user=
+
+    Daily application-creation counts over a date range for the
+    calendar-heatmap report. Scope rules match application-flow:
+    mine = your own applications; all = staff-only, everyone's;
+    ?user=<id> = staff-only, scope to that user.
+    """
+    scope = (request.query_params.get("scope") or "mine").lower()
+    if scope not in ("mine", "all"):
+        scope = "mine"
+
+    person_user_id, err = _person_filter_effective_user_id(request)
+    if err:
+        return err
+
+    if scope == "all":
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Staff only"}]}, status=403
+            )
+        qs = JobApplication.objects.all()
+        if person_user_id is not None:
+            qs = qs.filter(user_id=person_user_id)
+    else:
+        qs = JobApplication.objects.filter(user_id=request.user.id)
+
+    from_date = _parse_iso_date(request.query_params.get("from"))
+    to_date = _parse_iso_date(request.query_params.get("to"))
+
+    activity = build_activity(qs, from_date=from_date, to_date=to_date)
+
+    return Response(
+        {
+            "data": {
+                "type": "report",
+                "id": "activity",
+                "attributes": {**activity, "scope": scope},
             }
         }
     )
