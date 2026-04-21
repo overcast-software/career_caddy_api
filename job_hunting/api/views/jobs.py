@@ -381,6 +381,11 @@ class JobPostViewSet(BaseViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
         attrs = self.pre_save_payload(request, attrs, creating=True)
+        # Computed read-only properties on the JobPost model — clients echo
+        # them back in POST bodies from a prior GET; setattr would raise
+        # because they have no setter.
+        attrs.pop("top_score", None)
+        attrs.pop("active_application_status", None)
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(
