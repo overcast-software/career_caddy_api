@@ -69,6 +69,11 @@ if DEBUG or not CSRF_TRUSTED_ORIGINS:
     )
 
 USE_TZ = True
+# Storage is always UTC (timestamptz). TIME_ZONE is the user-facing zone —
+# drives timezone.localdate() / TruncDate boundaries on activity reports so
+# a 4pm-PST action lands on "today," not tomorrow-UTC. Hardcoded single-region
+# for now; revisit for multi-tenant per-user tz preference.
+TIME_ZONE = "America/Los_Angeles"
 
 MIDDLEWARE = [
     "job_hunting.api.middleware.OvercastHeaderMiddleware",
