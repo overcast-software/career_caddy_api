@@ -175,6 +175,29 @@ class JobPostViewSet(BaseViewSet):
         if source_filter is not None and source_filter != "all":
             qs = qs.filter(source=source_filter)
 
+        # Exclude posts the user has manually triaged out. "Vetted Bad"
+        # is a pre-application triage label (see application_flow.BUCKETS)
+        # the user applies to posts they've decided not to pursue. Excludes
+        # when the LATEST status on the user's application is "Vetted Bad"
+        # — re-opens if they log a newer status.
+        exclude_vetted_bad = request.query_params.get(
+            "filter[exclude_vetted_bad]"
+        )
+        if str(exclude_vetted_bad).lower() in ("1", "true", "yes"):
+            latest_status_subq = (
+                JobApplicationStatus.objects.filter(
+                    application__job_post=OuterRef("pk"),
+                    application__user_id=request.user.id,
+                )
+                .order_by("-logged_at", "-created_at")
+                .values("status__status")[:1]
+            )
+            qs = qs.annotate(
+                _vb_latest=Subquery(latest_status_subq)
+            ).filter(
+                Q(_vb_latest__isnull=True) | ~Q(_vb_latest="Vetted Bad")
+            )
+
         # Sankey bucket filter (applied/interview/offer/ghosted/rejected/
         # withdrew/accepted/declined/no_application). Scopes posts where
         # the caller's application's LATEST status falls in the bucket.
@@ -189,7 +212,6 @@ class JobPostViewSet(BaseViewSet):
                 GHOST_AFTER_DAYS,
                 STAGE_BUCKETS,
             )
-            from job_hunting.models import JobApplicationStatus
 
             if bucket_filter == "no_application":
                 qs = qs.exclude(applications__user_id=request.user.id)
