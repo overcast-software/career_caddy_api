@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from job_hunting.lib.services.activity_flow import build_activity
 from job_hunting.lib.services.application_flow import build_flow
 from job_hunting.lib.services.source_flow import build_sources
-from job_hunting.models import JobApplication, JobPost
+from job_hunting.models import JobApplication, JobApplicationStatus, JobPost
 
 
 # Cache TTL for the precomputed anonymous demo report. Short enough
@@ -283,15 +283,22 @@ def activity_report(request):
                 {"errors": [{"detail": "Staff only"}]}, status=403
             )
         qs = JobApplication.objects.all()
+        status_qs = JobApplicationStatus.objects.select_related("status")
         if person_user_id is not None:
             qs = qs.filter(user_id=person_user_id)
+            status_qs = status_qs.filter(application__user_id=person_user_id)
     else:
         qs = JobApplication.objects.filter(user_id=request.user.id)
+        status_qs = JobApplicationStatus.objects.select_related(
+            "status"
+        ).filter(application__user_id=request.user.id)
 
     from_date = _parse_iso_date(request.query_params.get("from"))
     to_date = _parse_iso_date(request.query_params.get("to"))
 
-    activity = build_activity(qs, from_date=from_date, to_date=to_date)
+    activity = build_activity(
+        qs, status_rows=status_qs, from_date=from_date, to_date=to_date
+    )
 
     return Response(
         {

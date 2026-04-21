@@ -87,3 +87,46 @@ class TestActivityReport(TestCase):
         )
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(attrs["total_applications"], 0)
+
+    def test_status_series_bucketizes_log_events(self):
+        # Log Applied + Interview on the same day — stacked area chart
+        # should see 1 applied + 1 interview event that day.
+        from job_hunting.models import JobApplicationStatus, Status
+        app = JobApplication.objects.create(
+            job_post=self.job_post, user=self.user, applied_at=timezone.now()
+        )
+        applied_status = Status.objects.get_or_create(status="Applied")[0]
+        interview_status = Status.objects.get_or_create(
+            status="Interview Scheduled"
+        )[0]
+        now = timezone.now()
+        JobApplicationStatus.objects.create(
+            application=app, status=applied_status, logged_at=now
+        )
+        JobApplicationStatus.objects.create(
+            application=app, status=interview_status, logged_at=now
+        )
+        attrs = self._attrs(self.client.get(URL))
+        series = attrs.get("status_series")
+        self.assertIsNotNone(series)
+        self.assertIn("applied", series["buckets"])
+        self.assertIn("interview", series["buckets"])
+        today_iso = timezone.localdate().isoformat()
+        today = next(d for d in series["days"] if d["date"] == today_iso)
+        self.assertEqual(today["applied"], 1)
+        self.assertEqual(today["interview"], 1)
+        self.assertEqual(series["total_events"], 2)
+
+    def test_status_series_ignores_triage_labels(self):
+        # Vetted Good is pre-application triage, not a real applied
+        # event — the stacked chart should not double-count it.
+        from job_hunting.models import JobApplicationStatus, Status
+        app = JobApplication.objects.create(
+            job_post=self.job_post, user=self.user
+        )
+        vetted = Status.objects.get_or_create(status="Vetted Good")[0]
+        JobApplicationStatus.objects.create(
+            application=app, status=vetted, logged_at=timezone.now()
+        )
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(attrs["status_series"]["total_events"], 0)
