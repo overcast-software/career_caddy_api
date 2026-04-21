@@ -1,71 +1,79 @@
+{# Keep every block flush-left: leading spaces in markdown turn text into
+   code blocks ("### Summary" indented 4 spaces renders as <pre>, not <h3>).
+   Previously every {% if %} branch re-indented the content four spaces and
+   the career-data page rendered the entire resume as monospace. #}
 ## {{ resume.user.get_full_name() or resume.user.username }}
-## {{resume.title }}
-## Email: {{resume.user.email}}
-## Phone: {{resume.user_phone}}
+## {{ resume.title }}
+## Email: {{ resume.user.email }}
+## Phone: {{ resume.user_phone }}
+
 {% if resume.active_summary %}
-    ### Summary
-    {{ resume.active_summary.content }}
+### Summary
+
+{{ resume.active_summary.content }}
 {% endif %}
+
 {% if resume.skills %}
-    ### Skills
-    {% if resume.language_skills %}
-        Languages: {{ resume.language_skills | map(attribute='text') | join(", ") }}
-    {%- endif -%}
+### Skills
 
-    {% if resume.database_skills %}
-        Databases: {{ resume.database_skills | map(attribute='text') | join(", ")}}
-    {%- endif -%}
+{% if resume.language_skills %}
+- **Languages:** {{ resume.language_skills | map(attribute='text') | join(", ") }}
+{% endif %}
+{% if resume.database_skills %}
+- **Databases:** {{ resume.database_skills | map(attribute='text') | join(", ") }}
+{% endif %}
+{% if resume.framework_skills %}
+- **Frameworks:** {{ resume.framework_skills | map(attribute='text') | join(", ") }}
+{% endif %}
+{% if resume.tool_skills %}
+- **Platforms:** {{ resume.tool_skills | map(attribute='text') | join(", ") }}
+{% endif %}
+{% if resume.security_skills %}
+- **Security:** {{ resume.security_skills | map(attribute='text') | join(", ") }}
+{% endif %}
+{% endif %}
 
-    {% if resume.framework_skills %}
-        Frameworks: {{ resume.framework_skills| map(attribute='text')  | join(", ")}}
-    {%- endif -%}
-
-    {% if resume.tool_skills %}
-        Platforms: {{ resume.tool_skills| map(attribute='text')  | join(", ")}}
-    {%- endif -%}
-
-    {% if resume.security_skills %}
-        Security: {{ resume.security_skills| map(attribute='text')  | join(", ")}}
-    {%- endif -%}
-{%- endif -%}
 {% if resume.experiences %}
-    ### Experience
-    {% for experience in resume.experiences %}
-        {% if experience.date_range %}
-            {{ experience.date_range }}
-        {% endif %}
-        {% if experience.company %} — {{ experience.company.name }}{% endif %}{% if experience.location %} — {{ experience.location }}{% endif %}
+### Experience
 
-        {% if experience.summary %}
-            {{ experience.summary }}
-        {%- endif -%}
+{% for experience in resume.experiences %}
+#### {{ experience.title }}{% if experience.company %} — {{ experience.company.name }}{% endif %}{% if experience.location %} — {{ experience.location }}{% endif %}{% if experience.date_range %}
+*{{ experience.date_range }}*
+{% endif %}
+{% if experience.summary %}
+{{ experience.summary }}
+{% endif %}
+{% for d in experience.descriptions %}
+- {{ d.content }}
+{% endfor %}
 
-        {% for d in experience.descriptions %}
-            - {{ d.content }}
-        {%- endfor -%}
-    {% endfor %}
+{% endfor %}
 {% endif %}
 
 {% if resume.projects %}
-    ### Projects
-    {% for proj in resume.projects %}
-        {% for bullet in proj.descriptions %}
-            - {{ bullet.content }}
-        {%- endfor -%}
-    {% endfor %}
+### Projects
+
+{% for proj in resume.projects %}
+#### {{ proj.title }}
+{% for bullet in proj.descriptions %}
+- {{ bullet.content }}
+{% endfor %}
+
+{% endfor %}
 {% endif %}
 
 {% if resume.certifications %}
-    ### Certifications
-    {% for cert in resume.certifications %}
-        {{ cert.title }}{% if cert.issuer %} — {{ cert.issuer }}{% endif %}{% if cert.issue_date %} — {{ cert.issue_date }}{% endif %}
-        {% if cert.content %}{{ cert.content }}{% endif %}
-    {% endfor %}
+### Certifications
+
+{% for cert in resume.certifications %}
+- **{{ cert.title }}**{% if cert.issuer %} — {{ cert.issuer }}{% endif %}{% if cert.issue_date %} — {{ cert.issue_date }}{% endif %}{% if cert.content %} — {{ cert.content }}{% endif %}
+{% endfor %}
 {% endif %}
 
 {% if resume.educations %}
-    ### Education
-    {% for edu in resume.educations %}
-        {{ edu.institution }}{% if edu.degree %} — {{ edu.degree }}{% endif %}{% if edu.major %} — {{ edu.major }}{% endif %}{% if edu.minor %} — Minor: {{ edu.minor }}{% endif %}{% if edu.issue_date %} — {{ edu.issue_date }}{% endif %}
-    {% endfor %}
+### Education
+
+{% for edu in resume.educations %}
+- **{{ edu.institution }}**{% if edu.degree %} — {{ edu.degree }}{% endif %}{% if edu.major %} — {{ edu.major }}{% endif %}{% if edu.minor %} — Minor: {{ edu.minor }}{% endif %}{% if edu.issue_date %} — {{ edu.issue_date }}{% endif %}
+{% endfor %}
 {% endif %}
