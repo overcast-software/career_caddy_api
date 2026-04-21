@@ -281,6 +281,7 @@ class DjangoUserSerializer:
         address = ""
         links = []
         onboarding = None
+        auto_score = False
         try:
             from job_hunting.models import Profile
             prof = Profile.objects.filter(user_id=obj.id).first()
@@ -292,6 +293,7 @@ class DjangoUserSerializer:
                 address = prof.address or ""
                 links = prof.links if prof.links is not None else []
                 onboarding = prof.resolved_onboarding()
+                auto_score = bool(getattr(prof, "auto_score", False))
         except Exception:
             phone = ""
         if onboarding is None:
@@ -321,6 +323,7 @@ class DjangoUserSerializer:
                 "address": address,
                 "links": links,
                 "onboarding": onboarding,
+                "auto_score": auto_score,
             },
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
@@ -384,7 +387,7 @@ class DjangoUserSerializer:
         for k in [
             "username", "email", "first_name", "last_name", "password",
             "phone", "linkedin", "github", "address", "links",
-            "is_staff", "is_active", "onboarding",
+            "is_staff", "is_active", "onboarding", "auto_score",
         ]:
             if k in attrs_in:
                 out[k] = attrs_in[k]

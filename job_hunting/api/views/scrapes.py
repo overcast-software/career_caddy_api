@@ -85,6 +85,24 @@ class ScrapeViewSet(BaseViewSet):
         if status_filter:
             qs = qs.filter(status=status_filter)
 
+        # has_score filter — scope to scrapes whose linked JobPost either has
+        # or lacks a Score record. Drives the auto-score daemon's candidate
+        # list: it polls completed+has_score=false to find new posts to score.
+        has_score = request.query_params.get("filter[has_score]")
+        if has_score is not None:
+            wants = str(has_score).lower() in ("1", "true", "yes")
+            from job_hunting.models import Score
+
+            scored_post_ids = Score.objects.values_list(
+                "job_post_id", flat=True
+            ).distinct()
+            if wants:
+                qs = qs.filter(job_post_id__in=scored_post_ids)
+            else:
+                qs = qs.exclude(job_post_id__in=scored_post_ids).exclude(
+                    job_post_id__isnull=True
+                )
+
         # Free-text search across URL, job-post title, company name, and content.
         query_filter = request.query_params.get("filter[query]")
         if query_filter:

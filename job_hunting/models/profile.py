@@ -32,6 +32,7 @@ class Profile(GetMixin, models.Model):
     github = models.CharField(max_length=255, null=True, blank=True)
     links = SafeJSONField(null=True, blank=True, default=dict)
     onboarding = SafeJSONField(null=True, blank=True, default=dict)
+    auto_score = models.BooleanField(default=False)
 
     class Meta:
         db_table = "profile"
