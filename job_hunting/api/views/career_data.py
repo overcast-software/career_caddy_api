@@ -62,7 +62,13 @@ def career_data(request, user_id=None):
 
     prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
     career_data_prompt = prompt_builder.build_from_career_data(career_data)
-    return Response({"data": career_data_prompt, "meta": career_data.to_refs()})
+    return Response(
+        {
+            "data": career_data_prompt,
+            "sections": career_data.to_sections(),
+            "meta": career_data.to_refs(),
+        }
+    )
 
 
 @extend_schema(
