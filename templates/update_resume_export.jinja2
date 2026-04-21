@@ -1,0 +1,61 @@
+{# =============================================================
+   Smart-context jinja source for resume_export.docx
+   See lib/services/resume_export_context.py for the context builder.
+   -------------------------------------------------------------
+   Design rules (to keep docxtpl from splitting tags across Word runs):
+   - No inline {% if %} — all conditionals pre-computed in Python.
+   - No {%- -%} whitespace markers.
+   - Section headings use docxtpl's paragraph-level {%p if has_X %}.
+   - Everything else is plain {{ var }} or {% for %} loops; empty
+     lists render nothing cleanly.
+
+   Apply Word paragraph styles to the indicated lines in the .docx
+   itself — jinja cannot set them.
+   ============================================================= #}
+
+{# ---------- Header ---------- #}
+{{ header_name }}
+{{ header_title }}
+{{ header_contact }}
+
+{# ---------- Summary ---------- #}
+{%p if has_summary %}Summary{%p endif %}
+{{ summary_body }}   {# apply "RP Summary" style to this paragraph #}
+
+{# ---------- Skills ---------- #}
+{%p if has_skills %}Skills{%p endif %}
+{% for line in skills_lines %}
+{{ line }}
+{% endfor %}
+
+{# ---------- Experience ---------- #}
+{%p if has_experiences %}Experience{%p endif %}
+{% for exp in experiences %}
+{{ exp.header_line }}
+{{ exp.summary }}   {# apply "RP Summary" style to this paragraph #}
+{% for bullet in exp.descriptions %}
+    • {{ bullet }}   {# apply "RP Bulleted List" style #}
+{% endfor %}
+{% endfor %}
+
+{# ---------- Certifications ---------- #}
+{%p if has_certifications %}Certifications{%p endif %}
+{% for cert in certifications %}
+{{ cert.header_line }}
+{{ cert.content }}
+{% endfor %}
+
+{# ---------- Education ---------- #}
+{%p if has_educations %}Education{%p endif %}
+{% for edu in educations %}
+{{ edu.line }}
+{% endfor %}
+
+{# ---------- Projects ---------- #}
+{%p if has_projects %}Projects{%p endif %}
+{% for proj in projects %}
+{{ proj.header_line }}
+{% for bullet in proj.descriptions %}
+    • {{ bullet }}   {# apply "RP Bulleted List" style #}
+{% endfor %}
+{% endfor %}
