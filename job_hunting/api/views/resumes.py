@@ -38,8 +38,6 @@ from ..serializers import (
 )
 from job_hunting.lib.ai_client import get_client
 from job_hunting.lib.services.summary_service import SummaryService
-from job_hunting.lib.services.db_export_service import DbExportService
-from job_hunting.lib.services.resume_export_service import ResumeExportService
 from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.models import (
     Summary,
@@ -1266,85 +1264,73 @@ class ResumeViewSet(BaseViewSet):
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        format_param = request.query_params.get("format", "docx").lower()
         template_path_param = request.query_params.get("template_path")
 
-        if format_param == "md":
-            # Export as markdown
-            exporter = DbExportService()
-            markdown_content = exporter.resume_markdown_export(obj)
+        # DOCX is the only format this action serves. For markdown, the
+        # dedicated /api/v1/resumes/<pk>/markdown/ route is authoritative —
+        # ?format=md here is not wired because DRF intercepts the `format`
+        # query param for renderer selection and 404s before the view runs.
+        #
+        # Rendering uses python-docx directly against a styles-only base
+        # (templates/resume_styles.docx by default), no jinja in Word, no
+        # docxtpl tag-splitting failures. ``template_path`` query param
+        # lets callers point at a different styles base (per-theme branding).
+        import os
+        from django.conf import settings
+        from job_hunting.lib.services.resume_docx_render import (
+            render_docx as render_resume_docx,
+        )
 
-            # Generate filename
-            import re
+        base_path = template_path_param or os.path.join(
+            settings.BASE_DIR, "templates", "resume_styles.docx"
+        )
+        if not os.path.exists(base_path):
+            # Fall back to no-base rendering if the styles file isn't
+            # deployed yet — better a plainly-styled docx than a 500.
+            base_path = None
 
-            filename_parts = ["resume", str(obj.id)]
-            try:
-                if getattr(obj, "user", None) and getattr(obj.user, "name", None):
-                    name = str(obj.user.name)
-                    sanitized_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name)
-                    if sanitized_name:
-                        filename_parts.append(sanitized_name)
-                if getattr(obj, "title", None):
-                    title = str(obj.title)
-                    sanitized_title = re.sub(r"[^A-Za-z0-9_-]+", "-", title)
-                    if sanitized_title:
-                        filename_parts.append(sanitized_title)
-            except Exception:
-                pass
-            filename = "-".join([p for p in filename_parts if p]) + ".md"
-
-            response = HttpResponse(
-                markdown_content.encode("utf-8"),
-                content_type="text/markdown; charset=utf-8",
+        try:
+            data = render_resume_docx(obj, base_template_path=base_path)
+        except ImportError:
+            return Response(
+                {
+                    "errors": [
+                        {"detail": "DOCX export requires 'python-docx' to be installed"}
+                    ]
+                },
+                status=status.HTTP_501_NOT_IMPLEMENTED,
             )
-            response["Content-Disposition"] = f'attachment; filename="{filename}"'
-            return response
-
-        else:
-            # Export as DOCX (default)
-            try:
-                svc = ResumeExportService()
-                data = svc.render_docx(obj, template_path=template_path_param)
-            except ImportError:
-                return Response(
-                    {
-                        "errors": [
-                            {"detail": "DOCX export requires 'docxtpl' to be installed"}
-                        ]
-                    },
-                    status=status.HTTP_501_NOT_IMPLEMENTED,
-                )
-            except Exception as e:
-                return Response(
-                    {"errors": [{"detail": str(e)}]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            # Generate filename
-            import re
-
-            filename_parts = ["resume", str(obj.id)]
-            try:
-                if getattr(obj, "user", None) and getattr(obj.user, "name", None):
-                    name = str(obj.user.name)
-                    sanitized_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name)
-                    if sanitized_name:
-                        filename_parts.append(sanitized_name)
-                if getattr(obj, "title", None):
-                    title = str(obj.title)
-                    sanitized_title = re.sub(r"[^A-Za-z0-9_-]+", "-", title)
-                    if sanitized_title:
-                        filename_parts.append(sanitized_title)
-            except Exception:
-                pass
-            filename = "-".join([p for p in filename_parts if p]) + ".docx"
-
-            response = HttpResponse(
-                data,
-                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        except Exception as e:
+            return Response(
+                {"errors": [{"detail": str(e)}]},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-            response["Content-Disposition"] = f'attachment; filename="{filename}"'
-            return response
+
+        # Generate filename
+        import re
+
+        filename_parts = ["resume", str(obj.id)]
+        try:
+            if getattr(obj, "user", None) and getattr(obj.user, "name", None):
+                name = str(obj.user.name)
+                sanitized_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name)
+                if sanitized_name:
+                    filename_parts.append(sanitized_name)
+            if getattr(obj, "title", None):
+                title = str(obj.title)
+                sanitized_title = re.sub(r"[^A-Za-z0-9_-]+", "-", title)
+                if sanitized_title:
+                    filename_parts.append(sanitized_title)
+        except Exception:
+            pass
+        filename = "-".join([p for p in filename_parts if p]) + ".docx"
+
+        response = HttpResponse(
+            data,
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
 
     @extend_schema(
         tags=["Resumes"],
