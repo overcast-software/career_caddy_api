@@ -199,7 +199,14 @@ class ApplicationPromptBuilder:
                 "Answer ONLY the question in the '## Question to Answer' section below. "
                 "Use the provided context (job details, resume, Q&A history) to personalize "
                 "your answer, but do NOT answer any questions from the Q&A History section. "
-                "Be concise, truthful, and specific to the job. Use clear, professional markdown."
+                "Be concise, truthful, and specific to the job.\n"
+                "\n"
+                "OUTPUT FORMAT — strictly plain text:\n"
+                "- No markdown, no headings (do NOT prefix with '## Answer' or any header).\n"
+                "- No bullet lists, numbered lists, bold, italic, code fences, or block quotes.\n"
+                "- Use plain sentences and paragraphs separated by a single blank line.\n"
+                "- The user will paste your output verbatim into a job application form;\n"
+                "  anything that isn't plain prose becomes literal punctuation there."
             )
         sections.append(instructions)
 
