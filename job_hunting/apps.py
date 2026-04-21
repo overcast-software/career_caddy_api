@@ -14,3 +14,6 @@ class JobHuntingConfig(AppConfig):
     name = "job_hunting"
     default_auto_field = "django.db.models.BigAutoField"
     verbose_name = "Job Hunting"
+
+    def ready(self):
+        from job_hunting import signals  # noqa: F401
