@@ -57,6 +57,7 @@ def _agent_role_specs():
         # ai/ agents — route through agent_factory.get_model()
         ("caddy", "Career Caddy CRUD agent", "CADDY_MODEL", global_default),
         ("chat", "In-app chat sidebar", "CHAT_MODEL", global_default),
+        ("chat_smart", "Smarter-mode chat override (per-turn opt-in)", "CHAT_SMART_MODEL", "anthropic:claude-sonnet-4-6"),
         ("job_extractor", "Structured extraction from job text", "JOB_EXTRACTOR_MODEL", global_default),
         ("browser_scraper", "Browser-driven scrape agent", "BROWSER_SCRAPER_MODEL", global_default),
         # Django-side parsers — own resolution
