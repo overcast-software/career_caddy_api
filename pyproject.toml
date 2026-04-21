@@ -18,6 +18,9 @@ dependencies = [
     # AI / LLM
     "openai>=2.15.0",
     "pydantic-ai>=1.41.0",
+    # Observability — logfire[django,httpx] pulls the OTel instrumentation
+    # packages required by logfire.instrument_django() + instrument_httpx().
+    "logfire[django,httpx]>=4.31.0",
     # Data validation
     "pydantic>=2.12.5",
     # Templating

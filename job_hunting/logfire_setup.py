@@ -75,4 +75,7 @@ def setup_logfire(service_name: str = "career_caddy_api") -> bool:
             )
 
     os.environ[_SETUP_DONE_KEY] = "1"
+    logging.getLogger(__name__).info(
+        "logfire configured — service=%s", service_name
+    )
     return True
