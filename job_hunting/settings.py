@@ -371,6 +371,14 @@ LOGGING = {
     },
 }
 
+# Wire logfire after LOGGING so our LogfireLoggingHandler piggy-backs on
+# the already-installed dictConfig. Silent no-op when LOGFIRE_TOKEN is
+# unset. Also instruments Django request spans + httpx / openai /
+# anthropic calls made inside views.
+from job_hunting.logfire_setup import setup_logfire  # noqa: E402
+
+setup_logfire("career_caddy_api")
+
 # Resume export template path
 RESUME_EXPORT_TEMPLATE = os.path.join(BASE_DIR, "templates", "resume_export.docx")
 
