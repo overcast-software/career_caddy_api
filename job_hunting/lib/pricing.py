@@ -27,6 +27,21 @@ MODEL_PRICING = {
         "input_per_1m": Decimal("0.80"),
         "output_per_1m": Decimal("4.00"),
     },
+    # Claude 4.x family — same tier prices as 3.5, Opus 4.7 at the
+    # Opus rate card. Needed so smart-mode chat runs don't report
+    # $0 cost (pricing table miss → _DEFAULT_PRICING returns 0).
+    "anthropic:claude-sonnet-4-6": {
+        "input_per_1m": Decimal("3.00"),
+        "output_per_1m": Decimal("15.00"),
+    },
+    "anthropic:claude-haiku-4-5": {
+        "input_per_1m": Decimal("0.80"),
+        "output_per_1m": Decimal("4.00"),
+    },
+    "anthropic:claude-opus-4-7": {
+        "input_per_1m": Decimal("15.00"),
+        "output_per_1m": Decimal("75.00"),
+    },
 }
 
 # Fallback for local/Ollama models or unknown models

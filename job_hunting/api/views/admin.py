@@ -437,7 +437,7 @@ class AiUsageViewSet(BaseViewSet):
                 estimated_cost_usd=Sum("estimated_cost_usd"),
                 request_count=Count("id"),
             )
-            .order_by("period")
+            .order_by("-period")
         )
 
         bucket_list = []
