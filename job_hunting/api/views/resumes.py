@@ -1459,10 +1459,14 @@ class ResumeViewSet(BaseViewSet):
             base_name = base_name[:-4]
         derived_name = base_name.strip()[:100] or "Imported Resume"
 
-        # Create placeholder resume immediately
+        # Create placeholder resume immediately. file_path records the
+        # original filename (as the user uploaded it) for reference —
+        # the server doesn't keep the uploaded blob on disk, so this is
+        # purely a human-readable "where did this come from" marker.
         resume = Resume.objects.create(
             user_id=request.user.id,
             name=derived_name,
+            file_path=resume_name,
             status="pending",
         )
 
