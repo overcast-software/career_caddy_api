@@ -3,9 +3,8 @@
    Previously every {% if %} branch re-indented the content four spaces and
    the career-data page rendered the entire resume as monospace. #}
 ## {{ resume.user.get_full_name() or resume.user.username }}
-## {{ resume.title }}
-## Email: {{ resume.user.email }}
-## Phone: {{ resume.user_phone }}
+
+*{{ resume.title }}*{% if resume.user.email %} · {{ resume.user.email }}{% endif %}{% if resume.user_phone %} · {{ resume.user_phone }}{% endif %}
 
 {% if resume.active_summary %}
 ### Summary

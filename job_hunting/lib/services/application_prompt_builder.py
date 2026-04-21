@@ -167,20 +167,39 @@ class ApplicationPromptBuilder:
     def build_from_career_data(
         self, context: CareerData, instructions: Optional[str] = ""
     ) -> str:
+        # Three top-level H1 sections. The frontend sectioned-view splits
+        # on "^# " boundaries, so each H1 becomes its own card + a nav
+        # entry: Resumes / Q&A / Cover Letters. Resumes-within-the-Resumes
+        # section stack inside a single card (one resume = one visual
+        # unit; the H3 sub-sections inside render as prose, not as
+        # separate cards).
         sections = []
-        sections.append(instructions)
-        sections.append("#Resumes")
-        for resume in context.resumes:
-            sections.append(self._resume_text(resume))
+        if instructions:
+            sections.append(instructions)
 
-        sections.append("#Prior Questions and Answers")
-        sections.append(self._qas_text(context.answers))
+        sections.append("# Resumes\n")
+        if context.resumes:
+            for resume in context.resumes:
+                sections.append(self._resume_text(resume))
+                sections.append("")  # blank line between resumes
+        else:
+            sections.append("_No resumes yet._")
 
-        sections.append("#Coverletters")
-        for cover_letter in context.cover_letters:
-            sections.append(cover_letter.content)
-            sections.append("")
-        return "\n".join(sections)
+        # Shorter title keeps the anchor-nav label tidy (the nav pill's
+        # width is bounded so labels don't jitter the cursor target).
+        sections.append("# Q&A\n")
+        qas = self._qas_text(context.answers)
+        sections.append(qas or "_No answered questions yet._")
+
+        sections.append("# Cover Letters\n")
+        if context.cover_letters:
+            for cover_letter in context.cover_letters:
+                sections.append(cover_letter.content or "")
+                sections.append("")
+        else:
+            sections.append("_No cover letters yet._")
+
+        return "\n".join(sections).strip() + "\n"
 
     def build(
         self,
