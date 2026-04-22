@@ -30,6 +30,7 @@ dependencies = [
     "docxtpl>=0.20.1",
     "docxcompose>=1.4.0",
     "pypdf>=5.0.0",
+    "pdfplumber>=0.11.0",
     # HTTP / scraping
     "httpx>=0.28.1",
     "requests>=2.32.5",

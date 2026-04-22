@@ -1340,6 +1340,50 @@ class ResumeViewSet(BaseViewSet):
             404: OpenApiResponse(description="Not found"),
         },
     )
+    @action(detail=True, methods=["post"], url_path="reorder-experiences")
+    def reorder_experiences(self, request, pk=None):
+        """
+        Reorder experiences within a resume in a single transaction.
+        Body: {"experience_ids": [3, 1, 2]}.
+        """
+        resume = Resume.objects.filter(pk=int(pk)).first()
+        if not resume:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and resume.user_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        raw = request.data.get("experience_ids")
+        if not isinstance(raw, list):
+            return Response(
+                {"errors": [{"detail": "experience_ids must be a list of ints"}]},
+                status=400,
+            )
+        try:
+            ids = [int(i) for i in raw]
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "experience_ids must be a list of ints"}]},
+                status=400,
+            )
+
+        rows = {
+            re.experience_id: re
+            for re in ResumeExperience.objects.filter(resume_id=resume.id)
+        }
+        if set(ids) != set(rows.keys()):
+            return Response(
+                {"errors": [{"detail": "experience_ids must match this resume's experiences exactly"}]},
+                status=400,
+            )
+
+        for i, exp_id in enumerate(ids):
+            row = rows[exp_id]
+            if row.order != i:
+                row.order = i
+                row.save(update_fields=["order"])
+
+        return Response({"data": {"experience_ids": ids}}, status=200)
+
     @action(detail=True, methods=["post"], url_path="clone")
     def clone(self, request, pk=None):
         obj = Resume.objects.filter(pk=int(pk)).first()

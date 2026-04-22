@@ -1,10 +1,11 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from typing import Optional
 from pydantic import Field
 from pydantic_ai import Agent
 from enum import Enum
 
+import calendar
 import json
 import re
 import os
@@ -28,6 +29,144 @@ from job_hunting.models import ResumeSkill
 from job_hunting.models import ResumeSummary
 from job_hunting.models import Skill
 from job_hunting.models import Description, Summary, Company
+
+
+RESUME_EXTRACTION_PROMPT = """You extract structured data from a resume.
+
+Strict rules — violations degrade user trust:
+
+1. ORDER. Preserve the order items appear on the resume. The first experience
+   on the page is index 0. Bullets keep their source order within each
+   experience. Never reorder bullets or experiences "chronologically" — you
+   don't have enough context and the user's source is the source of truth.
+
+2. BULLET ASSOCIATION. Every bullet belongs to the experience (or project)
+   that immediately precedes it. Never move a bullet to a different
+   experience. If you are uncertain which experience a bullet belongs to,
+   attach it to the preceding one — do not guess, do not merge across
+   sections.
+
+3. VERBATIM BULLETS. Copy each bullet verbatim (trim surrounding whitespace
+   only). Do not merge, split, paraphrase, or invent bullets.
+
+4. DATES. Emit dates strictly as YYYY-MM, or YYYY when only a year is
+   available, or the literal string "present" for an ongoing position. If
+   the source is a range like "Jan 2020 – Mar 2022" or "2018 - 2020", split
+   it into start_date and end_date. If a field is not present on the
+   resume, omit it — do not fabricate.
+
+5. COMPANY NAMES. Use exactly the company name as written. Do not expand
+   acronyms, do not add "Inc." or "LLC" if the resume doesn't.
+
+6. PAGE BREAKS. The text may contain "--- PAGE BREAK ---" markers. Treat
+   these as invisible — experiences commonly cross page breaks. A bullet
+   after a page break still belongs to the experience whose header was
+   before the break.
+
+7. OMIT UNKNOWNS. When a field is not on the resume, leave it unset. Do
+   not invent summaries, titles, or dates."""
+
+
+# Accepts: "Jan", "January" → 1 ; etc. Case-insensitive.
+_MONTH_TO_NUM: dict[str, int] = {
+    **{m.lower(): i for i, m in enumerate(calendar.month_abbr) if m},
+    **{m.lower(): i for i, m in enumerate(calendar.month_name) if m},
+    # Common non-standard abbreviation
+    "sept": 9,
+}
+
+
+# Range separator — must not match the plain hyphen inside ISO dates like
+# "2020-05-15" or "12-2020". Spaces around a hyphen DO indicate a range,
+# and en-/em-dash always indicates one.
+_RANGE_SEPARATORS = re.compile(
+    r"(?:\s+to\s+|\s+-\s+|\s*[–—]\s*)", re.IGNORECASE
+)
+
+
+def _canonicalize_date_string(value: Optional[str]) -> Optional[str]:
+    """
+    Normalize a single date token to 'YYYY-MM' / 'YYYY' / 'present' / None.
+
+    Accepts (case-insensitive, stripped):
+      2020                    → "2020"
+      2020-01 / 2020-1        → "2020-01"
+      2020-01-15              → "2020-01"
+      Jan 2020 / January 2020 → "2020-01"
+      01/2020 / 1-2020        → "2020-01"
+      Present / Now / Current → "present"
+
+    If value contains a range separator ("2018 - 2020"), returns the
+    canonicalized first half only. Callers can detect the range elsewhere.
+
+    Returns None for empty input or unrecognized formats.
+    """
+    if value is None:
+        return None
+    v = str(value).strip()
+    if not v:
+        return None
+    if v.lower() in ("present", "now", "current", "ongoing"):
+        return "present"
+
+    # If it's a range, take the first half.
+    parts = _RANGE_SEPARATORS.split(v, maxsplit=1)
+    if len(parts) == 2 and parts[1].strip():
+        first = _canonicalize_date_string(parts[0])
+        return first
+
+    # YYYY / YYYY-MM / YYYY-MM-DD
+    m = re.match(r"^(\d{4})(?:[-/](\d{1,2})(?:[-/](\d{1,2}))?)?$", v)
+    if m:
+        year = int(m.group(1))
+        if m.group(2):
+            month = int(m.group(2))
+            if 1 <= month <= 12:
+                return f"{year:04d}-{month:02d}"
+            return None
+        return f"{year:04d}"
+
+    # MM/YYYY or M-YYYY
+    m = re.match(r"^(\d{1,2})[-/](\d{4})$", v)
+    if m:
+        month = int(m.group(1))
+        year = int(m.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+
+    # Month-name YYYY, with optional day
+    m = re.match(
+        r"^([A-Za-z]{3,9})\.?\s+(?:(\d{1,2}),?\s+)?(\d{4})$", v
+    )
+    if m:
+        month_num = _MONTH_TO_NUM.get(m.group(1).lower())
+        if month_num:
+            return f"{int(m.group(3)):04d}-{month_num:02d}"
+
+    # YYYY Month-name
+    m = re.match(r"^(\d{4})\s+([A-Za-z]{3,9})\.?$", v)
+    if m:
+        month_num = _MONTH_TO_NUM.get(m.group(2).lower())
+        if month_num:
+            return f"{int(m.group(1)):04d}-{month_num:02d}"
+
+    return None
+
+
+def _split_date_range(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Split a string that may contain a date range into (start, end).
+    Canonicalizes each half. Returns (None, None) for empty input.
+    """
+    if value is None:
+        return (None, None)
+    v = str(value).strip()
+    if not v:
+        return (None, None)
+    parts = _RANGE_SEPARATORS.split(v, maxsplit=1)
+    if len(parts) == 2 and parts[1].strip():
+        return (_canonicalize_date_string(parts[0]), _canonicalize_date_string(parts[1]))
+    return (_canonicalize_date_string(v), None)
 
 
 class SkillTag(Enum):
@@ -84,14 +223,38 @@ class SkillOut(BaseModel):
             )
 
 
+def _normalize_date_field(cls, value):  # noqa: ARG001
+    if value is None:
+        return None
+    return _canonicalize_date_string(value)
+
+
 class ExperienceOut(BaseModel):
     title: Optional[str] = None
     company: CompanyOut
     summary: Optional[str]
-    start_date: Optional[str] = None  # Expect "YYYY-MM" or "YYYY" or "present"
-    end_date: Optional[str] = None  # Same
+    start_date: Optional[str] = None  # Canonicalized to "YYYY-MM" / "YYYY" / "present"
+    end_date: Optional[str] = None
     location: Optional[str] = None
     bullets: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _split_range_when_end_missing(cls, data):
+        # If the LLM packed a whole range into start_date and left end_date
+        # empty, recover both halves before per-field canonicalization runs.
+        if isinstance(data, dict):
+            start = data.get("start_date")
+            end = data.get("end_date")
+            if start and not end:
+                s, e = _split_date_range(start)
+                if e:
+                    data["start_date"] = s
+                    data["end_date"] = e
+        return data
+
+    _norm_start = field_validator("start_date", mode="before")(_normalize_date_field)
+    _norm_end = field_validator("end_date", mode="before")(_normalize_date_field)
 
 
 class EducationOut(BaseModel):
@@ -101,6 +264,8 @@ class EducationOut(BaseModel):
     minor: Optional[str] = None
     issue_date: Optional[str] = None
 
+    _norm_issue = field_validator("issue_date", mode="before")(_normalize_date_field)
+
 
 class ProjectOut(BaseModel):
     title: str
@@ -109,12 +274,30 @@ class ProjectOut(BaseModel):
     bullets: list[str] = Field(default_factory=list)
     tech: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _split_range_when_end_missing(cls, data):
+        if isinstance(data, dict):
+            start = data.get("start_date")
+            end = data.get("end_date")
+            if start and not end:
+                s, e = _split_date_range(start)
+                if e:
+                    data["start_date"] = s
+                    data["end_date"] = e
+        return data
+
+    _norm_start = field_validator("start_date", mode="before")(_normalize_date_field)
+    _norm_end = field_validator("end_date", mode="before")(_normalize_date_field)
+
 
 class CertificationsOut(BaseModel):
     title: str
     issuer: Optional[str] = None
     issue_date: Optional[str] = None
     content: str = Field(...)
+
+    _norm_issue = field_validator("issue_date", mode="before")(_normalize_date_field)
 
 
 class SummaryOut(BaseModel):
@@ -245,25 +428,45 @@ class IngestResume:
 
     def extract_text_from_pdf(self, source):
         """
-        Extract text from a PDF via pypdf. Handles path (str) or blob (bytes-like).
-        Returns plain text (one page per blank-line-separated block).
+        Extract text from a PDF. Prefer pdfplumber (layout-aware, better on
+        multi-column resumes); fall back to pypdf if pdfplumber errors.
+        Pages are joined with an explicit "--- PAGE BREAK ---" marker so the
+        LLM can treat it as invisible rather than a content boundary.
         """
         import io
-        from pypdf import PdfReader
+
+        blob_data: Optional[bytes] = None
+        path: Optional[str] = None
 
         if isinstance(source, str):
             if not os.path.exists(source):
                 raise ValueError(f"File not found: {source}")
-            reader = PdfReader(source)
+            path = source
         else:
             blob_data = source.read() if hasattr(source, "read") else source
-            reader = PdfReader(io.BytesIO(blob_data))
 
+        assert path is not None or blob_data is not None
         try:
-            pages = [page.extract_text() or "" for page in reader.pages]
-        except Exception as e:
-            raise RuntimeError(f"Failed to extract text from PDF: {e}") from e
-        return "\n\n".join(pages)
+            import pdfplumber
+
+            opener = (
+                pdfplumber.open(path)
+                if path
+                else pdfplumber.open(io.BytesIO(blob_data or b""))
+            )
+            with opener as pdf:
+                pages = [page.extract_text() or "" for page in pdf.pages]
+            return "\n\n--- PAGE BREAK ---\n\n".join(pages)
+        except Exception:
+            # Fallback: pypdf — lossier, but always installed.
+            from pypdf import PdfReader
+
+            reader = PdfReader(path) if path else PdfReader(io.BytesIO(blob_data or b""))
+            try:
+                pages = [page.extract_text() or "" for page in reader.pages]
+            except Exception as e:
+                raise RuntimeError(f"Failed to extract text from PDF: {e}") from e
+            return "\n\n--- PAGE BREAK ---\n\n".join(pages)
 
     def _extract_text(self, source, resume_name=None):
         """Dispatch to the right extractor based on filename/path extension."""
@@ -329,7 +532,7 @@ class IngestResume:
                 ResumeSummary.ensure_single_active_for_resume(self.db_resume.id)
 
         print("Creating experiences...")
-        for exp_data in (parsed_resume.experiences or []):
+        for exp_idx, exp_data in enumerate(parsed_resume.experiences or []):
             # exp_data.company may be a CompanyOut pydantic model, a dict, or a plain string.
             comp = getattr(exp_data, "company", None)
             company_name = None
@@ -345,13 +548,14 @@ class IngestResume:
                     company_name = getattr(comp, "name", None) or ""
                     company_display = getattr(comp, "display_name", None)
 
-            # Ensure a Company record exists (Company.name is non-nullable).
+            # Company is shared across all users — get_or_create is correct here.
             company, _ = Company.objects.get_or_create(
                 name=company_name, defaults={"display_name": company_display}
             )
 
-            print(f"company: {company.name}")
-            experience, _ = Experience.objects.get_or_create(
+            # Experience and its bullets belong to this resume — do NOT
+            # get_or_create, or bullets from unrelated resumes can attach.
+            experience = Experience.objects.create(
                 title=exp_data.title,
                 company_id=company.id if company else None,
                 start_date=self.parse_date(exp_data.start_date),
@@ -359,18 +563,18 @@ class IngestResume:
                 location=exp_data.location,
             )
 
-            print("*" * 88)
-            ResumeExperience.objects.get_or_create(
-                resume_id=self.db_resume.id, experience_id=experience.id
+            ResumeExperience.objects.create(
+                resume_id=self.db_resume.id,
+                experience_id=experience.id,
+                order=exp_idx,
             )
-            print("*" * 88)
 
-            # Create experience descriptions
-            for bullet in (exp_data.bullets or []):
-                print(bullet)
-                desc, _ = Description.objects.get_or_create(content=bullet)
-                ExperienceDescription.objects.get_or_create(
-                    experience_id=experience.id, description_id=desc.id
+            for bullet_idx, bullet in enumerate(exp_data.bullets or []):
+                desc = Description.objects.create(content=bullet)
+                ExperienceDescription.objects.create(
+                    experience_id=experience.id,
+                    description_id=desc.id,
+                    order=bullet_idx,
                 )
 
         print("Creating education...")
@@ -395,18 +599,18 @@ class IngestResume:
             )
             project.save()
 
-            # Associate project with resume
-            ResumeProject.objects.get_or_create(
+            ResumeProject.objects.create(
                 resume_id=self.db_resume.id,
                 project_id=project.id,
-                defaults={"order": idx},
+                order=idx,
             )
 
-            # Create project descriptions
-            for bullet in (proj_data.bullets or []):
-                desc, _ = Description.objects.get_or_create(content=bullet)
-                ProjectDescription.objects.get_or_create(
-                    project_id=project.id, description_id=desc.id
+            for bullet_idx, bullet in enumerate(proj_data.bullets or []):
+                desc = Description.objects.create(content=bullet)
+                ProjectDescription.objects.create(
+                    project_id=project.id,
+                    description_id=desc.id,
+                    order=bullet_idx,
                 )
 
         print("Creating certifications...")
@@ -456,12 +660,18 @@ class IngestResume:
         if os.getenv("ANTHROPIC_API_KEY"):
             from pydantic_ai.models.anthropic import AnthropicModel
             model = AnthropicModel("claude-sonnet-4-6")
-            return Agent(model, output_type=ParsedResume)
+            return Agent(
+                model, output_type=ParsedResume, system_prompt=RESUME_EXTRACTION_PROMPT
+            )
 
         if os.getenv("OPENAI_API_KEY"):
             try:
                 model = OpenAIModel("gpt-5")
-                return Agent(model, output_type=ParsedResume)
+                return Agent(
+                    model,
+                    output_type=ParsedResume,
+                    system_prompt=RESUME_EXTRACTION_PROMPT,
+                )
             except Exception:
                 pass
 
@@ -470,7 +680,11 @@ class IngestResume:
             model_name="qwen3-coder",
             provider=OllamaProvider(base_url=ollama_base),
         )
-        return Agent(ollama_model, output_type=ParsedResume)
+        return Agent(
+            ollama_model,
+            output_type=ParsedResume,
+            system_prompt=RESUME_EXTRACTION_PROMPT,
+        )
 
     def _agent_from_spec(self, spec: str):
         """Parse 'provider:model_name' and return an Agent."""
@@ -481,37 +695,46 @@ class IngestResume:
 
         if provider == "anthropic":
             from pydantic_ai.models.anthropic import AnthropicModel
-            return Agent(AnthropicModel(model_name), output_type=ParsedResume)
+            return Agent(
+                AnthropicModel(model_name),
+                output_type=ParsedResume,
+                system_prompt=RESUME_EXTRACTION_PROMPT,
+            )
         elif provider == "openai":
-            return Agent(OpenAIModel(model_name), output_type=ParsedResume)
+            return Agent(
+                OpenAIModel(model_name),
+                output_type=ParsedResume,
+                system_prompt=RESUME_EXTRACTION_PROMPT,
+            )
         elif provider == "ollama":
             ollama_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1")
             model = OpenAIChatModel(
                 model_name=model_name,
                 provider=OllamaProvider(base_url=ollama_base),
             )
-            return Agent(model, output_type=ParsedResume)
+            return Agent(
+                model,
+                output_type=ParsedResume,
+                system_prompt=RESUME_EXTRACTION_PROMPT,
+            )
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
     def parse_date(self, value: Optional[str]) -> Optional[date]:
         """
-        Parse date strings like 'YYYY', 'YYYY-MM', 'YYYY-MM-DD'.
-        Treat 'present', 'now', 'current' as None (open-ended).
-        Returns a datetime.date or None.
+        Parse a date token to a datetime.date, or None for empty / 'present' /
+        unrecognized. Accepts the canonical forms produced by
+        _canonicalize_date_string plus the raw strings that function accepts.
         """
-        if not value:
+        canonical = _canonicalize_date_string(value)
+        if not canonical or canonical == "present":
             return None
-        v = str(value).strip()
-        if v.lower() in ("present", "now", "current"):
+        m = re.match(r"^(\d{4})(?:-(\d{2}))?$", canonical)
+        if not m:
             return None
-        m = re.match(r"^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$", v)
-        if m:
-            year = int(m.group(1))
-            month = int(m.group(2)) if m.group(2) else 1
-            day = int(m.group(3)) if m.group(3) else 1
-            try:
-                return date(year, month, day)
-            except ValueError:
-                return None
-        return None
+        year = int(m.group(1))
+        month = int(m.group(2)) if m.group(2) else 1
+        try:
+            return date(year, month, 1)
+        except ValueError:
+            return None
