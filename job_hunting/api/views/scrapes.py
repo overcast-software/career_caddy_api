@@ -28,6 +28,7 @@ from job_hunting.models import (
     Scrape,
     ScrapeProfile,
 )
+from job_hunting.lib.services.application_flow import _is_thin_description
 
 logger = logging.getLogger(__name__)
 
@@ -513,16 +514,53 @@ class ScrapeViewSet(BaseViewSet):
         """Create a Scrape with job_content pre-filled from pasted text and
         kick off parse_scrape directly. No browser fetch, no hold-poller —
         status='pending' transitions through 'extracting' → terminal inside
-        the daemon thread parse_scrape spawns."""
+        the daemon thread parse_scrape spawns.
+
+        Short-circuits with 409 when `link` already maps to a non-stub
+        JobPost — re-parsing a fully-extracted post wastes an LLM call
+        and loses the user's existing data. Stubs (thin/empty
+        description) still pass through so parse_scrape can upgrade
+        them in place. Set `force=true` in the body to override.
+        """
         data = request.data if isinstance(request.data, dict) else {}
         text = (data.get("text") or "").strip()
         link = (data.get("link") or "").strip() or None
+        force = bool(data.get("force"))
 
         if not text:
             return Response(
                 {"errors": [{"detail": "text is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if link and not force:
+            existing = JobPost.objects.filter(link=link).first()
+            if existing and not _is_thin_description(existing):
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "status": "409",
+                                "code": "duplicate_job_post",
+                                "detail": (
+                                    "A job post with this link already exists. "
+                                    "Open it, or re-submit with force=true to re-parse."
+                                ),
+                                "meta": {
+                                    "job_post_id": existing.id,
+                                    "title": existing.title,
+                                    "company_name": (
+                                        existing.company.name
+                                        if existing.company_id
+                                        else None
+                                    ),
+                                    "link": existing.link,
+                                },
+                            }
+                        ]
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         scrape = Scrape.objects.create(
             url=link,

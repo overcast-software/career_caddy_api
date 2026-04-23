@@ -85,6 +85,13 @@ class BaseSerializer:
     type: str
     model: Any
     attributes: List[str] = []
+    # Subset of `attributes` that the serializer outputs in to_resource()
+    # but refuses to accept on input. Use for derived/computed properties
+    # (e.g. Scrape.latest_status_note) that have no setter — without this
+    # filter, _upsert calls setattr(obj, name, val) and crashes with
+    # "property has no setter". Frontend round-trip saves still work
+    # because the field is silently dropped from the inbound payload.
+    read_only_attributes: List[str] = []
     relationships: Dict[str, Dict[str, Any]] = {}
     relationship_fks: Dict[str, str] = {}
     # Subclasses can declare which attributes to expose when slim=True.
@@ -252,8 +259,9 @@ class BaseSerializer:
         attrs_in = data.get("attributes", {}) or {}
         out: Dict[str, Any] = {}
 
+        read_only = set(self.read_only_attributes)
         for k in self.attributes:
-            if k in attrs_in:
+            if k in attrs_in and k not in read_only:
                 out[k] = attrs_in[k]
         rels = data.get("relationships", {}) or {}
         for rel_name, fk_field in self.relationship_fks.items():
@@ -475,7 +483,8 @@ class ResumeSerializer(BaseSerializer):
                 .order_by("order")
                 .values_list("experience_id", flat=True)
             )
-            return "experience", list(Experience.objects.filter(pk__in=exp_ids))
+            by_id = {e.id: e for e in Experience.objects.filter(pk__in=exp_ids)}
+            return "experience", [by_id[i] for i in exp_ids if i in by_id]
         elif rel_name == "educations":
             edu_ids = list(
                 ResumeEducation.objects.filter(resume_id=obj.id)
@@ -500,7 +509,8 @@ class ResumeSerializer(BaseSerializer):
                 .order_by("order")
                 .values_list("project_id", flat=True)
             )
-            return "project", list(Project.objects.filter(pk__in=project_ids))
+            by_id = {p.id: p for p in Project.objects.filter(pk__in=project_ids)}
+            return "project", [by_id[i] for i in project_ids if i in by_id]
         elif rel_name == "certifications":
             cert_ids = list(
                 ResumeCertification.objects.filter(resume_id=obj.id)
@@ -633,6 +643,10 @@ class ScrapeSerializer(BaseSerializer):
         "apply_url",
         "apply_url_status",
     ]
+    # latest_status_note is a derived @property on Scrape with no setter —
+    # output it but reject it on PATCH so frontend round-trips don't 500
+    # with "property has no setter".
+    read_only_attributes = ["latest_status_note"]
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "company": {"attr": "company", "type": "company", "uselist": False},
@@ -839,24 +853,32 @@ class ExperienceSerializer(BaseSerializer):
     relationship_fks = {"company": "company_id"}
     linked_relationships = ["descriptions"]
 
+    def _resume_id_for(self, obj):
+        """Which resume this experience renders under, for order lookup."""
+        ctx = getattr(self, "_parent_context", None)
+        if ctx and ctx.get("parent_type") == "resume":
+            return ctx.get("parent_id")
+        try:
+            if getattr(obj, "resumes", None):
+                return obj.resumes[0].id
+        except Exception:
+            pass
+        return None
+
     def to_resource(self, obj):
         res = super().to_resource(obj)
         # Convenience link to related descriptions (non-relationships URL)
         res.setdefault("links", {})[
             "descriptions"
         ] = f"{_resource_base_path(self.type)}/{obj.id}/descriptions"
-        ctx = getattr(self, "_parent_context", None)
-        if ctx and ctx.get("parent_type") == "resume":
-            res.setdefault("attributes", {})["resume_id"] = ctx.get("parent_id")
-        else:
-            rid = None
-            try:
-                if getattr(obj, "resumes", None):
-                    rid = obj.resumes[0].id
-            except Exception:
-                rid = None
-            if rid is not None:
-                res.setdefault("attributes", {})["resume_id"] = rid
+        rid = self._resume_id_for(obj)
+        if rid is not None:
+            res.setdefault("attributes", {})["resume_id"] = rid
+            row = ResumeExperience.objects.filter(
+                resume_id=rid, experience_id=obj.id
+            ).first()
+            if row is not None:
+                res.setdefault("attributes", {})["order"] = row.order
         return res
 
     def parse_payload(self, payload):

@@ -286,6 +286,7 @@ class JobPostViewSet(BaseViewSet):
                 | Q(description__icontains=query_filter)
                 | Q(company__name__icontains=query_filter)
                 | Q(company__display_name__icontains=query_filter)
+                | Q(link__icontains=query_filter)
             ).distinct()
 
         sort_param = request.query_params.get("sort")

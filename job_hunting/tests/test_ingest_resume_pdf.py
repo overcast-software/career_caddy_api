@@ -41,7 +41,9 @@ class TestIngestResumePdf(unittest.TestCase):
 
     def test_extract_text_from_pdf_blob(self):
         result = IngestResume().extract_text_from_pdf(b"%PDF-1.4 fake")
-        self.assertEqual(result, "# PDF Resume\n\nSecond page body.")
+        self.assertEqual(
+            result, "# PDF Resume\n\n--- PAGE BREAK ---\n\nSecond page body."
+        )
         # Reader was constructed with a BytesIO wrapper, not the raw bytes
         call_arg = self.reader_class.call_args[0][0]
         self.assertTrue(hasattr(call_arg, "read"))
@@ -52,7 +54,9 @@ class TestIngestResumePdf(unittest.TestCase):
             pdf_path = t.name
         try:
             result = IngestResume().extract_text_from_pdf(pdf_path)
-            self.assertEqual(result, "# PDF Resume\n\nSecond page body.")
+            self.assertEqual(
+            result, "# PDF Resume\n\n--- PAGE BREAK ---\n\nSecond page body."
+        )
             self.reader_class.assert_called_once_with(pdf_path)
             self.assertTrue(os.path.exists(pdf_path))
         finally:

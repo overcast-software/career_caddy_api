@@ -87,6 +87,48 @@ class ExperienceViewSet(BaseViewSet):
         Experience.objects.filter(pk=int(pk)).delete()
         return Response(status=204)
 
+    @action(detail=True, methods=["post"], url_path="reorder-descriptions")
+    def reorder_descriptions(self, request, pk=None):
+        """
+        Reorder descriptions under this experience in one transaction.
+        Body: {"description_ids": [3, 1, 2]}.
+        """
+        exp = self._owned_qs(request).filter(pk=int(pk)).first()
+        if not exp:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        raw = request.data.get("description_ids")
+        if not isinstance(raw, list):
+            return Response(
+                {"errors": [{"detail": "description_ids must be a list of ints"}]},
+                status=400,
+            )
+        try:
+            ids = [int(i) for i in raw]
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "description_ids must be a list of ints"}]},
+                status=400,
+            )
+
+        rows = {
+            ed.description_id: ed
+            for ed in ExperienceDescription.objects.filter(experience_id=exp.id)
+        }
+        if set(ids) != set(rows.keys()):
+            return Response(
+                {"errors": [{"detail": "description_ids must match this experience's descriptions exactly"}]},
+                status=400,
+            )
+
+        for i, did in enumerate(ids):
+            row = rows[did]
+            if row.order != i:
+                row.order = i
+                row.save(update_fields=["order"])
+
+        return Response({"data": {"description_ids": ids}}, status=200)
+
     @extend_schema(
         tags=["Experiences"],
         summary="List descriptions for an experience",
