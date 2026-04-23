@@ -13,6 +13,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from urllib.parse import urlparse
 
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
+from job_hunting.lib.services.application_flow import _is_thin_description
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 from job_hunting.models import Company, JobPost, Scrape
 
@@ -75,6 +76,13 @@ class JobPostExtractor:
         # None = tier 0 not attempted; True = tier 0 produced data;
         # False = tier 0 selectors present but didn't match required fields.
         self.last_tier0_hit: Optional[bool] = None
+        # Outcome of the most recent parse, used to shape the completion status
+        # note so the frontend can branch flash messaging:
+        #   "created"       — new JobPost inserted
+        #   "updated_stub"  — existing thin-description post upgraded in place
+        #   "duplicate"     — existing full-description post hit; scrape linked
+        #                     but no fields overwritten
+        self.last_outcome: Optional[str] = None
 
     def parse(self, scrape: Scrape, user=None, force: bool = False) -> bool:
         """Run extraction; return True if a valid JobPost was produced.
@@ -129,6 +137,7 @@ class JobPostExtractor:
         return (value or "").strip().lower() in self._PLACEHOLDER_NAMES
 
     def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None, force: bool = False) -> bool:
+        self.last_outcome = "created"
         if self._is_placeholder(validated_data.title):
             logger.warning("Scrape %s: extracted title is a placeholder (%r), skipping", scrape.id, validated_data.title)
             scrape.status = "failed"
@@ -200,10 +209,35 @@ class JobPostExtractor:
                 if update_fields:
                     job.save(update_fields=update_fields)
 
-        # Prefer link-based lookup since link is unique
+        # Prefer link-based lookup since link is unique. Branch on
+        # stub-vs-full: a thin-description hit is safe to overwrite
+        # ("upgrade the stub"); a full-description hit is a duplicate
+        # and should keep its existing data intact.
+        link_hit = None
         if job is None and link:
-            job = JobPost.objects.filter(link=link).first()
-        if job is None:
+            link_hit = JobPost.objects.filter(link=link).first()
+        if link_hit is not None:
+            job = link_hit
+            if _is_thin_description(link_hit):
+                self.last_outcome = "updated_stub"
+                update_fields = []
+                if validated_data.title and job.title != validated_data.title:
+                    job.title = validated_data.title
+                    update_fields.append("title")
+                if not job.company_id and company is not None:
+                    job.company = company
+                    update_fields.append("company_id")
+                for field, value in job_defaults.items():
+                    if value is None or field == "created_by":
+                        continue
+                    if getattr(job, field) != value:
+                        setattr(job, field, value)
+                        update_fields.append(field)
+                if update_fields:
+                    job.save(update_fields=update_fields)
+            else:
+                self.last_outcome = "duplicate"
+        elif job is None:
             job, _ = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company=company,
@@ -491,7 +525,16 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
             logger.debug("Failed to update scrape profile", exc_info=True)
 
         if success:
-            _log_scrape_status(scrape_id, "completed", note="Parsed successfully")
+            outcome = getattr(parser, "last_outcome", None) or "created"
+            scrape.refresh_from_db(fields=["job_post_id"])
+            jp_id = scrape.job_post_id
+            if outcome == "duplicate" and jp_id:
+                note = f"duplicate: existing JobPost #{jp_id}"
+            elif outcome == "updated_stub" and jp_id:
+                note = f"updated_stub: upgraded JobPost #{jp_id}"
+            else:
+                note = "Parsed successfully"
+            _log_scrape_status(scrape_id, "completed", note=note)
         else:
             try:
                 _log_scrape_status(scrape_id, "failed", note="Extraction failed")

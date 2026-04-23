@@ -629,6 +629,7 @@ class ScrapeSerializer(BaseSerializer):
         "scraped_at",
         "status",
         "html",
+        "latest_status_note",
         "apply_url",
         "apply_url_status",
     ]
