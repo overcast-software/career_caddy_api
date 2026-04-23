@@ -626,6 +626,7 @@ class ScrapeSerializer(BaseSerializer):
         "scraped_at",
         "status",
         "html",
+        "latest_status_note",
     ]
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},

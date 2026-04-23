@@ -108,6 +108,68 @@ class TestProcessEvaluation(TestCase):
         self.scrape.refresh_from_db()
         self.assertEqual(self.scrape.job_post_id, existing_job.id)
 
+    def test_non_stub_link_hit_is_duplicate_not_overwritten(self):
+        """Non-stub JobPost at the same link: link the scrape, don't overwrite."""
+        company = Company.objects.create(name="Acme Corp")
+        rich_desc = "This is a full job posting. " * 20  # 100 words, non-stub
+        existing = JobPost.objects.create(
+            title="Original Title",
+            company=company,
+            link="https://example.com/job/1",
+            description=rich_desc,
+            location="Original HQ",
+            created_by=self.user,
+        )
+
+        self.parsed_data.description = "Replacement description"
+        self.parsed_data.location = "Replacement Location"
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        self.assertEqual(extractor.last_outcome, "duplicate")
+        existing.refresh_from_db()
+        self.assertEqual(existing.title, "Original Title")
+        self.assertEqual(existing.description, rich_desc)
+        self.assertEqual(existing.location, "Original HQ")
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.job_post_id, existing.id)
+
+    def test_stub_link_hit_is_upgraded(self):
+        """Stub JobPost at the same link: overwrite its fields in place."""
+        company = Company.objects.create(name="Acme Corp")
+        existing = JobPost.objects.create(
+            title="Stub Title",
+            company=company,
+            link="https://example.com/job/1",
+            description="short",  # < 60 words → stub
+            created_by=self.user,
+        )
+
+        self.parsed_data.title = "Real Title"
+        self.parsed_data.description = (
+            "Full description with enough words to clear the stub threshold. "
+            * 10
+        )
+        self.parsed_data.location = "Remote"
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        self.assertEqual(extractor.last_outcome, "updated_stub")
+        existing.refresh_from_db()
+        self.assertEqual(existing.title, "Real Title")
+        self.assertIn("Full description", existing.description)
+        self.assertEqual(existing.location, "Remote")
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.job_post_id, existing.id)
+
+    def test_fresh_create_outcome(self):
+        """No existing link match → outcome=created."""
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+        self.assertEqual(extractor.last_outcome, "created")
+
 
 class TestParseScrape(TestCase):
     """Test parse_scrape orchestration function."""
@@ -182,6 +244,32 @@ class TestParseScrape(TestCase):
         self.scrape.refresh_from_db()
         job = JobPost.objects.get(pk=self.scrape.job_post_id)
         self.assertEqual(job.created_by, self.user)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_duplicate_link_writes_duplicate_status_note(self, mock_analyze):
+        """parse_scrape tags the completion note so the frontend can branch."""
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Acme Corp",
+            description="Replacement description",
+        )
+        company = Company.objects.create(name="Acme Corp")
+        rich_desc = "This is a full job posting. " * 20
+        existing = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            link="https://example.com/job/1",
+            description=rich_desc,
+            created_by=self.user,
+        )
+
+        parse_scrape(self.scrape.id, user_id=self.user.id, sync=True)
+
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.job_post_id, existing.id)
+        latest = self.scrape.scrape_statuses.order_by("-id").first()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.note, f"duplicate: existing JobPost #{existing.id}")
 
 
 class TestUpdateScrapeProfile(TestCase):
