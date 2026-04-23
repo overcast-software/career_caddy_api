@@ -54,6 +54,10 @@ from .reports import (
     sources_report,
     report_filter_options,
 )
+from .graph import (
+    graph_structure,
+    graph_aggregate,
+)
 
 __all__ = [
     # ViewSets
@@ -102,4 +106,6 @@ __all__ = [
     "application_flow_report",
     "sources_report",
     "report_filter_options",
+    "graph_structure",
+    "graph_aggregate",
 ]

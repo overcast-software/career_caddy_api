@@ -111,12 +111,15 @@ class JobPostExtractor:
             or _DEFAULT_PARSER_MODEL
         )
 
-    def get_agent(self):
-        if self.agent:
-            return self.agent
+    def _build_agent_for_model(self, model_name: str) -> "Agent":
+        """Construct a pydantic-ai Agent bound to the given model spec.
 
-        model_name = self._resolve_model_name()
-
+        Accepts pydantic-ai `provider:model` notation (`openai:…`,
+        `anthropic:…`, `ollama:…`) — strips known prefixes so the
+        underlying SDK gets the bare name. Used directly by the
+        scrape-graph's Tier1/2/3 nodes when they need to escalate
+        without reusing the cached default agent.
+        """
         if model_name.startswith("ollama:"):
             ollama_model_name = model_name.split(":", 1)[1]
             model = OpenAIChatModel(
@@ -126,16 +129,16 @@ class JobPostExtractor:
                 ),
             )
         else:
-            # pydantic-ai style "provider:model" spec (e.g. openai:gpt-4o-mini).
-            # OpenAIResponsesModel wants just the model name — strip any
-            # provider prefix we recognize. This matches the ollama branch
-            # above and lets users set a uniform CADDY_DEFAULT_MODEL across
-            # agents without per-agent fork logic.
             if model_name.startswith("openai:"):
                 model_name = model_name.split(":", 1)[1]
             model = OpenAIResponsesModel(model_name)
+        return Agent(model, output_type=ParsedJobData)
 
-        self.agent = Agent(model, output_type=ParsedJobData)
+    def get_agent(self):
+        """Return (and cache) the default agent resolved from env."""
+        if self.agent:
+            return self.agent
+        self.agent = self._build_agent_for_model(self._resolve_model_name())
         return self.agent
 
     _PLACEHOLDER_NAMES = {"n/a", "na", "unknown", "none", "tbd", "not specified", ""}
@@ -387,7 +390,16 @@ class JobPostExtractor:
             logger.debug("Tier 0 extraction failed", exc_info=True)
             return None, False
 
-    def analyze_with_ai(self, scrape: Scrape) -> ParsedJobData:
+    def analyze_with_ai(
+        self, scrape: Scrape, model_override: Optional[str] = None
+    ) -> ParsedJobData:
+        """Run LLM extraction against the scrape content.
+
+        `model_override` lets the scrape-graph's Tier1/2/3 nodes target
+        a specific model without mutating the cached default agent.
+        Legacy callers (parse_scrape) pass no override and get the
+        env-resolved default, preserving today's behavior.
+        """
         content = scrape.job_content or ""
         if not content and scrape.html:
             content = clean_html_to_markdown(scrape.html)
@@ -423,10 +435,14 @@ Content:
             },
         )
 
-        if self.agent is None:
-            self.agent = self.get_agent()
+        if model_override:
+            agent = self._build_agent_for_model(model_override)
+        else:
+            if self.agent is None:
+                self.agent = self.get_agent()
+            agent = self.agent
 
-        result = self.agent.run_sync(prompt)
+        result = agent.run_sync(prompt)
         self._record_usage(result, scrape)
         return result.output
 

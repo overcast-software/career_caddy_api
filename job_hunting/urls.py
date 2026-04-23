@@ -71,6 +71,8 @@ from job_hunting.api.views import (
     application_flow_report,
     sources_report,
     report_filter_options,
+    graph_structure,
+    graph_aggregate,
 )
 
 
@@ -166,6 +168,8 @@ urlpatterns = [
     path("api/v1/reports/sources/", sources_report, name="reports-sources"),
     path("api/v1/reports/activity/", activity_report, name="reports-activity"),
     path("api/v1/reports/filter-options/", report_filter_options, name="reports-filter-options"),
+    path("api/v1/admin/graph-structure/", graph_structure, name="graph-structure"),
+    path("api/v1/admin/graph-aggregate/", graph_aggregate, name="graph-aggregate"),
     path("api/v1/chat/", chat_proxy, name="chat"),
     path("api/v1/token/", UnthrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", UnthrottledTokenRefreshView.as_view(), name="token_refresh"),
