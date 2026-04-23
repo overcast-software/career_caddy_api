@@ -126,6 +126,13 @@ class JobPostExtractor:
                 ),
             )
         else:
+            # pydantic-ai style "provider:model" spec (e.g. openai:gpt-4o-mini).
+            # OpenAIResponsesModel wants just the model name — strip any
+            # provider prefix we recognize. This matches the ollama branch
+            # above and lets users set a uniform CADDY_DEFAULT_MODEL across
+            # agents without per-agent fork logic.
+            if model_name.startswith("openai:"):
+                model_name = model_name.split(":", 1)[1]
             model = OpenAIResponsesModel(model_name)
 
         self.agent = Agent(model, output_type=ParsedJobData)

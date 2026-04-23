@@ -43,6 +43,35 @@ class TestModelResolution(TestCase):
             name = extractor._resolve_model_name()
         self.assertEqual(name, "gpt-4o")
 
+    def test_get_agent_strips_openai_prefix(self):
+        """pydantic-ai uses 'provider:model' specs (openai:gpt-4o-mini).
+        OpenAIResponsesModel wants the bare model name — extractor must
+        strip any provider prefix before constructing."""
+        extractor = JobPostExtractor()
+        captured = {}
+
+        class _FakeModel:
+            def __init__(self, name):
+                captured["name"] = name
+
+        class _FakeAgent:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        env = {"CADDY_DEFAULT_MODEL": "openai:gpt-4o-mini"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch(
+                "job_hunting.lib.parsers.job_post_extractor.OpenAIResponsesModel",
+                _FakeModel,
+            ),
+            patch(
+                "job_hunting.lib.parsers.job_post_extractor.Agent", _FakeAgent
+            ),
+        ):
+            extractor.get_agent()
+        self.assertEqual(captured["name"], "gpt-4o-mini")
+
 
 class TestProcessEvaluation(TestCase):
     """Test JobPostExtractor.process_evaluation creates/links records correctly."""
