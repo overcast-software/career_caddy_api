@@ -45,8 +45,18 @@ def _set_scrape_status(scrape_id: int, status: str) -> None:
         logger.exception("_set_scrape_status failed scrape_id=%s status=%s", scrape_id, status)
 
 
-def _log_scrape_status(scrape_id: int, status_label: str, note: str = None) -> None:
-    """Update Scrape.status AND append a ScrapeStatus audit record."""
+def _log_scrape_status(
+    scrape_id: int,
+    status_label: str,
+    note: str = None,
+    graph_node: str = None,
+    graph_payload: dict = None,
+) -> None:
+    """Update Scrape.status AND append a ScrapeStatus audit record.
+
+    graph_node / graph_payload are populated by the scrape-graph
+    runner's tracing mixin; legacy callers leave them None.
+    """
     try:
         from job_hunting.models.scrape import Scrape
         from job_hunting.models.scrape_status import ScrapeStatus
@@ -62,6 +72,8 @@ def _log_scrape_status(scrape_id: int, status_label: str, note: str = None) -> N
             status=status_obj,
             logged_at=timezone.now(),
             note=note,
+            graph_node=graph_node,
+            graph_payload=graph_payload,
         )
 
         # Mark domain as requiring auth on login_failed

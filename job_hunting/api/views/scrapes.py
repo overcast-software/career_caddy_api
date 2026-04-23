@@ -543,6 +543,147 @@ class ScrapeViewSet(BaseViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    @action(detail=True, methods=["post"], url_path="persist-extraction")
+    def persist_extraction(self, request, pk=None):
+        """Accept an already-parsed ParsedJobData payload and run the
+        server-side persistence half of parse_scrape (dedup-by-link +
+        stub upgrade + posted_date fallback + JobPost create/update).
+
+        Body: {"data": {"attributes": {"title", "company_name",
+        "company_display_name?", "description?", "posted_date?",
+        "extraction_date?", "salary_min?", "salary_max?", "location?",
+        "remote?", "link?"}, "force?": bool}}
+
+        Called by the ai-side scrape-graph's PersistJobPost node. The
+        legacy parse_scrape still exists and still works — this just
+        lets ai/ do the extraction itself (pydantic-ai in ai/) and
+        hand the result to api/ for persistence.
+        """
+        scrape = Scrape.objects.filter(pk=pk).first()
+        if not scrape:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        # Ownership: the scrape's owner OR staff.
+        if not request.user.is_staff and scrape.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        body = request.data if isinstance(request.data, dict) else {}
+        attrs = (body.get("data") or {}).get("attributes") or body.get("attributes") or {}
+        force = bool(body.get("force") or attrs.get("force"))
+
+        from job_hunting.lib.parsers.job_post_extractor import (
+            JobPostExtractor,
+            ParsedJobData,
+        )
+
+        try:
+            validated = ParsedJobData(**{
+                k: v for k, v in attrs.items()
+                if k in ParsedJobData.model_fields
+            })
+        except Exception as exc:
+            return Response(
+                {"errors": [{"detail": f"Invalid ParsedJobData: {exc}"}]},
+                status=400,
+            )
+
+        extractor = JobPostExtractor()
+        user = scrape.created_by
+        ok = extractor.process_evaluation(scrape, validated, user=user, force=force)
+        scrape.refresh_from_db()
+        ser = self.get_serializer()
+        return Response(
+            {
+                "data": ser.to_resource(scrape),
+                "meta": {
+                    "persisted": ok,
+                    "outcome": getattr(extractor, "last_outcome", None),
+                    "job_post_id": scrape.job_post_id,
+                },
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+    @action(detail=True, methods=["post"], url_path="graph-transition")
+    def graph_transition(self, request, pk=None):
+        """Record a scrape-graph node transition as a ScrapeStatus row.
+
+        Body: {"graph_node": "Tier1Mini", "graph_payload": {...},
+        "note?": "free-form", "status?": "extracting"}
+
+        `status` is optional; when present the api resolves the Status
+        row by name (same lookup parse_scrape uses) and attaches it.
+        Called by the BaseNode tracing mixin from ai/ after every
+        node transition.
+        """
+        scrape = Scrape.objects.filter(pk=pk).first()
+        if not scrape:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and scrape.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        body = request.data if isinstance(request.data, dict) else {}
+        graph_node = body.get("graph_node")
+        graph_payload = body.get("graph_payload") or {}
+        note = body.get("note")
+        status_name = body.get("status")
+        if not graph_node:
+            return Response(
+                {"errors": [{"detail": "graph_node is required"}]},
+                status=400,
+            )
+
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(
+            scrape.id,
+            status_name or graph_node.lower(),
+            note=note,
+            graph_node=graph_node,
+            graph_payload=graph_payload,
+        )
+        return Response({"data": {"recorded": True}}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"], url_path="graph-trace")
+    def graph_trace(self, request, pk=None):
+        """Ordered ScrapeStatus rows with graph fields for the force-
+        layout UI. Includes the source_scrape chain so a tracker URL
+        and its canonical child render as one path."""
+        scrape = Scrape.objects.filter(pk=pk).first()
+        if not scrape:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and scrape.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        from job_hunting.models.scrape_status import ScrapeStatus
+        # Walk up source_scrape chain to the root so the trace includes
+        # the whole redirect story.
+        chain = [scrape]
+        cursor = scrape.source_scrape
+        while cursor and cursor.id not in {s.id for s in chain}:
+            chain.insert(0, cursor)
+            cursor = cursor.source_scrape
+        ids = [s.id for s in chain]
+        rows = list(
+            ScrapeStatus.objects
+            .filter(scrape_id__in=ids, graph_node__isnull=False)
+            .order_by("scrape_id", "created_at", "id")
+        )
+        data = [
+            {
+                "scrape_id": r.scrape_id,
+                "graph_node": r.graph_node,
+                "graph_payload": r.graph_payload,
+                "note": r.note,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+        return Response({
+            "data": data,
+            "meta": {
+                "chain": [{"id": s.id, "url": s.url, "source": s.source} for s in chain],
+            },
+        })
+
     @action(detail=True, methods=["get", "post"], url_path="screenshots")
     def screenshots(self, request, pk=None):
         """GET: list screenshot filenames. POST: upload a screenshot PNG."""
@@ -611,6 +752,8 @@ class ScrapeViewSet(BaseViewSet):
                     "logged_at": ss.logged_at.isoformat() if ss.logged_at else None,
                     "note": ss.note,
                     "created_at": ss.created_at.isoformat() if ss.created_at else None,
+                    "graph_node": ss.graph_node,
+                    "graph_payload": ss.graph_payload,
                 },
                 "relationships": {
                     "scrape": {"data": {"type": "scrape", "id": str(ss.scrape_id)}},
@@ -685,4 +828,42 @@ class ScrapeProfileViewSet(BaseViewSet):
         obj.save()
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path=r"(?P<hostname>[^/]+)/update-from-outcome",
+    )
+    def update_from_outcome(self, request, hostname=None):
+        """Record a scrape outcome against a ScrapeProfile — wraps
+        _update_scrape_profile so the ai-side graph's UpdateProfile
+        node can bump success rate / tier0 miss counters / auto-demote
+        without Django ORM access.
+
+        Body: {"success": bool, "tier0_hit": bool | null}
+        """
+        from job_hunting.lib.parsers.job_post_extractor import (
+            _update_scrape_profile,
+        )
+        from job_hunting.models import Scrape
+
+        body = request.data if isinstance(request.data, dict) else {}
+        scrape_id = body.get("scrape_id")
+        if not scrape_id:
+            return Response(
+                {"errors": [{"detail": "scrape_id is required"}]}, status=400,
+            )
+        scrape = Scrape.objects.filter(pk=scrape_id).first()
+        if not scrape:
+            return Response(
+                {"errors": [{"detail": "scrape not found"}]}, status=404,
+            )
+        success = bool(body.get("success", False))
+        tier0_hit = body.get("tier0_hit", None)
+        if tier0_hit is not None:
+            tier0_hit = bool(tier0_hit)
+        _update_scrape_profile(
+            scrape, scrape.created_by, success=success, tier0_hit=tier0_hit,
+        )
+        return Response({"data": {"recorded": True, "hostname": hostname}})
 

@@ -643,7 +643,7 @@ class ScrapeSerializer(BaseSerializer):
 
 class ScrapeStatusSerializer(BaseSerializer):
     type = "scrape-status"
-    attributes = ["logged_at", "note", "created_at"]
+    attributes = ["logged_at", "note", "created_at", "graph_node", "graph_payload"]
     relationships = {
         "scrape": {"attr": "scrape", "type": "scrape", "uselist": False},
         "status": {"attr": "status", "type": "status", "uselist": False},
