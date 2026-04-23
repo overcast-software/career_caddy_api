@@ -85,6 +85,13 @@ class BaseSerializer:
     type: str
     model: Any
     attributes: List[str] = []
+    # Subset of `attributes` that the serializer outputs in to_resource()
+    # but refuses to accept on input. Use for derived/computed properties
+    # (e.g. Scrape.latest_status_note) that have no setter — without this
+    # filter, _upsert calls setattr(obj, name, val) and crashes with
+    # "property has no setter". Frontend round-trip saves still work
+    # because the field is silently dropped from the inbound payload.
+    read_only_attributes: List[str] = []
     relationships: Dict[str, Dict[str, Any]] = {}
     relationship_fks: Dict[str, str] = {}
     # Subclasses can declare which attributes to expose when slim=True.
@@ -252,8 +259,9 @@ class BaseSerializer:
         attrs_in = data.get("attributes", {}) or {}
         out: Dict[str, Any] = {}
 
+        read_only = set(self.read_only_attributes)
         for k in self.attributes:
-            if k in attrs_in:
+            if k in attrs_in and k not in read_only:
                 out[k] = attrs_in[k]
         rels = data.get("relationships", {}) or {}
         for rel_name, fk_field in self.relationship_fks.items():
@@ -635,6 +643,10 @@ class ScrapeSerializer(BaseSerializer):
         "apply_url",
         "apply_url_status",
     ]
+    # latest_status_note is a derived @property on Scrape with no setter —
+    # output it but reject it on PATCH so frontend round-trips don't 500
+    # with "property has no setter".
+    read_only_attributes = ["latest_status_note"]
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "company": {"attr": "company", "type": "company", "uselist": False},
