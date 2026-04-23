@@ -73,6 +73,7 @@ from job_hunting.api.views import (
     report_filter_options,
     graph_structure,
     graph_aggregate,
+    graph_mermaid,
 )
 
 
@@ -170,6 +171,7 @@ urlpatterns = [
     path("api/v1/reports/filter-options/", report_filter_options, name="reports-filter-options"),
     path("api/v1/admin/graph-structure/", graph_structure, name="graph-structure"),
     path("api/v1/admin/graph-aggregate/", graph_aggregate, name="graph-aggregate"),
+    path("api/v1/admin/graph-mermaid/", graph_mermaid, name="graph-mermaid"),
     path("api/v1/chat/", chat_proxy, name="chat"),
     path("api/v1/token/", UnthrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", UnthrottledTokenRefreshView.as_view(), name="token_refresh"),

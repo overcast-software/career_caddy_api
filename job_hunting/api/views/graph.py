@@ -108,6 +108,52 @@ def graph_structure(request):
 
 @api_view(["GET"])
 @permission_classes([IsAdminUser])
+def graph_mermaid(request):
+    """Emit a mermaid stateDiagram of the scrape-graph.
+
+    Renders cleanly in the frontend via mermaid.js, on the GitHub
+    README, or by pasting into https://mermaid.live — the shape
+    matches pydantic-graph's Graph.mermaid_code() output so the
+    same diagram can be regenerated once the ai-side Graph
+    registration lands in Phase 1d.
+
+    Optional query param:
+    - ?as=text  → return text/plain (default is application/json). Not
+      `format` because DRF reserves that for content negotiation.
+    """
+    lines = ["stateDiagram-v2"]
+    # Styled groups via class-def so d3 / mermaid users can theme them.
+    lines.append("    classDef scrape fill:#dbeafe,stroke:#3b82f6")
+    lines.append("    classDef obstacle fill:#fee2e2,stroke:#ef4444")
+    lines.append("    classDef extract fill:#dcfce7,stroke:#22c55e")
+    lines.append("    classDef terminal fill:#e5e7eb,stroke:#6b7280")
+
+    entry_id = "StartScrape"
+    lines.append(f"    [*] --> {entry_id}")
+    for (a, b) in _EDGES:
+        lines.append(f"    {a} --> {b}")
+
+    # Terminal → End markers
+    for terminal_id in ("DuplicateShortCircuit", "ObstacleFail", "ResolveApplyUrl", "ExtractFail"):
+        lines.append(f"    {terminal_id} --> [*]")
+
+    # Group class assignments
+    group_nodes = {}
+    for node in _NODES:
+        group_nodes.setdefault(node["group"], []).append(node["id"])
+    for group, ids in group_nodes.items():
+        lines.append(f"    class {','.join(ids)} {group}")
+
+    mermaid = "\n".join(lines)
+
+    if request.query_params.get("as") == "text":
+        from django.http import HttpResponse
+        return HttpResponse(mermaid, content_type="text/plain")
+    return Response({"data": {"mermaid": mermaid}})
+
+
+@api_view(["GET"])
+@permission_classes([IsAdminUser])
 def graph_aggregate(request):
     """Per-edge counts + success rates across recent scrape runs.
 

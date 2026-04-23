@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from job_hunting.models import Company, JobPost, Scrape
+from job_hunting.models import JobPost, Scrape
 from job_hunting.models.scrape_status import ScrapeStatus
 
 
@@ -159,6 +159,28 @@ class GraphAdminEndpointTests(TestCase):
         resp = self.client.get("/api/v1/admin/graph-aggregate/?since=1d")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("edges", resp.json()["data"])
+
+    def test_mermaid_json(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get("/api/v1/admin/graph-mermaid/")
+        self.assertEqual(resp.status_code, 200)
+        src = resp.json()["data"]["mermaid"]
+        self.assertIn("stateDiagram-v2", src)
+        self.assertIn("StartScrape", src)
+        self.assertIn("ResolveFinalUrl --> CheckLinkDedup", src)
+        self.assertIn("DuplicateShortCircuit --> [*]", src)
+
+    def test_mermaid_text(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get("/api/v1/admin/graph-mermaid/?as=text")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp["Content-Type"].startswith("text/plain"))
+        self.assertIn(b"stateDiagram-v2", resp.content)
+
+    def test_mermaid_non_staff_forbidden(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.get("/api/v1/admin/graph-mermaid/")
+        self.assertEqual(resp.status_code, 403)
 
 
 class UpdateFromOutcomeTests(TestCase):

@@ -57,6 +57,7 @@ from .reports import (
 from .graph import (
     graph_structure,
     graph_aggregate,
+    graph_mermaid,
 )
 
 __all__ = [
@@ -108,4 +109,5 @@ __all__ = [
     "report_filter_options",
     "graph_structure",
     "graph_aggregate",
+    "graph_mermaid",
 ]
