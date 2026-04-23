@@ -35,6 +35,23 @@ class JobPost(GetMixin, models.Model):
     # appear without migrations. Defaults to 'manual' so historical
     # rows backfill safely.
     source = models.CharField(max_length=32, default="manual")
+    # External apply destination surfaced behind the posting's "Apply"
+    # button. Resolved by the hold-poller's apply-resolver (Phase 2).
+    # Distinct from JobApplication.tracking_url, which is per-user.
+    # Named `apply_url` (not `application_url`) to avoid shadowing
+    # `active_application_status` — that one is the user's
+    # JobApplicationStatus rollup for THIS post, a completely different
+    # concept.
+    apply_url = models.CharField(max_length=2000, null=True, blank=True)
+    # State machine for the resolver:
+    #   unknown   — never attempted (default; existing rows backfill here)
+    #   resolved  — apply_url is trustworthy
+    #   internal  — internal-only flow (LinkedIn Easy Apply etc.);
+    #               apply_url stays NULL
+    #   failed    — resolver ran but couldn't land on a destination
+    #   stale     — was resolved, later health-check returned 4xx/5xx
+    apply_url_status = models.CharField(max_length=16, default="unknown")
+    apply_url_resolved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "job_post"
