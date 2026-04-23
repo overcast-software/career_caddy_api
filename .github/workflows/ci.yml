@@ -62,4 +62,8 @@ jobs:
       - name: Run tests
         run: |
           uv run python manage.py migrate --noinput
-          uv run python manage.py test -v 2
+          # --keepdb skips the DROP DATABASE teardown that
+          # intermittently fails with 'database is being accessed by
+          # other users' when a pooled connection lingers. CI runs in
+          # a fresh runner so there's no stale-state concern.
+          uv run python manage.py test -v 2 --keepdb --noinput
