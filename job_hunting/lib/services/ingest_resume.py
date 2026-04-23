@@ -7,6 +7,7 @@ from enum import Enum
 
 import calendar
 import json
+import logging
 import re
 import os
 import tempfile
@@ -29,6 +30,8 @@ from job_hunting.models import ResumeSkill
 from job_hunting.models import ResumeSummary
 from job_hunting.models import Skill
 from job_hunting.models import Description, Summary, Company
+
+logger = logging.getLogger(__name__)
 
 
 RESUME_EXTRACTION_PROMPT = """You extract structured data from a resume.
@@ -484,6 +487,7 @@ class IngestResume:
         if self.agent is None:
             self.agent = self.get_agent()
         result = self.agent.run_sync(resume_md)
+        self._record_usage(result)
         output = result.output
         if isinstance(output, dict):
             parsed_resume = ParsedResume(**output)
@@ -685,6 +689,78 @@ class IngestResume:
             output_type=ParsedResume,
             system_prompt=RESUME_EXTRACTION_PROMPT,
         )
+
+    def _get_model_name(self) -> str:
+        """Return a 'provider:model' label for the Agent's active model.
+        Mirrors JobPostExtractor._get_model_name so AiUsage rows are consistent."""
+        if self.agent is None:
+            return "unknown"
+        model = getattr(self.agent, "model", None)
+        if model is None:
+            return "unknown"
+        cls_name = type(model).__name__
+        name = getattr(model, "model_name", None) or str(model)
+        if cls_name == "AnthropicModel":
+            return f"anthropic:{name}"
+        if cls_name == "OpenAIResponsesModel":
+            return f"openai:{name}"
+        if cls_name == "OpenAIModel":
+            return f"openai:{name}"
+        if cls_name == "OpenAIChatModel":
+            # Used in this file only for the Ollama fallback.
+            return f"ollama:{name}"
+        return str(model)
+
+    def _record_usage(self, result) -> None:
+        """Persist an AiUsage row for this ingest run. Errors are swallowed
+        so a telemetry failure never breaks resume import."""
+        try:
+            from job_hunting.models.ai_usage import AiUsage
+            from job_hunting.lib.pricing import estimate_cost
+
+            usage = result.usage()
+            request_tokens = getattr(usage, "request_tokens", 0) or 0
+            response_tokens = getattr(usage, "response_tokens", 0) or 0
+            total_tokens = getattr(usage, "total_tokens", 0) or 0
+            request_count = getattr(usage, "requests", 1) or 1
+
+            user_id = self._resolve_user_id(self.user)
+            user = None
+            if user_id is not None:
+                from django.contrib.auth import get_user_model
+                user = get_user_model().objects.filter(pk=user_id).first()
+            if user is None:
+                from django.contrib.auth import get_user_model
+                user = (
+                    get_user_model()
+                    .objects.filter(is_staff=True)
+                    .order_by("id")
+                    .first()
+                )
+            if user is None:
+                logger.warning("Skipping resume_importer usage — no user to attribute")
+                return
+
+            model_name = self._get_model_name()
+            AiUsage.objects.create(
+                user=user,
+                agent_name="resume_importer",
+                model_name=model_name,
+                trigger="resume_import",
+                request_tokens=request_tokens,
+                response_tokens=response_tokens,
+                total_tokens=total_tokens,
+                request_count=request_count,
+                estimated_cost_usd=estimate_cost(
+                    model_name, request_tokens, response_tokens
+                ),
+            )
+            logger.info(
+                "Recorded resume_importer usage: model=%s tokens=%s/%s user_id=%s",
+                model_name, request_tokens, response_tokens, user.id,
+            )
+        except Exception:
+            logger.exception("Failed to record resume_importer usage")
 
     def _agent_from_spec(self, spec: str):
         """Parse 'provider:model_name' and return an Agent."""
