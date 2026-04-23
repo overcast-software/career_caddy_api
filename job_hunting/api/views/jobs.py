@@ -149,7 +149,8 @@ class JobPostViewSet(BaseViewSet):
         qs = JobPost.objects.filter(
             Q(created_by_id=request.user.id) |
             Q(applications__user_id=request.user.id) |
-            Q(scores__user_id=request.user.id)
+            Q(scores__user_id=request.user.id) |
+            Q(scrapes__created_by_id=request.user.id)
         ).distinct()
         link_filter = request.query_params.get("filter[link]")
         if link_filter is not None:
@@ -361,7 +362,8 @@ class JobPostViewSet(BaseViewSet):
         has_access = (
             obj.created_by_id == request.user.id or
             obj.applications.filter(user_id=request.user.id).exists() or
-            obj.scores.filter(user_id=request.user.id).exists()
+            obj.scores.filter(user_id=request.user.id).exists() or
+            obj.scrapes.filter(created_by_id=request.user.id).exists()
         )
         if not has_access:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
