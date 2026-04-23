@@ -1,0 +1,302 @@
+{
+  "nodes": [
+    {
+      "id": "StartScrape",
+      "group": "scrape",
+      "label": "Start",
+      "description": "Entry point for the full scrape pipeline. Stamps original_scrape_id for provenance and hands off to LoadProfile."
+    },
+    {
+      "id": "LoadProfile",
+      "group": "scrape",
+      "label": "Load profile",
+      "description": "Fetches the per-hostname ScrapeProfile (css selectors, ready_selector, obstacle hints) from the api. Missing profile is fine \u2014 later nodes degrade to generic behavior."
+    },
+    {
+      "id": "Navigate",
+      "group": "scrape",
+      "label": "Navigate",
+      "description": "Drives the browser to the submitted URL and records the landed final_url. Navigation failure stamps failure_reason but still advances (later nodes see empty content)."
+    },
+    {
+      "id": "ResolveFinalUrl",
+      "group": "scrape",
+      "label": "Resolve final URL",
+      "description": "Canonicalizes the landed URL (strips tracker params, fragments). If the browser redirected to a different host, creates a child scrape via source_scrape FK so the tracker\u2192destination hop is queryable."
+    },
+    {
+      "id": "CheckLinkDedup",
+      "group": "scrape",
+      "label": "Check link dedup",
+      "description": "Queries /job-posts/?filter[link]=canonical for a non-stub hit (>= 60 words of description). On hit, short-circuits to DuplicateShortCircuit without scraping further."
+    },
+    {
+      "id": "DuplicateShortCircuit",
+      "group": "terminal",
+      "label": "Duplicate short-circuit",
+      "description": "Terminal: we already have a full JobPost for this URL. Returns outcome='duplicate' with the existing job_post_id so the caller can navigate the user there."
+    },
+    {
+      "id": "WaitReadySelector",
+      "group": "scrape",
+      "label": "Wait ready selector",
+      "description": "When the profile has a ready_selector (signals SPA content has rendered), waits up to 5s for it. Hit \u2192 ExpandTruncations; miss \u2192 SettleWait."
+    },
+    {
+      "id": "SettleWait",
+      "group": "scrape",
+      "label": "Settle wait",
+      "description": "Fallback fixed 2s sleep when no ready_selector is known, giving SPAs a chance to finish rendering before capture."
+    },
+    {
+      "id": "ExpandTruncations",
+      "group": "scrape",
+      "label": "Expand truncations",
+      "description": "Clicks 'Show more' / 'Read more' affordances so the captured content isn't a stub. Best-effort \u2014 failures don't block."
+    },
+    {
+      "id": "DetectObstacle",
+      "group": "obstacle",
+      "label": "Detect obstacle",
+      "description": "Scans the page body for login-wall signals. Clean \u2192 Capture; walled \u2192 routes to the obstacle handler with available retries (RememberMe \u2192 WaitRetry \u2192 Agent \u2192 Fail)."
+    },
+    {
+      "id": "ObstacleRememberMe",
+      "group": "obstacle",
+      "label": "Remember-me reauth",
+      "description": "Tries the 'Continue as <you>' re-auth path using a known profile selector. Recorded per-attempt so we don't loop on it."
+    },
+    {
+      "id": "ObstacleWaitRetry",
+      "group": "obstacle",
+      "label": "Wait + retry",
+      "description": "Soaks up transient auth walls by sleeping 3s and re-checking. Caps at 3 waits before escalating to ObstacleAgent."
+    },
+    {
+      "id": "ObstacleAgent",
+      "group": "obstacle",
+      "label": "Obstacle agent",
+      "description": "LLM-driven fallback: inspects the page and proposes a CSS selector to click. On success, the winning selector is fed back into the ScrapeProfile's probation gate."
+    },
+    {
+      "id": "ObstacleFail",
+      "group": "terminal",
+      "label": "Obstacle fail",
+      "description": "Terminal: every obstacle path has been exhausted. Returns outcome='failure' with failure_reason='login_wall' so the caller can re-queue after seeding cookies."
+    },
+    {
+      "id": "Capture",
+      "group": "scrape",
+      "label": "Capture",
+      "description": "Reads page.inner_text('body') and page.content() into state.job_content / state.html. This is the moment the browser is 'done'."
+    },
+    {
+      "id": "PersistScrape",
+      "group": "scrape",
+      "label": "Persist scrape",
+      "description": "PATCHes the scrape with job_content + html + status='extracting'. Marks the handoff from browser side to extract side."
+    },
+    {
+      "id": "StartExtract",
+      "group": "extract",
+      "label": "Start extract",
+      "description": "Entry point for the extract-only sub-graph. Used by paste / email / chat ingest, and by the full pipeline once PersistScrape lands."
+    },
+    {
+      "id": "Tier0CSS",
+      "group": "extract",
+      "label": "Tier 0 CSS",
+      "description": "Phase 1b placeholder: deferred to server-side parse_scrape until the api ships /tier0-extract/. Records a soft skip and lets Tier 1 handle it."
+    },
+    {
+      "id": "Tier1Mini",
+      "group": "extract",
+      "label": "Tier 1 mini",
+      "description": "Cheap, fast LLM pass (gpt-4o-mini by default). POSTs to /api/v1/scrapes/:id/llm-extract/ with the tier's model spec. EvaluateExtraction decides whether to escalate."
+    },
+    {
+      "id": "Tier2Haiku",
+      "group": "extract",
+      "label": "Tier 2 haiku",
+      "description": "Mid-tier escalation (claude-haiku-4-5). Same endpoint as Tier1; the tier label on TierAttempt is what distinguishes them in the retrospective analysis."
+    },
+    {
+      "id": "Tier3Sonnet",
+      "group": "extract",
+      "label": "Tier 3 sonnet",
+      "description": "Expensive last-resort tier (claude-sonnet-4-6). Gated by SCRAPE_GRAPH_ENABLE_TIER3=1; otherwise the graph terminates at ExtractFail after Tier 2."
+    },
+    {
+      "id": "EvaluateExtraction",
+      "group": "extract",
+      "label": "Evaluate extraction",
+      "description": "Quality gate on the parsed output: checks for title, company, and thin-description. Pass \u2192 PersistJobPost; fail \u2192 next tier or ExtractFail."
+    },
+    {
+      "id": "PersistJobPost",
+      "group": "extract",
+      "label": "Persist job post",
+      "description": "POSTs parsed data to /api/v1/scrapes/:id/persist-extraction/ which handles dedup, stub-upgrade, and posted_date fallback. Suppressed in SCRAPE_GRAPH_MODE=shadow so parity testing never clobbers legacy data."
+    },
+    {
+      "id": "UpdateProfile",
+      "group": "extract",
+      "label": "Update profile",
+      "description": "Feeds the outcome (success + tier0_hit flag) back into the ScrapeProfile so per-host statistics and selector probation can evolve. Shadow-suppressed."
+    },
+    {
+      "id": "ResolveApplyUrl",
+      "group": "extract",
+      "label": "Resolve apply URL",
+      "description": "Phase 1b: no-op that returns outcome='success'. Phase 2 will resolve the external apply destination (Greenhouse/Lever/LinkedIn portal) and stash it on the JobPost."
+    },
+    {
+      "id": "ExtractFail",
+      "group": "terminal",
+      "label": "Extract fail",
+      "description": "Terminal: every tier produced something EvaluateExtraction rejected, or persistence failed. outcome='failure' with failure_reason='extraction'."
+    }
+  ],
+  "edges": [
+    {
+      "from": "StartScrape",
+      "to": "LoadProfile"
+    },
+    {
+      "from": "LoadProfile",
+      "to": "Navigate"
+    },
+    {
+      "from": "Navigate",
+      "to": "ResolveFinalUrl"
+    },
+    {
+      "from": "ResolveFinalUrl",
+      "to": "CheckLinkDedup"
+    },
+    {
+      "from": "CheckLinkDedup",
+      "to": "DuplicateShortCircuit"
+    },
+    {
+      "from": "CheckLinkDedup",
+      "to": "WaitReadySelector"
+    },
+    {
+      "from": "WaitReadySelector",
+      "to": "ExpandTruncations"
+    },
+    {
+      "from": "WaitReadySelector",
+      "to": "SettleWait"
+    },
+    {
+      "from": "SettleWait",
+      "to": "ExpandTruncations"
+    },
+    {
+      "from": "ExpandTruncations",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "Capture"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleAgent"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleFail"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleRememberMe"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleWaitRetry"
+    },
+    {
+      "from": "ObstacleRememberMe",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "ObstacleRememberMe",
+      "to": "ObstacleWaitRetry"
+    },
+    {
+      "from": "ObstacleWaitRetry",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "ObstacleWaitRetry",
+      "to": "ObstacleAgent"
+    },
+    {
+      "from": "ObstacleAgent",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "ObstacleAgent",
+      "to": "ObstacleFail"
+    },
+    {
+      "from": "Capture",
+      "to": "PersistScrape"
+    },
+    {
+      "from": "PersistScrape",
+      "to": "StartExtract"
+    },
+    {
+      "from": "StartExtract",
+      "to": "Tier0CSS"
+    },
+    {
+      "from": "Tier0CSS",
+      "to": "Tier1Mini"
+    },
+    {
+      "from": "Tier1Mini",
+      "to": "EvaluateExtraction"
+    },
+    {
+      "from": "Tier2Haiku",
+      "to": "EvaluateExtraction"
+    },
+    {
+      "from": "Tier3Sonnet",
+      "to": "EvaluateExtraction"
+    },
+    {
+      "from": "EvaluateExtraction",
+      "to": "ExtractFail"
+    },
+    {
+      "from": "EvaluateExtraction",
+      "to": "PersistJobPost"
+    },
+    {
+      "from": "EvaluateExtraction",
+      "to": "Tier2Haiku"
+    },
+    {
+      "from": "EvaluateExtraction",
+      "to": "Tier3Sonnet"
+    },
+    {
+      "from": "PersistJobPost",
+      "to": "ExtractFail"
+    },
+    {
+      "from": "PersistJobPost",
+      "to": "UpdateProfile"
+    },
+    {
+      "from": "UpdateProfile",
+      "to": "ResolveApplyUrl"
+    }
+  ]
+}

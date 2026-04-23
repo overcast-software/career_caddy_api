@@ -60,6 +60,65 @@ class PersistExtractionTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+class LlmExtractTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="doug", password="p")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.scrape = Scrape.objects.create(
+            url="https://example.com/job/1",
+            job_content="Senior Engineer at Acme — building stuff.",
+            status="extracting",
+            created_by=self.user,
+        )
+
+    def test_empty_content_400s(self):
+        scrape = Scrape.objects.create(
+            url="https://example.com/job/2",
+            status="hold",
+            created_by=self.user,
+        )
+        resp = self.client.post(
+            f"/api/v1/scrapes/{scrape.id}/llm-extract/",
+            {"model": "openai:gpt-4o-mini"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_non_owner_rejected(self):
+        other = User.objects.create_user(username="other", password="p")
+        self.client.force_authenticate(user=other)
+        resp = self.client.post(
+            f"/api/v1/scrapes/{self.scrape.id}/llm-extract/",
+            {"model": "openai:gpt-4o-mini"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_returns_parsed_attributes(self):
+        from unittest.mock import patch
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+
+        stub = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Acme Corp",
+            description="Build things with care.",
+        )
+        with patch(
+            "job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai",
+            return_value=stub,
+        ):
+            resp = self.client.post(
+                f"/api/v1/scrapes/{self.scrape.id}/llm-extract/",
+                {"model": "openai:gpt-4o-mini"},
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 200)
+        attrs = resp.json()["data"]["attributes"]
+        self.assertEqual(attrs["title"], "Senior Engineer")
+        self.assertEqual(attrs["company_name"], "Acme Corp")
+
+
 class GraphTransitionTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="doug", password="p")
@@ -89,6 +148,43 @@ class GraphTransitionTests(TestCase):
         row = ScrapeStatus.objects.get(scrape=self.scrape, graph_node="Tier1Mini")
         self.assertEqual(row.graph_payload["routed_to"], "EvaluateExtraction")
         self.assertEqual(row.note, "first extraction attempt")
+
+    def test_does_not_overwrite_scrape_status(self):
+        """Graph-node transitions must NOT bump Scrape.status. Frontend
+        polling watches status for {completed, done, failed, error};
+        if per-node rows clobbered it to 'tier1mini', 'resolveapplyurl',
+        etc., spinners stayed on forever after the scrape had really
+        finished."""
+        self.scrape.status = "completed"
+        self.scrape.save()
+        resp = self.client.post(
+            f"/api/v1/scrapes/{self.scrape.id}/graph-transition/",
+            {
+                "graph_node": "ResolveApplyUrl",
+                "graph_payload": {"routed_to": "End"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.status, "completed")
+
+    def test_explicit_status_still_updates_scrape(self):
+        """When a caller passes an explicit `status` (legacy bridges,
+        not the graph runner), we preserve the bump so ad-hoc tooling
+        can still drive the scrape through terminal states."""
+        resp = self.client.post(
+            f"/api/v1/scrapes/{self.scrape.id}/graph-transition/",
+            {
+                "graph_node": "ExtractFail",
+                "graph_payload": {"routed_to": "End"},
+                "status": "failed",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.status, "failed")
 
     def test_missing_graph_node_400s(self):
         resp = self.client.post(
