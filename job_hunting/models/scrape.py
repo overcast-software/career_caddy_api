@@ -47,6 +47,10 @@ class Scrape(GetMixin, models.Model):
         related_name="child_scrapes",
     )
     html = models.TextField(null=True, blank=True)
+    # Mirror of JobPost.apply_url/status — each scrape carries the
+    # resolver outcome it produced so multi-scrape histories stay truthful.
+    apply_url = models.CharField(max_length=2000, null=True, blank=True)
+    apply_url_status = models.CharField(max_length=16, default="unknown")
 
     class Meta:
         db_table = "scrape"
@@ -56,3 +60,16 @@ class Scrape(GetMixin, models.Model):
         if self.url:
             return urlparse(self.url).netloc
         return None
+
+    @property
+    def latest_status_note(self):
+        """Note from the most recent ScrapeStatus entry, or empty string.
+
+        Exposed on the serializer so clients can branch UI behavior on
+        completion outcomes (e.g. 'duplicate: existing JobPost #N') without
+        having to sideload the full scrape_statuses collection.
+        """
+        latest = self.scrape_statuses.order_by("-id").first()
+        if latest is None:
+            return ""
+        return latest.note or ""

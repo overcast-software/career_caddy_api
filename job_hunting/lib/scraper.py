@@ -45,15 +45,33 @@ def _set_scrape_status(scrape_id: int, status: str) -> None:
         logger.exception("_set_scrape_status failed scrape_id=%s status=%s", scrape_id, status)
 
 
-def _log_scrape_status(scrape_id: int, status_label: str, note: str = None) -> None:
-    """Update Scrape.status AND append a ScrapeStatus audit record."""
+def _log_scrape_status(
+    scrape_id: int,
+    status_label: str,
+    note: str = None,
+    graph_node: str = None,
+    graph_payload: dict = None,
+    update_scrape_status: bool = True,
+) -> None:
+    """Append a ScrapeStatus audit record (and optionally bump Scrape.status).
+
+    graph_node / graph_payload are populated by the scrape-graph
+    runner's tracing mixin; legacy callers leave them None.
+
+    update_scrape_status=False skips the =Scrape.status= write — used
+    by graph-transition so per-node trace rows don't clobber the
+    legacy terminal status ('completed' / 'failed') that the frontend
+    polls on. Otherwise the shadow-mode pipeline lands on
+    'resolveapplyurl' and UI spinners never terminate.
+    """
     try:
         from job_hunting.models.scrape import Scrape
         from job_hunting.models.scrape_status import ScrapeStatus
         from job_hunting.models.status import Status
         from django.utils import timezone
 
-        Scrape.objects.filter(pk=scrape_id).update(status=status_label)
+        if update_scrape_status:
+            Scrape.objects.filter(pk=scrape_id).update(status=status_label)
         status_obj, _ = Status.objects.get_or_create(
             status=status_label, defaults={"status_type": "scrape"}
         )
@@ -62,6 +80,8 @@ def _log_scrape_status(scrape_id: int, status_label: str, note: str = None) -> N
             status=status_obj,
             logged_at=timezone.now(),
             note=note,
+            graph_node=graph_node,
+            graph_payload=graph_payload,
         )
 
         # Mark domain as requiring auth on login_failed

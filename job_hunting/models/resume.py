@@ -137,6 +137,7 @@ class Resume(GetMixin, models.Model):
             "name": getattr(self.user, "get_full_name", lambda: "")() if self.user else "",
             "title": self.title or "",
             "phone": self.user_phone,
+            "email": getattr(self.user, "email", "") if self.user else "",
         }
         return {
             "header": header,

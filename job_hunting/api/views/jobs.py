@@ -149,7 +149,8 @@ class JobPostViewSet(BaseViewSet):
         qs = JobPost.objects.filter(
             Q(created_by_id=request.user.id) |
             Q(applications__user_id=request.user.id) |
-            Q(scores__user_id=request.user.id)
+            Q(scores__user_id=request.user.id) |
+            Q(scrapes__created_by_id=request.user.id)
         ).distinct()
         link_filter = request.query_params.get("filter[link]")
         if link_filter is not None:
@@ -361,7 +362,8 @@ class JobPostViewSet(BaseViewSet):
         has_access = (
             obj.created_by_id == request.user.id or
             obj.applications.filter(user_id=request.user.id).exists() or
-            obj.scores.filter(user_id=request.user.id).exists()
+            obj.scores.filter(user_id=request.user.id).exists() or
+            obj.scrapes.filter(created_by_id=request.user.id).exists()
         )
         if not has_access:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -381,6 +383,11 @@ class JobPostViewSet(BaseViewSet):
         except ValueError as e:
             return Response({"errors": [{"detail": str(e)}]}, status=400)
         attrs = self.pre_save_payload(request, attrs, creating=True)
+        # Computed read-only properties on the JobPost model — clients echo
+        # them back in POST bodies from a prior GET; setattr would raise
+        # because they have no setter.
+        attrs.pop("top_score", None)
+        attrs.pop("active_application_status", None)
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(
@@ -539,6 +546,32 @@ class JobPostViewSet(BaseViewSet):
         scr_ser = ScrapeSerializer()
         return Response(
             {"data": scr_ser.to_resource(scrape)},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=True, methods=["post"], url_path="resolve-apply")
+    def resolve_apply(self, request, pk=None):
+        """Request apply-URL resolution for this JobPost.
+
+        Phase 1: stub. Enqueues intent by flipping application_status to
+        'unknown' (if it was 'stale' or 'failed') so the Phase 2 resolver
+        picks it up on its next sweep. Returns the JobPost immediately.
+
+        Ownership-gated. Staff get broader access."""
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        if obj.apply_url_status in ("stale", "failed"):
+            obj.apply_url_status = "unknown"
+            obj.apply_url_resolved_at = None
+            obj.save(update_fields=["apply_url_status", "apply_url_resolved_at"])
+
+        jp_ser = self.get_serializer()
+        return Response(
+            {"data": jp_ser.to_resource(obj)},
             status=status.HTTP_202_ACCEPTED,
         )
 
