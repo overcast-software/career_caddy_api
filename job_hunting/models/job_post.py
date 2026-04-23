@@ -1,6 +1,8 @@
 from django.conf import settings
-from .base import GetMixin
 from django.db import models
+from django.utils import timezone
+
+from .base import GetMixin
 
 
 class JobPost(GetMixin, models.Model):
@@ -55,6 +57,21 @@ class JobPost(GetMixin, models.Model):
 
     class Meta:
         db_table = "job_post"
+
+    def save(self, *args, **kwargs):
+        # posted_date falls back to today (or created_at's date) whenever
+        # the extractor / caller didn't supply one. This matters for list
+        # sorting — /job-posts sorts `-posted_date NULLS LAST`, so posts
+        # with a null posted_date get buried at the end of the pagination
+        # and appear missing from page 1. Paste-sourced posts frequently
+        # have no extractable posted_date; without this fallback they'd
+        # never surface in "recent posts" views.
+        if self.posted_date is None:
+            if self.created_at:
+                self.posted_date = self.created_at.date()
+            else:
+                self.posted_date = timezone.now().date()
+        super().save(*args, **kwargs)
 
     @property
     def active_application_status(self):
