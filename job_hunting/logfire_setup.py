@@ -56,8 +56,19 @@ def setup_logfire(service_name: str = "career_caddy_api") -> bool:
     if root.level > logging.INFO or root.level == logging.NOTSET:
         root.setLevel(logging.INFO)
 
+    # Paths we never want as top-level Django spans — they fire on every
+    # frontend route change (healthcheck) or every poller tick
+    # (hold-scrapes list) and drown out the spans that matter.
+    _EXCLUDED_URLS = ",".join([
+        r"api/v1/healthcheck",
+        r"api/v1/scrapes/\?.*status=hold",
+    ])
+
     # Django request spans + LLM call spans. Each instrumenter is
     # best-effort; missing libraries don't block the others.
+    _instrumenter_kwargs = {
+        "instrument_django": {"excluded_urls": _EXCLUDED_URLS},
+    }
     for fn_name in (
         "instrument_django",
         "instrument_openai",
@@ -68,7 +79,7 @@ def setup_logfire(service_name: str = "career_caddy_api") -> bool:
         if fn is None:
             continue
         try:
-            fn()
+            fn(**_instrumenter_kwargs.get(fn_name, {}))
         except Exception as exc:  # noqa: BLE001
             logging.getLogger(__name__).warning(
                 "logfire.%s failed: %s", fn_name, exc

@@ -543,6 +543,49 @@ class ScrapeViewSet(BaseViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    @action(detail=True, methods=["post"], url_path="llm-extract")
+    def llm_extract(self, request, pk=None):
+        """Run LLM extraction against a scrape's captured content and
+        return the parsed ParsedJobData without persisting.
+
+        Body: {"model": "<provider:model>"}
+
+        Called by the ai-side scrape-graph's Tier1/2/3 nodes. Persistence
+        is a separate call to persist-extraction — this endpoint is
+        read-only on the scrape (apart from ai_usage accounting).
+        """
+        scrape = Scrape.objects.filter(pk=pk).first()
+        if not scrape:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and scrape.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        body = request.data if isinstance(request.data, dict) else {}
+        model_spec = (body.get("model") or "").strip() or None
+
+        if not (scrape.job_content or scrape.html):
+            return Response(
+                {"errors": [{"detail": "Scrape has no captured content"}]},
+                status=400,
+            )
+
+        from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
+
+        try:
+            parsed = JobPostExtractor().analyze_with_ai(scrape, model_override=model_spec)
+        except Exception as exc:
+            logger.exception("llm_extract failed for scrape %s", scrape.id)
+            return Response(
+                {"errors": [{"detail": f"Extraction failed: {exc}"}]},
+                status=502,
+            )
+
+        attributes = parsed.model_dump(mode="json")
+        return Response(
+            {"data": {"type": "parsed-job-data", "attributes": attributes}},
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="persist-extraction")
     def persist_extraction(self, request, pk=None):
         """Accept an already-parsed ParsedJobData payload and run the
@@ -633,12 +676,19 @@ class ScrapeViewSet(BaseViewSet):
             )
 
         from job_hunting.lib.scraper import _log_scrape_status
+        # Never update Scrape.status from a graph transition — per-node
+        # trace entries ('tier1mini', 'resolveapplyurl', ...) would mask
+        # the legacy terminal status the poller polls on, leaving UI
+        # spinners running long after the scrape itself completed.
+        # Caller can still force the update by passing an explicit
+        # `status` (used by legacy bridges, not the graph runner).
         _log_scrape_status(
             scrape.id,
             status_name or graph_node.lower(),
             note=note,
             graph_node=graph_node,
             graph_payload=graph_payload,
+            update_scrape_status=bool(status_name),
         )
         return Response({"data": {"recorded": True}}, status=status.HTTP_201_CREATED)
 

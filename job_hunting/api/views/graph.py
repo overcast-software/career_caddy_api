@@ -9,14 +9,17 @@ Three surfaces:
   scrapes.py::graph_trace). Kept there so per-scrape auth stays with
   the scrape detail permissions.
 
-The canonical graph definition lives in ai/lib/scrape_graph/ (ai/
-owns the runtime). api/ ships a static snapshot for UI rendering; if
-they drift, re-export by running `ai/scripts/export_graph_structure.py`
-(to be added with the ai PR).
+The canonical graph definition lives in ai/lib/scrape_graph/graph.py
+(ai/ owns the runtime). api/ reads a committed snapshot from
+graph_static.json next to this file; regenerate it with
+`uv run caddy-export-graph` in ai/ after changing node topology. A
+drift test in ai/tests/ guards against stale snapshots.
 """
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from pathlib import Path
 
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
@@ -24,78 +27,12 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
 
-# Snapshot of the scrape-graph node/edge shape. Sync with
-# ai/lib/scrape_graph/graph.py when nodes change.
-_NODES = [
-    # Scrape-side
-    {"id": "StartScrape", "group": "scrape", "label": "Start"},
-    {"id": "LoadProfile", "group": "scrape", "label": "Load profile"},
-    {"id": "Navigate", "group": "scrape", "label": "Navigate"},
-    {"id": "ResolveFinalUrl", "group": "scrape", "label": "Resolve final URL"},
-    {"id": "CheckLinkDedup", "group": "scrape", "label": "Check link dedup"},
-    {"id": "DuplicateShortCircuit", "group": "terminal", "label": "Duplicate short-circuit"},
-    {"id": "WaitReadySelector", "group": "scrape", "label": "Wait ready selector"},
-    {"id": "SettleWait", "group": "scrape", "label": "Settle wait"},
-    {"id": "ExpandTruncations", "group": "scrape", "label": "Expand truncations"},
-    {"id": "DetectObstacle", "group": "obstacle", "label": "Detect obstacle"},
-    {"id": "ObstacleRememberMe", "group": "obstacle", "label": "Remember-me reauth"},
-    {"id": "ObstacleWaitRetry", "group": "obstacle", "label": "Wait + retry"},
-    {"id": "ObstacleAgent", "group": "obstacle", "label": "Obstacle agent"},
-    {"id": "ObstacleFail", "group": "terminal", "label": "Obstacle fail"},
-    {"id": "Capture", "group": "scrape", "label": "Capture"},
-    {"id": "PersistScrape", "group": "scrape", "label": "Persist scrape"},
-    # Extract-side
-    {"id": "StartExtract", "group": "extract", "label": "Start extract"},
-    {"id": "Tier0CSS", "group": "extract", "label": "Tier 0 CSS"},
-    {"id": "Tier1Mini", "group": "extract", "label": "Tier 1 mini"},
-    {"id": "Tier2Haiku", "group": "extract", "label": "Tier 2 haiku"},
-    {"id": "Tier3Sonnet", "group": "extract", "label": "Tier 3 sonnet"},
-    {"id": "EvaluateExtraction", "group": "extract", "label": "Evaluate extraction"},
-    {"id": "PersistJobPost", "group": "extract", "label": "Persist job post"},
-    {"id": "UpdateProfile", "group": "extract", "label": "Update profile"},
-    {"id": "ResolveApplyUrl", "group": "extract", "label": "Resolve apply URL"},
-    {"id": "ExtractFail", "group": "terminal", "label": "Extract fail"},
-]
+_SNAPSHOT_PATH = Path(__file__).with_name("graph_static.json")
+with _SNAPSHOT_PATH.open() as _f:
+    _SNAPSHOT = json.load(_f)
 
-_EDGES = [
-    ("StartScrape", "LoadProfile"),
-    ("LoadProfile", "Navigate"),
-    ("Navigate", "ResolveFinalUrl"),
-    ("ResolveFinalUrl", "CheckLinkDedup"),
-    ("CheckLinkDedup", "DuplicateShortCircuit"),
-    ("CheckLinkDedup", "WaitReadySelector"),
-    ("WaitReadySelector", "ExpandTruncations"),
-    ("WaitReadySelector", "SettleWait"),
-    ("SettleWait", "ExpandTruncations"),
-    ("ExpandTruncations", "DetectObstacle"),
-    ("DetectObstacle", "ObstacleRememberMe"),
-    ("DetectObstacle", "ObstacleWaitRetry"),
-    ("DetectObstacle", "ObstacleAgent"),
-    ("DetectObstacle", "Capture"),
-    ("DetectObstacle", "ObstacleFail"),
-    ("ObstacleRememberMe", "DetectObstacle"),
-    ("ObstacleRememberMe", "ObstacleWaitRetry"),
-    ("ObstacleWaitRetry", "DetectObstacle"),
-    ("ObstacleWaitRetry", "ObstacleAgent"),
-    ("ObstacleAgent", "DetectObstacle"),
-    ("ObstacleAgent", "ObstacleFail"),
-    ("Capture", "PersistScrape"),
-    ("PersistScrape", "StartExtract"),
-    ("StartExtract", "Tier0CSS"),
-    ("Tier0CSS", "EvaluateExtraction"),
-    ("Tier0CSS", "Tier1Mini"),
-    ("Tier0CSS", "Tier2Haiku"),
-    ("Tier1Mini", "EvaluateExtraction"),
-    ("Tier2Haiku", "EvaluateExtraction"),
-    ("Tier3Sonnet", "EvaluateExtraction"),
-    ("EvaluateExtraction", "PersistJobPost"),
-    ("EvaluateExtraction", "Tier1Mini"),
-    ("EvaluateExtraction", "Tier2Haiku"),
-    ("EvaluateExtraction", "Tier3Sonnet"),
-    ("EvaluateExtraction", "ExtractFail"),
-    ("PersistJobPost", "UpdateProfile"),
-    ("UpdateProfile", "ResolveApplyUrl"),
-]
+_NODES = _SNAPSHOT["nodes"]
+_EDGES = [(e["from"], e["to"]) for e in _SNAPSHOT["edges"]]
 
 
 @api_view(["GET"])
