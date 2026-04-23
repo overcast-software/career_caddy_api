@@ -547,6 +547,32 @@ class JobPostViewSet(BaseViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    @action(detail=True, methods=["post"], url_path="resolve-apply")
+    def resolve_apply(self, request, pk=None):
+        """Request apply-URL resolution for this JobPost.
+
+        Phase 1: stub. Enqueues intent by flipping application_status to
+        'unknown' (if it was 'stale' or 'failed') so the Phase 2 resolver
+        picks it up on its next sweep. Returns the JobPost immediately.
+
+        Ownership-gated. Staff get broader access."""
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        if obj.apply_url_status in ("stale", "failed"):
+            obj.apply_url_status = "unknown"
+            obj.apply_url_resolved_at = None
+            obj.save(update_fields=["apply_url_status", "apply_url_resolved_at"])
+
+        jp_ser = self.get_serializer()
+        return Response(
+            {"data": jp_ser.to_resource(obj)},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
     @extend_schema(
         tags=["Job Posts"],
         summary="Nuclear delete — remove job post and ALL child records",

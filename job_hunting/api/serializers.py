@@ -572,6 +572,9 @@ class JobPostSerializer(BaseSerializer):
         "top_score",
         "active_application_status",
         "source",
+        "apply_url",
+        "apply_url_status",
+        "apply_url_resolved_at",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
@@ -626,6 +629,8 @@ class ScrapeSerializer(BaseSerializer):
         "scraped_at",
         "status",
         "html",
+        "apply_url",
+        "apply_url_status",
     ]
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},

@@ -47,6 +47,10 @@ class Scrape(GetMixin, models.Model):
         related_name="child_scrapes",
     )
     html = models.TextField(null=True, blank=True)
+    # Mirror of JobPost.apply_url/status — each scrape carries the
+    # resolver outcome it produced so multi-scrape histories stay truthful.
+    apply_url = models.CharField(max_length=2000, null=True, blank=True)
+    apply_url_status = models.CharField(max_length=16, default="unknown")
 
     class Meta:
         db_table = "scrape"
