@@ -130,7 +130,13 @@
       "id": "EvaluateExtraction",
       "group": "extract",
       "label": "Evaluate extraction",
-      "description": "Quality gate on the parsed output: checks for title, company, and thin-description. Pass \u2192 PersistJobPost; fail \u2192 next tier or ExtractFail."
+      "description": "LLM-output quality gate: checks for title, company, and thin-description. Pass \u2192 ValidateExtraction; fail \u2192 next tier or ExtractFail."
+    },
+    {
+      "id": "ValidateExtraction",
+      "group": "extract",
+      "label": "Validate extraction",
+      "description": "Content-quality gate between EvaluateExtraction-passed and PersistJobPost. Enforces source-text minimum word count and loading-shell fingerprints (Salesforce Lightning, Workday, cookie/JS notices). Catches LLM hallucinations off a never-hydrated SPA bootstrap. Fail \u2192 ExtractFail so the debug-artifact invariant fires."
     },
     {
       "id": "PersistJobPost",
@@ -276,15 +282,23 @@
     },
     {
       "from": "EvaluateExtraction",
-      "to": "PersistJobPost"
-    },
-    {
-      "from": "EvaluateExtraction",
       "to": "Tier2Haiku"
     },
     {
       "from": "EvaluateExtraction",
       "to": "Tier3Sonnet"
+    },
+    {
+      "from": "EvaluateExtraction",
+      "to": "ValidateExtraction"
+    },
+    {
+      "from": "ValidateExtraction",
+      "to": "ExtractFail"
+    },
+    {
+      "from": "ValidateExtraction",
+      "to": "PersistJobPost"
     },
     {
       "from": "PersistJobPost",
