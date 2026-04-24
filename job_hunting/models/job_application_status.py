@@ -1,5 +1,6 @@
 from django.db import models
 from .base import GetMixin
+from job_hunting.lib.vetting_reasons import VETTING_REASONS
 
 
 class JobApplicationStatus(GetMixin, models.Model):
@@ -20,6 +21,13 @@ class JobApplicationStatus(GetMixin, models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     logged_at = models.DateTimeField(null=True, blank=True)
     note = models.TextField(null=True, blank=True)
+    reason_code = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        choices=VETTING_REASONS,
+        db_index=True,
+    )
 
     class Meta:
         db_table = "job_application_status"

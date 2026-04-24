@@ -35,7 +35,7 @@ class TestJobPostTriageAPI(TestCase):
         self.assertEqual(statuses[0].status.status, "Vetted Good")
         self.assertEqual(app.status, "Vetted Good")
         self.assertEqual(
-            response.json()["data"]["attributes"]["active_application_status"],
+            response.json()["data"]["meta"]["triage"]["status"],
             "Vetted Good",
         )
 
@@ -77,3 +77,60 @@ class TestJobPostTriageAPI(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_vetted_bad_with_reason_code_is_stored(self):
+        response = self.client.post(
+            self.url,
+            data={"status": "Vetted Bad", "reason_code": "compensation"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        app = JobApplication.objects.get(job_post=self.post, user=self.user)
+        jas = JobApplicationStatus.objects.get(application=app)
+        self.assertEqual(jas.reason_code, "compensation")
+        self.assertEqual(
+            response.json()["data"]["meta"]["triage"]["reason_code"],
+            "compensation",
+        )
+
+    def test_rejects_unknown_reason_code(self):
+        response = self.client.post(
+            self.url,
+            data={"status": "Vetted Bad", "reason_code": "bogus"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_other_reason_requires_note(self):
+        response = self.client.post(
+            self.url,
+            data={"status": "Vetted Bad", "reason_code": "other"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_other_reason_with_note_is_stored(self):
+        response = self.client.post(
+            self.url,
+            data={
+                "status": "Vetted Bad",
+                "reason_code": "other",
+                "note": "Weird vibes on the JD",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        app = JobApplication.objects.get(job_post=self.post, user=self.user)
+        jas = JobApplicationStatus.objects.get(application=app)
+        self.assertEqual(jas.reason_code, "other")
+        self.assertEqual(jas.note, "Weird vibes on the JD")
+
+    def test_vetted_good_ignores_reason_code(self):
+        self.client.post(
+            self.url,
+            data={"status": "Vetted Good", "reason_code": "compensation"},
+            format="json",
+        )
+        app = JobApplication.objects.get(job_post=self.post, user=self.user)
+        jas = JobApplicationStatus.objects.get(application=app)
+        self.assertIsNone(jas.reason_code)

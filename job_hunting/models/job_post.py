@@ -105,12 +105,15 @@ class JobPost(GetMixin, models.Model):
         """Walk the duplicate chain; return self if not a dupe."""
         return self.duplicate_of.canonical if self.duplicate_of_id else self
 
-    @property
-    def active_application_status(self):
-        """Latest JobApplicationStatus.status name for the request user's
-        application on this post. Pre-attached by JobPostViewSet for list/
-        retrieve; returns None if not pre-attached."""
-        return getattr(self, "_active_application_status", None)
+    # Per-caller triage state (status / reason_code / note) is pre-attached
+    # by JobPostViewSet via `_attach_active_application_status` as
+    # `_active_application_status`, `_active_reason_code`,
+    # `_active_reason_note` — and emitted on the JSON:API response under
+    # `meta.triage`, NOT under `attributes`. Not a property of JobPost:
+    # JobPost is shared across users, the triage state is per-user. Read
+    # the private `_active_*` names directly from the serializer's
+    # to_resource override; do not add public `@property`s here, they'd
+    # suggest this data belongs on the model row.
 
     @property
     def top_score(self):

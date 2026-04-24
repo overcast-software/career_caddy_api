@@ -59,12 +59,18 @@ from job_hunting.models import (
 
 
 def _attach_active_application_status(job_posts, user_id):
-    """Pre-attach `_active_application_status` (string or None) on each
-    JobPost: the latest JobApplicationStatus.status name on the user's own
-    application for that post. One query for the whole batch."""
+    """Pre-attach `_active_application_status` (string or None) and
+    `_active_reason_code` on each JobPost: the latest
+    JobApplicationStatus.status name + reason_code on the user's own
+    application for that post. One query for the whole batch.
+
+    reason_code is per-user by construction — sourced from the row whose
+    application.user_id == user_id. Never leaks across tenants."""
     if not job_posts or not user_id:
         for jp in job_posts:
             jp._active_application_status = None
+            jp._active_reason_code = None
+            jp._active_reason_note = None
         return
     post_ids = [jp.id for jp in job_posts]
     from job_hunting.models import JobApplicationStatus
@@ -75,13 +81,19 @@ def _attach_active_application_status(job_posts, user_id):
         .order_by("application__job_post_id", "-logged_at", "-created_at")
     )
     status_map = {}
+    reason_map = {}
+    note_map = {}
     for jas in rows:
         pid = jas.application.job_post_id
         if pid in status_map:
             continue
         status_map[pid] = jas.status.status if jas.status_id else None
+        reason_map[pid] = jas.reason_code
+        note_map[pid] = jas.note
     for jp in job_posts:
         jp._active_application_status = status_map.get(jp.id)
+        jp._active_reason_code = reason_map.get(jp.id)
+        jp._active_reason_note = note_map.get(jp.id)
 
 
 @extend_schema_view(
@@ -388,7 +400,6 @@ class JobPostViewSet(BaseViewSet):
         # them back in POST bodies from a prior GET; setattr would raise
         # because they have no setter.
         attrs.pop("top_score", None)
-        attrs.pop("active_application_status", None)
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(
@@ -440,7 +451,6 @@ class JobPostViewSet(BaseViewSet):
         # them back in PATCH bodies from the prior GET; setattr would raise
         # because they have no setter.
         attrs.pop("top_score", None)
-        attrs.pop("active_application_status", None)
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(
@@ -488,12 +498,28 @@ class JobPostViewSet(BaseViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         status_name = (data.get("status") or "").strip()
         note = (data.get("note") or "").strip() or None
+        reason_code = (data.get("reason_code") or "").strip() or None
         allowed = {"Vetted Good", "Vetted Bad"}
         if status_name not in allowed:
             return Response(
                 {"errors": [{"detail": f"status must be one of {sorted(allowed)}"}]},
                 status=400,
             )
+
+        from job_hunting.lib.vetting_reasons import VETTING_REASON_CODES
+        if status_name != "Vetted Bad":
+            reason_code = None
+        elif reason_code is not None:
+            if reason_code not in VETTING_REASON_CODES:
+                return Response(
+                    {"errors": [{"detail": f"reason_code must be one of {sorted(VETTING_REASON_CODES)}"}]},
+                    status=400,
+                )
+            if reason_code == "other" and not note:
+                return Response(
+                    {"errors": [{"detail": "reason_code 'other' requires a non-empty note"}]},
+                    status=400,
+                )
 
         app = (
             JobApplication.objects.filter(job_post=obj, user=request.user).first()
@@ -507,12 +533,15 @@ class JobPostViewSet(BaseViewSet):
             status=status_row,
             logged_at=_tz.now(),
             note=note,
+            reason_code=reason_code,
         )
         if app.status != status_name:
             app.status = status_name
             app.save(update_fields=["status"])
 
         obj._active_application_status = status_name
+        obj._active_reason_code = reason_code
+        obj._active_reason_note = note if reason_code == "other" else None
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
 

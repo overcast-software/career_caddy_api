@@ -25,9 +25,11 @@ def _log(app, status_name, *, days_ago):
     )
 
 
-def _attrs(client, post_id):
+def _triage(client, post_id):
+    """Per-caller triage summary lives in JSON:API `meta.triage`, not
+    `attributes`. Shape: { status, reason_code, note }."""
     response = client.get(f"/api/v1/job-posts/{post_id}/")
-    return response.json()["data"]["attributes"]
+    return response.json()["data"].get("meta", {}).get("triage", {})
 
 
 class TestJobPostActiveApplicationStatus(TestCase):
@@ -42,21 +44,21 @@ class TestJobPostActiveApplicationStatus(TestCase):
         )
 
     def test_returns_none_when_no_application(self):
-        attrs = _attrs(self.client, self.post.id)
-        self.assertIsNone(attrs["active_application_status"])
+        triage = _triage(self.client, self.post.id)
+        self.assertIsNone(triage["status"])
 
     def test_returns_latest_status_name(self):
         app = JobApplication.objects.create(job_post=self.post, user=self.user)
         _log(app, "Applied", days_ago=10)
         _log(app, "Interview Scheduled", days_ago=2)
-        attrs = _attrs(self.client, self.post.id)
-        self.assertEqual(attrs["active_application_status"], "Interview Scheduled")
+        triage = _triage(self.client, self.post.id)
+        self.assertEqual(triage["status"], "Interview Scheduled")
 
     def test_ignores_other_users_applications(self):
         their_app = JobApplication.objects.create(job_post=self.post, user=self.other)
         _log(their_app, "Offer", days_ago=1)
-        attrs = _attrs(self.client, self.post.id)
-        self.assertIsNone(attrs["active_application_status"])
+        triage = _triage(self.client, self.post.id)
+        self.assertIsNone(triage["status"])
 
     def test_list_endpoint_includes_active_status(self):
         app = JobApplication.objects.create(job_post=self.post, user=self.user)
@@ -64,4 +66,4 @@ class TestJobPostActiveApplicationStatus(TestCase):
         response = self.client.get("/api/v1/job-posts/")
         rows = response.json()["data"]
         match = next(r for r in rows if r["id"] == str(self.post.id))
-        self.assertEqual(match["attributes"]["active_application_status"], "Applied")
+        self.assertEqual(match["meta"]["triage"]["status"], "Applied")
