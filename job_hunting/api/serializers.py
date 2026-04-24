@@ -777,6 +777,13 @@ class JobApplicationSerializer(BaseSerializer):
             "uselist": True,
         },
     }
+    # Without this, the to-many relationships emit only `links` (per JSON:API
+    # spec) and Ember Data can't populate the hasMany from `included` —
+    # <Applications::StatusLog> reads an empty applicationStatuses and renders
+    # "No history yet" even when the DB has rows. Forcing data-linkage means
+    # the frontend must also `?include=application-statuses` so the sideload
+    # actually ships the records — done in routes/job-applications/show.js.
+    linked_relationships = ["application-statuses"]
     relationship_fks = {
         "user": "user_id",
         "users": "user_id",
