@@ -58,7 +58,9 @@ def fingerprint(post) -> str | None:
         _WS.sub(" ", post.title.strip().lower()),
         _WS.sub(" ", (post.location or "").strip().lower()),
     ]
-    return hashlib.sha1("|".join(parts).encode()).hexdigest()
+    return hashlib.sha1(
+        "|".join(parts).encode(), usedforsecurity=False
+    ).hexdigest()
 
 
 def find_duplicate(post, window_days: int = 30):
