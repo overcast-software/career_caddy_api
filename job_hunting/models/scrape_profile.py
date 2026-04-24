@@ -18,6 +18,7 @@ class ScrapeProfile(GetMixin, models.Model):
     avg_content_length = models.IntegerField(null=True, blank=True)
     success_rate = models.FloatField(default=0.0)
     css_selectors = models.JSONField(null=True, blank=True)
+    url_rewrites = models.JSONField(null=True, blank=True)
     extraction_hints = models.TextField(blank=True, default="")
     page_structure = models.TextField(blank=True, default="")
     last_success_at = models.DateTimeField(null=True, blank=True)
