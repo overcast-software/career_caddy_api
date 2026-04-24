@@ -585,6 +585,7 @@ class JobPostSerializer(BaseSerializer):
         "apply_url",
         "apply_url_status",
         "apply_url_resolved_at",
+        "duplicate_of_id",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},

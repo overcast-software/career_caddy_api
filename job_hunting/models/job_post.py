@@ -3,6 +3,7 @@ from django.db import models
 from django.utils import timezone
 
 from .base import GetMixin
+from .job_post_dedupe import canonicalize_link, fingerprint
 
 
 class JobPost(GetMixin, models.Model):
@@ -55,8 +56,30 @@ class JobPost(GetMixin, models.Model):
     apply_url_status = models.CharField(max_length=16, default="unknown")
     apply_url_resolved_at = models.DateTimeField(null=True, blank=True)
 
+    # Dedupe fields. Populated in save(); never read or written by the
+    # apply-resolver. See models/job_post_dedupe.py.
+    canonical_link = models.CharField(
+        max_length=1000, null=True, blank=True, db_index=True
+    )
+    content_fingerprint = models.CharField(
+        max_length=40, null=True, blank=True
+    )
+    duplicate_of = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="duplicates",
+    )
+
     class Meta:
         db_table = "job_post"
+        indexes = [
+            models.Index(
+                fields=["content_fingerprint", "-created_at"],
+                name="jobpost_fp_recent_idx",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         # posted_date falls back to today (or created_at's date) whenever
@@ -71,7 +94,16 @@ class JobPost(GetMixin, models.Model):
                 self.posted_date = self.created_at.date()
             else:
                 self.posted_date = timezone.now().date()
+        if self.link and not self.canonical_link:
+            self.canonical_link = canonicalize_link(self.link)
+        if not self.content_fingerprint:
+            self.content_fingerprint = fingerprint(self)
         super().save(*args, **kwargs)
+
+    @property
+    def canonical(self):
+        """Walk the duplicate chain; return self if not a dupe."""
+        return self.duplicate_of.canonical if self.duplicate_of_id else self
 
     @property
     def active_application_status(self):
@@ -95,6 +127,7 @@ class JobPost(GetMixin, models.Model):
     def from_json(cls, job_dict, **kwargs):
         """Create or retrieve a JobPost from a parsed job dict."""
         from job_hunting.models.company import Company
+        from job_hunting.models.job_post_dedupe import find_duplicate
         company_data = job_dict.get("company") or {}
         company_name = (
             company_data.get("name") if isinstance(company_data, dict) else company_data
@@ -102,12 +135,25 @@ class JobPost(GetMixin, models.Model):
         company = None
         if company_name:
             company, _ = Company.objects.get_or_create(name=company_name)
-        job_post, _ = cls.objects.get_or_create(
+        candidate = cls(
             title=job_dict.get("title"),
             company=company,
+            description=job_dict.get("description"),
+            link=job_dict.get("link"),
+            location=job_dict.get("location"),
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        candidate.content_fingerprint = fingerprint(candidate)
+        existing = find_duplicate(candidate)
+        if existing:
+            return existing
+        job_post, _ = cls.objects.get_or_create(
+            title=candidate.title,
+            company=company,
             defaults={
-                "description": job_dict.get("description"),
-                "link": job_dict.get("link"),
+                "description": candidate.description,
+                "link": candidate.link,
+                "location": candidate.location,
             },
         )
         return job_post

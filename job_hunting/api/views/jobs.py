@@ -399,6 +399,17 @@ class JobPostViewSet(BaseViewSet):
             if existing:
                 return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         obj = JobPost(**attrs)
+        # Populate dedupe fields pre-save so find_duplicate sees them.
+        from job_hunting.models.job_post_dedupe import (
+            canonicalize_link,
+            fingerprint,
+            find_duplicate,
+        )
+        obj.canonical_link = canonicalize_link(obj.link)
+        obj.content_fingerprint = fingerprint(obj)
+        dupe = find_duplicate(obj)
+        if dupe:
+            return Response({"data": ser.to_resource(dupe)}, status=status.HTTP_200_OK)
         obj.save()
         if not obj.posted_date:
             obj.posted_date = obj.created_at.date()
