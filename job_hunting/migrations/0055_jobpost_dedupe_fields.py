@@ -39,7 +39,9 @@ def _fingerprint(company_id, title, location):
         _WS.sub(" ", title.strip().lower()),
         _WS.sub(" ", (location or "").strip().lower()),
     ]
-    return hashlib.sha1("|".join(parts).encode()).hexdigest()
+    return hashlib.sha1(
+        "|".join(parts).encode(), usedforsecurity=False
+    ).hexdigest()
 
 
 def backfill(apps, schema_editor):
