@@ -292,6 +292,46 @@ class ScrapeViewSet(BaseViewSet):
                     {"errors": [{"detail": "URL is required"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            # Belt to the prompt's suspenders: if the URL maps to an existing
+            # JobPost (per canonical_link or raw link), DO NOT mint a redundant
+            # scrape. Return the existing post so the chat agent / extension
+            # can navigate the user instead of triggering a re-scrape they
+            # didn't ask for. Prompt-level rule still teaches the flow; this
+            # makes it impossible to skip even when the URL is buried in
+            # pasted text the agent didn't fully read.
+            from job_hunting.models.job_post_dedupe import canonicalize_link
+            from ..serializers import JobPostSerializer
+            canonical = canonicalize_link(url)
+            existing_jp = None
+            if canonical:
+                existing_jp = JobPost.objects.filter(
+                    canonical_link=canonical
+                ).first()
+            if existing_jp is None:
+                existing_jp = JobPost.objects.filter(link=url).first()
+            if existing_jp is not None:
+                logger.info(
+                    "ScrapeViewSet.create: url already maps to job_post id=%s; "
+                    "skipping scrape",
+                    existing_jp.id,
+                )
+                jp_ser = JobPostSerializer()
+                return Response(
+                    {
+                        "data": jp_ser.to_resource(existing_jp),
+                        "meta": {
+                            "duplicate": True,
+                            "scrape_created": False,
+                            "existing_job_post_id": existing_jp.id,
+                            "message": (
+                                f"URL already maps to job post "
+                                f"#{existing_jp.id}; not creating a scrape."
+                            ),
+                        },
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
             source = attrs.get("source") or data.get("source") or "scrape"
             scrape = Scrape.objects.create(
                 url=url,
