@@ -19,6 +19,17 @@ class ScrapeProfile(GetMixin, models.Model):
     success_rate = models.FloatField(default=0.0)
     css_selectors = models.JSONField(null=True, blank=True)
     url_rewrites = models.JSONField(null=True, blank=True)
+    # Per-host directions for the apply-destination resolver
+    # (ResolveApplyUrl in ai/lib/scrape_graph). Shape:
+    #   {
+    #     "internal_apply_markers": [".jobs-apply-button--easy-apply", ...],
+    #     "apply_link_selectors":   ["a[data-tracking-control-name='apply']", ...],
+    #     "apply_button_selectors": ["button.apply-button", ...]
+    #   }
+    # Resolver tries internal markers first (→ status=internal, no nav),
+    # then link selectors (read href, no nav), then button selectors
+    # (click + capture page.url). Missing/empty → resolver no-ops.
+    apply_resolver_config = models.JSONField(null=True, blank=True)
     extraction_hints = models.TextField(blank=True, default="")
     page_structure = models.TextField(blank=True, default="")
     last_success_at = models.DateTimeField(null=True, blank=True)
