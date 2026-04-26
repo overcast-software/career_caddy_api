@@ -684,6 +684,71 @@ class ScrapeViewSet(BaseViewSet):
             status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
         )
 
+    @action(detail=True, methods=["patch", "post"], url_path="apply-url")
+    def apply_url(self, request, pk=None):
+        """Persist the apply-destination resolver outcome.
+
+        Body: {"data": {"attributes": {"apply_url?": "https://...",
+        "apply_url_status": "resolved|internal|failed|stale|unknown"}}}
+
+        Writes the result to this Scrape AND through to its JobPost
+        (if linked), stamping `apply_url_resolved_at` on the JobPost when
+        the status is `resolved` or `internal`. Called by the
+        ResolveApplyUrl node in the scrape-graph.
+        """
+        scrape = Scrape.objects.filter(pk=pk).first()
+        if not scrape:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and scrape.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        body = request.data if isinstance(request.data, dict) else {}
+        attrs = (body.get("data") or {}).get("attributes") or body.get("attributes") or body
+
+        new_status = (attrs.get("apply_url_status") or "").strip()
+        valid = {"unknown", "resolved", "internal", "failed", "stale"}
+        if new_status not in valid:
+            return Response(
+                {"errors": [{"detail": f"apply_url_status must be one of {sorted(valid)}"}]},
+                status=400,
+            )
+        new_url = attrs.get("apply_url") or None
+        if new_url and len(new_url) > 2000:
+            return Response(
+                {"errors": [{"detail": "apply_url too long (max 2000)"}]},
+                status=400,
+            )
+
+        from django.utils import timezone
+
+        scrape.apply_url = new_url
+        scrape.apply_url_status = new_status
+        scrape.save(update_fields=["apply_url", "apply_url_status"])
+
+        job_post = scrape.job_post
+        if job_post is not None:
+            job_post.apply_url = new_url
+            job_post.apply_url_status = new_status
+            if new_status in ("resolved", "internal"):
+                job_post.apply_url_resolved_at = timezone.now()
+            job_post.save(update_fields=[
+                "apply_url", "apply_url_status", "apply_url_resolved_at",
+            ])
+
+        scrape.refresh_from_db()
+        ser = self.get_serializer()
+        return Response(
+            {
+                "data": ser.to_resource(scrape),
+                "meta": {
+                    "job_post_id": scrape.job_post_id,
+                    "apply_url": scrape.apply_url,
+                    "apply_url_status": scrape.apply_url_status,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="graph-transition")
     def graph_transition(self, request, pk=None):
         """Record a scrape-graph node transition as a ScrapeStatus row.
