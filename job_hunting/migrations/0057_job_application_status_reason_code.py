@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("job_hunting", "0055_jobpost_dedupe_fields"),
+        ("job_hunting", "0056_scrapeprofile_apply_resolver_config"),
     ]
 
     operations = [
