@@ -662,6 +662,7 @@ class ScrapeSerializer(BaseSerializer):
         "latest_status_note",
         "apply_url",
         "apply_url_status",
+        "apply_candidates",
     ]
     # latest_status_note is a derived @property on Scrape with no setter —
     # output it but reject it on PATCH so frontend round-trips don't 500

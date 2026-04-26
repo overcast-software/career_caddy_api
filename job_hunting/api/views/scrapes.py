@@ -729,12 +729,21 @@ class ScrapeViewSet(BaseViewSet):
         """Persist the apply-destination resolver outcome.
 
         Body: {"data": {"attributes": {"apply_url?": "https://...",
-        "apply_url_status": "resolved|internal|failed|stale|unknown"}}}
+        "apply_url_status": "resolved|internal|failed|stale|unknown",
+        "apply_candidates?": [{"selector": "...", "href": "...",
+                                "text": "...", "tag": "...",
+                                "score": 0.0, "reason": "..."}]}}}
 
         Writes the result to this Scrape AND through to its JobPost
         (if linked), stamping `apply_url_resolved_at` on the JobPost when
         the status is `resolved` or `internal`. Called by the
         ResolveApplyUrl node in the scrape-graph.
+
+        `apply_candidates` is the Phase 3 learning-loop capture: when
+        the resolver ends in unknown/failed, the heuristic scan stores
+        candidate "Apply" elements here for later aggregation. Capped
+        at 50 candidates to keep payloads bounded — should be plenty
+        for any single page.
         """
         scrape = Scrape.objects.filter(pk=pk).first()
         if not scrape:
@@ -759,11 +768,24 @@ class ScrapeViewSet(BaseViewSet):
                 status=400,
             )
 
+        new_candidates = attrs.get("apply_candidates")
+        if new_candidates is not None:
+            if not isinstance(new_candidates, list):
+                return Response(
+                    {"errors": [{"detail": "apply_candidates must be a list"}]},
+                    status=400,
+                )
+            new_candidates = new_candidates[:50]
+
         from django.utils import timezone
 
         scrape.apply_url = new_url
         scrape.apply_url_status = new_status
-        scrape.save(update_fields=["apply_url", "apply_url_status"])
+        update_fields = ["apply_url", "apply_url_status"]
+        if new_candidates is not None:
+            scrape.apply_candidates = new_candidates
+            update_fields.append("apply_candidates")
+        scrape.save(update_fields=update_fields)
 
         job_post = scrape.job_post
         if job_post is not None:

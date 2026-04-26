@@ -114,6 +114,89 @@ class ScrapeApplyUrlEndpointTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
 
+    def test_apply_candidates_round_trip(self):
+        """Phase 3: when the resolver ends in unknown/failed it captures
+        candidate Apply elements for later aggregation. Persist verbatim."""
+        _, sc = self._make()
+        candidates = [
+            {
+                "selector": "a.btn.apply",
+                "href": "https://ats.example/apply",
+                "text": "Apply Now",
+                "tag": "a",
+                "score": 0.9,
+                "reason": "href contains 'apply' AND text 'apply'",
+            },
+            {
+                "selector": "button[data-test='easy-apply']",
+                "href": None,
+                "text": "Easy Apply",
+                "tag": "button",
+                "score": 0.7,
+                "reason": "data-test attr contains 'easy-apply'",
+            },
+        ]
+        resp = self.client.patch(
+            f"/api/v1/scrapes/{sc.id}/apply-url/",
+            {"data": {"attributes": {
+                "apply_url_status": "failed",
+                "apply_candidates": candidates,
+            }}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        sc.refresh_from_db()
+        self.assertEqual(sc.apply_candidates, candidates)
+        self.assertEqual(sc.apply_url_status, "failed")
+
+    def test_apply_candidates_capped_at_50(self):
+        _, sc = self._make()
+        many = [{"selector": f"a.c{i}", "href": "https://x/y", "text": "Apply",
+                 "tag": "a", "score": 0.1, "reason": "spam"}
+                for i in range(120)]
+        resp = self.client.patch(
+            f"/api/v1/scrapes/{sc.id}/apply-url/",
+            {"data": {"attributes": {
+                "apply_url_status": "failed",
+                "apply_candidates": many,
+            }}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        sc.refresh_from_db()
+        self.assertEqual(len(sc.apply_candidates), 50)
+
+    def test_apply_candidates_must_be_list(self):
+        _, sc = self._make()
+        resp = self.client.patch(
+            f"/api/v1/scrapes/{sc.id}/apply-url/",
+            {"data": {"attributes": {
+                "apply_url_status": "failed",
+                "apply_candidates": {"oops": "this is a dict"},
+            }}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_apply_candidates_omitted_does_not_clobber(self):
+        """When the field is omitted on a subsequent PATCH, prior
+        candidates stay intact (capture is preserved, not overwritten by
+        a later resolved-status PATCH that has no candidates to report)."""
+        _, sc = self._make()
+        sc.apply_candidates = [{"selector": "a.x", "href": "h", "text": "t",
+                                "tag": "a", "score": 0.5, "reason": "r"}]
+        sc.save(update_fields=["apply_candidates"])
+        resp = self.client.patch(
+            f"/api/v1/scrapes/{sc.id}/apply-url/",
+            {"data": {"attributes": {"apply_url_status": "resolved",
+                                      "apply_url": "https://x/y"}}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        sc.refresh_from_db()
+        self.assertEqual(len(sc.apply_candidates), 1)
+        self.assertEqual(sc.apply_url_status, "resolved")
+
 
 class ScrapeProfileApplyConfigTests(TestCase):
     """ScrapeProfile.apply_resolver_config round-trips through the serializer."""

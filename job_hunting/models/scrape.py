@@ -51,6 +51,14 @@ class Scrape(GetMixin, models.Model):
     # resolver outcome it produced so multi-scrape histories stay truthful.
     apply_url = models.CharField(max_length=2000, null=True, blank=True)
     apply_url_status = models.CharField(max_length=16, default="unknown")
+    # Phase 3 learning loop: when the resolver ends in unknown/failed,
+    # the ai-side heuristic scan stores candidate "Apply" elements
+    # here for later aggregation + promotion into
+    # ScrapeProfile.apply_resolver_config. Shape:
+    #   [{"selector": ".btn.apply", "href": "https://...", "text": "Apply",
+    #     "tag": "a", "score": 0.8, "reason": "href contains 'apply'"}]
+    # Capture-only — promotion is a separate manual/automated step.
+    apply_candidates = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "scrape"
