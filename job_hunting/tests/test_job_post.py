@@ -77,15 +77,15 @@ class TestJobPostAPI(TestCase):
 
     def test_patch_ignores_readonly_computed_attributes(self):
         """Regression: the frontend echoes back attributes from a prior GET.
-        Computed properties (top_score, active_application_status) have no
-        setter, so setattr would 500 the PATCH unless we pop them first."""
+        top_score has no setter and must be popped. Triage state lives in
+        meta.triage (never in attributes) so it can't even arrive here —
+        this keeps the top_score guard honest."""
         payload = {
             "data": {
                 "type": "job-post",
                 "id": str(self.job_post.id),
                 "attributes": {
                     "title": "Renamed",
-                    "active_application_status": "Vetted Bad",
                     "top_score": 42,
                 },
             }

@@ -580,7 +580,6 @@ class JobPostSerializer(BaseSerializer):
         "location",
         "remote",
         "top_score",
-        "active_application_status",
         "source",
         "apply_url",
         "apply_url_status",
@@ -626,6 +625,26 @@ class JobPostSerializer(BaseSerializer):
                 qs = qs.filter(user_id=user_id)
             return "summary", list(qs)
         return super().get_related(obj, rel_name)
+
+    def to_resource(self, obj):
+        # Per-caller triage summary lives in JSON:API `meta`, not
+        # `attributes`. JobPost is shared across users; the user's triage
+        # status + reason + free-text note is NOT a property of the post,
+        # it's a view-time derivation for the requesting user. Putting it
+        # in `meta` keeps `attributes` honest about what's actually stored
+        # on the JobPost row, and clients can't round-trip it back on a
+        # PATCH as a resource field.
+        #
+        # Shape: meta.triage = { status, reason_code, note }
+        # All three may be null when the caller has never triaged.
+        res = super().to_resource(obj)
+        triage = {
+            "status": getattr(obj, "_active_application_status", None),
+            "reason_code": getattr(obj, "_active_reason_code", None),
+            "note": getattr(obj, "_active_reason_note", None),
+        }
+        res.setdefault("meta", {})["triage"] = triage
+        return res
 
 
 class ScrapeSerializer(BaseSerializer):
@@ -992,7 +1011,7 @@ class StatusSerializer(serializers.ModelSerializer):
 class JobApplicationStatusSerializer(BaseSerializer):
     type = "job-application-status"
     model = JobApplicationStatus
-    attributes = ["created_at", "logged_at", "note"]
+    attributes = ["created_at", "logged_at", "note", "reason_code"]
     relationships = {
         "application": {
             "attr": "application",
