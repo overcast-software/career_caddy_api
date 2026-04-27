@@ -2,6 +2,7 @@ import math
 
 from datetime import timedelta
 
+from django.db import transaction
 from django.db.models import Q, F, OuterRef, Subquery
 from django.db.models.functions import Length
 from django.utils import timezone
@@ -456,12 +457,33 @@ class JobPostViewSet(BaseViewSet):
             return Response(
                 {"errors": [{"detail": v} for v in date_errors.values()]}, status=400
             )
+        prev_company_id = obj.company_id
         for k, v in attrs.items():
             setattr(obj, k, v)
         obj.save()
         if not obj.posted_date:
             obj.posted_date = obj.created_at.date()
             obj.save(update_fields=["posted_date"])
+        # When the post moves to a different Company (typo correction is
+        # the dominant case in multi-tenant), cascade the FK to the four
+        # child tables that carry their own company_id. Bulk UPDATE skips
+        # signals/save() — the children's textual content is left alone
+        # (Q&A / cover letters / applications are write-once-and-forget
+        # in practice; rewriting bodies is out of scope).
+        if obj.company_id != prev_company_id:
+            with transaction.atomic():
+                Question.objects.filter(job_post_id=obj.id).update(
+                    company_id=obj.company_id
+                )
+                Scrape.objects.filter(job_post_id=obj.id).update(
+                    company_id=obj.company_id
+                )
+                CoverLetter.objects.filter(job_post_id=obj.id).update(
+                    company_id=obj.company_id
+                )
+                JobApplication.objects.filter(job_post_id=obj.id).update(
+                    company_id=obj.company_id
+                )
         return Response({"data": ser.to_resource(obj)})
 
     def destroy(self, request, pk=None):
