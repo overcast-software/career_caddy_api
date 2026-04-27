@@ -294,13 +294,17 @@ class ScrapeViewSet(BaseViewSet):
                 )
             # Belt to the prompt's suspenders: if the URL maps to an existing
             # JobPost (per canonical_link or raw link), DO NOT mint a redundant
-            # scrape. Return the existing post so the chat agent / extension
-            # can navigate the user instead of triggering a re-scrape they
-            # didn't ask for. Prompt-level rule still teaches the flow; this
-            # makes it impossible to skip even when the URL is buried in
-            # pasted text the agent didn't fully read.
+            # scrape. Respond 409 with the existing post id in errors[].meta
+            # so the chat agent / frontend / extension can navigate the user
+            # instead of triggering a re-scrape they didn't ask for.
+            #
+            # The 409 shape (errors[], no data) matters: the frontend calls
+            # this via Ember Data createRecord('scrape').save(). Returning
+            # 200 with data.type='job-post' would push a foreign type into
+            # the in-flight scrape identifier and collide with an existing
+            # job-post:N lid in the store. Errors-only with a non-2xx
+            # status keeps Ember Data from touching the store.
             from job_hunting.models.job_post_dedupe import canonicalize_link
-            from ..serializers import JobPostSerializer
             canonical = canonicalize_link(url)
             existing_jp = None
             if canonical:
@@ -315,21 +319,24 @@ class ScrapeViewSet(BaseViewSet):
                     "skipping scrape",
                     existing_jp.id,
                 )
-                jp_ser = JobPostSerializer()
                 return Response(
                     {
-                        "data": jp_ser.to_resource(existing_jp),
-                        "meta": {
-                            "duplicate": True,
-                            "scrape_created": False,
-                            "existing_job_post_id": existing_jp.id,
-                            "message": (
-                                f"URL already maps to job post "
-                                f"#{existing_jp.id}; not creating a scrape."
-                            ),
-                        },
+                        "errors": [
+                            {
+                                "status": "409",
+                                "code": "duplicate",
+                                "title": "URL maps to existing job post",
+                                "detail": (
+                                    f"URL already maps to job post "
+                                    f"#{existing_jp.id}; not creating a scrape."
+                                ),
+                                "meta": {
+                                    "existing_job_post_id": existing_jp.id,
+                                },
+                            }
+                        ]
                     },
-                    status=status.HTTP_200_OK,
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             source = attrs.get("source") or data.get("source") or "scrape"
