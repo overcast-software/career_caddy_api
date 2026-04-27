@@ -3,6 +3,12 @@ scrape when the URL already maps to a JobPost. Closes the chat-agent
 half of the dedup-by-link story at the tool layer (the prompt rule
 shipped 2026-04-26 in ai PR #14; this is the belt to that
 suspenders).
+
+Returns 409 with errors[0].meta.existing_job_post_id (no `data` key)
+so Ember Data clients calling createRecord('scrape').save() don't
+get a JobPost pushed into the in-flight scrape identifier — a 200 +
+data.type='job-post' previously corrupted the store with a lid
+collision (scrape:null trying to take id N already held by job-post:N).
 """
 from django.test import TestCase
 from django.contrib.auth import get_user_model
@@ -29,7 +35,7 @@ class ScrapeCreateDedupByLinkTests(TestCase):
         }
         return self.client.post("/api/v1/scrapes/", body, format="json")
 
-    def test_returns_existing_job_post_when_url_matches(self):
+    def test_returns_409_with_existing_job_post_id_when_url_matches(self):
         jp = JobPost.objects.create(
             title="Senior Widget Engineer",
             company=self.company,
@@ -37,13 +43,12 @@ class ScrapeCreateDedupByLinkTests(TestCase):
             created_by=self.user,
         )
         resp = self._create_hold("https://acme.example/jobs/42")
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 409)
         body = resp.json()
-        self.assertEqual(body["meta"]["duplicate"], True)
-        self.assertEqual(body["meta"]["scrape_created"], False)
-        self.assertEqual(body["meta"]["existing_job_post_id"], jp.id)
-        self.assertEqual(body["data"]["type"], "job-post")
-        self.assertEqual(int(body["data"]["id"]), jp.id)
+        self.assertNotIn("data", body)
+        err = body["errors"][0]
+        self.assertEqual(err["code"], "duplicate")
+        self.assertEqual(err["meta"]["existing_job_post_id"], jp.id)
         # No scrape row should have been minted.
         self.assertFalse(
             Scrape.objects.filter(url="https://acme.example/jobs/42").exists()
@@ -61,8 +66,10 @@ class ScrapeCreateDedupByLinkTests(TestCase):
         resp = self._create_hold(
             "https://acme.example/jobs/77?utm_source=newsletter&utm_medium=email"
         )
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["meta"]["existing_job_post_id"], jp.id)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(
+            resp.json()["errors"][0]["meta"]["existing_job_post_id"], jp.id
+        )
         self.assertFalse(
             Scrape.objects.filter(url__contains="utm_source").exists()
         )
@@ -72,8 +79,6 @@ class ScrapeCreateDedupByLinkTests(TestCase):
         self.assertEqual(resp.status_code, 201)
         body = resp.json()
         self.assertEqual(body["data"]["type"], "scrape")
-        # No duplicate meta on the happy path.
-        self.assertNotIn("duplicate", body.get("meta", {}))
         self.assertTrue(
             Scrape.objects.filter(url="https://other.example/jobs/1").exists()
         )
@@ -91,5 +96,7 @@ class ScrapeCreateDedupByLinkTests(TestCase):
         # Force canonical_link to None to exercise the raw-link fallback.
         JobPost.objects.filter(pk=jp.id).update(canonical_link=None)
         resp = self._create_hold("https://legacy.example/jobs/9")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["meta"]["existing_job_post_id"], jp.id)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(
+            resp.json()["errors"][0]["meta"]["existing_job_post_id"], jp.id
+        )
