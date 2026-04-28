@@ -41,7 +41,7 @@ _CLOSED_RE = re.compile(
 )
 
 
-def detect_application_status(text: Optional[str]) -> Optional[str]:
+def detect_posting_status(text: Optional[str]) -> Optional[str]:
     """Return ``"closed"`` if a closed-posting phrase appears in
     ``text``, otherwise ``None``.
 

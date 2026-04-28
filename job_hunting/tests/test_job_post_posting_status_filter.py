@@ -22,7 +22,7 @@ class JobPostApplicationStatusFilterTests(TestCase):
             company=self.company,
             link="https://acme.example/jobs/1",
             description="x" * 500,
-            application_status="open",
+            posting_status="open",
             created_by=self.user,
         )
         self.closed_post = JobPost.objects.create(
@@ -30,7 +30,7 @@ class JobPostApplicationStatusFilterTests(TestCase):
             company=self.company,
             link="https://acme.example/jobs/2",
             description="x" * 500,
-            application_status="closed",
+            posting_status="closed",
             created_by=self.user,
         )
         self.unknown_post = JobPost.objects.create(
@@ -38,7 +38,7 @@ class JobPostApplicationStatusFilterTests(TestCase):
             company=self.company,
             link="https://acme.example/jobs/3",
             description="x" * 500,
-            application_status=None,
+            posting_status=None,
             created_by=self.user,
         )
 
@@ -64,20 +64,20 @@ class JobPostApplicationStatusFilterTests(TestCase):
 
     def test_explicit_closed_filter_returns_only_closed(self):
         resp = self.client.get(
-            "/api/v1/job-posts/?filter[application_status]=closed"
+            "/api/v1/job-posts/?filter[posting_status]=closed"
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._ids(resp), {self.closed_post.id})
 
     def test_explicit_open_filter_returns_only_open(self):
         resp = self.client.get(
-            "/api/v1/job-posts/?filter[application_status]=open"
+            "/api/v1/job-posts/?filter[posting_status]=open"
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._ids(resp), {self.open_post.id})
 
-    def test_application_status_in_serialized_attributes(self):
+    def test_posting_status_in_serialized_attributes(self):
         resp = self.client.get(f"/api/v1/job-posts/{self.closed_post.id}/")
         self.assertEqual(resp.status_code, 200)
         attrs = resp.json()["data"]["attributes"]
-        self.assertEqual(attrs["application_status"], "closed")
+        self.assertEqual(attrs["posting_status"], "closed")

@@ -185,14 +185,14 @@ class JobPostExtractor:
             job_defaults["location"] = validated_data.location
         if validated_data.remote is not None:
             job_defaults["remote"] = validated_data.remote
-        # Read application_status off the description text. None means
+        # Read posting_status off the description text. None means
         # "no signal" — leave the column NULL so the list view's
         # default-hide-closed filter still surfaces the post.
-        from job_hunting.lib.text_signals import detect_application_status
+        from job_hunting.lib.text_signals import detect_posting_status
 
-        detected_status = detect_application_status(validated_data.description)
+        detected_status = detect_posting_status(validated_data.description)
         if detected_status is not None:
-            job_defaults["application_status"] = detected_status
+            job_defaults["posting_status"] = detected_status
         # Carry scrape provenance onto the JobPost so downstream analytics
         # (sankey 'stub' detection, per-source funnel) can attribute the
         # post to its origin. Falls back to 'manual' if somehow unset.
@@ -274,9 +274,9 @@ class JobPostExtractor:
             if update_fields:
                 job.save(update_fields=update_fields)
 
-        # Application-status update is sticky-once-closed: any persist
+        # Posting-status update is sticky-once-closed: any persist
         # branch above that runs into an existing post will skip
-        # job_defaults["application_status"] (the non-force / non-stub
+        # job_defaults["posting_status"] (the non-force / non-stub
         # branch only fills NULL fields). For the close signal we want
         # the opposite — re-scraping a previously-open post that's now
         # showing closed phrases SHOULD flip it. The detector never
@@ -284,9 +284,9 @@ class JobPostExtractor:
         # only ever moves towards closed and never silently flips
         # closed back to None on a re-scrape that didn't fire any
         # phrase.
-        if detected_status == "closed" and job.application_status != "closed":
-            job.application_status = "closed"
-            job.save(update_fields=["application_status"])
+        if detected_status == "closed" and job.posting_status != "closed":
+            job.posting_status = "closed"
+            job.save(update_fields=["posting_status"])
 
         # Link scrape → job_post and company
         update_fields = []
