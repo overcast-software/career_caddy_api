@@ -292,10 +292,23 @@ class ScrapeViewSet(BaseViewSet):
                     {"errors": [{"detail": "URL is required"}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            # Belt to the prompt's suspenders: if the URL maps to an existing
-            # JobPost (per canonical_link or raw link), DO NOT mint a redundant
-            # scrape. Respond 409 with the existing post id in errors[].meta
-            # so the chat agent / frontend / extension can navigate the user
+            # Resolve any explicit JobPost relationship the caller sent.
+            # Doing this BEFORE the dedupe check lets jp.show's "Run scrape"
+            # / "Scrape & Score" actions re-scrape the post they're already
+            # viewing — the caller has named the post, so we're not at risk
+            # of minting a duplicate. The dedupe gate exists to protect the
+            # context-free callers (chat agent, bookmarklet, list-row
+            # Scrape & Score), which don't pass a relationship.
+            rels = (data.get("data") or {}).get("relationships") or {} if isinstance(data.get("data"), dict) else {}
+            jp_rel = rels.get("job-post") or rels.get("job_post")
+            linked_jp = None
+            if jp_rel and isinstance(jp_rel.get("data"), dict):
+                linked_jp = JobPost.objects.filter(pk=int(jp_rel["data"]["id"])).first()
+
+            # Dedupe gate: if no relationship was supplied, refuse to mint a
+            # redundant scrape when the URL already maps to a JobPost.
+            # Respond 409 with the existing post id in errors[].meta so the
+            # chat agent / frontend / extension can navigate the user
             # instead of triggering a re-scrape they didn't ask for.
             #
             # The 409 shape (errors[], no data) matters: the frontend calls
@@ -304,40 +317,41 @@ class ScrapeViewSet(BaseViewSet):
             # the in-flight scrape identifier and collide with an existing
             # job-post:N lid in the store. Errors-only with a non-2xx
             # status keeps Ember Data from touching the store.
-            from job_hunting.models.job_post_dedupe import canonicalize_link
-            canonical = canonicalize_link(url)
-            existing_jp = None
-            if canonical:
-                existing_jp = JobPost.objects.filter(
-                    canonical_link=canonical
-                ).first()
-            if existing_jp is None:
-                existing_jp = JobPost.objects.filter(link=url).first()
-            if existing_jp is not None:
-                logger.info(
-                    "ScrapeViewSet.create: url already maps to job_post id=%s; "
-                    "skipping scrape",
-                    existing_jp.id,
-                )
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "status": "409",
-                                "code": "duplicate",
-                                "title": "URL maps to existing job post",
-                                "detail": (
-                                    f"URL already maps to job post "
-                                    f"#{existing_jp.id}; not creating a scrape."
-                                ),
-                                "meta": {
-                                    "existing_job_post_id": existing_jp.id,
-                                },
-                            }
-                        ]
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+            if linked_jp is None:
+                from job_hunting.models.job_post_dedupe import canonicalize_link
+                canonical = canonicalize_link(url)
+                existing_jp = None
+                if canonical:
+                    existing_jp = JobPost.objects.filter(
+                        canonical_link=canonical
+                    ).first()
+                if existing_jp is None:
+                    existing_jp = JobPost.objects.filter(link=url).first()
+                if existing_jp is not None:
+                    logger.info(
+                        "ScrapeViewSet.create: url already maps to job_post id=%s; "
+                        "skipping scrape",
+                        existing_jp.id,
+                    )
+                    return Response(
+                        {
+                            "errors": [
+                                {
+                                    "status": "409",
+                                    "code": "duplicate",
+                                    "title": "URL maps to existing job post",
+                                    "detail": (
+                                        f"URL already maps to job post "
+                                        f"#{existing_jp.id}; not creating a scrape."
+                                    ),
+                                    "meta": {
+                                        "existing_job_post_id": existing_jp.id,
+                                    },
+                                }
+                            ]
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
             source = attrs.get("source") or data.get("source") or "scrape"
             scrape = Scrape.objects.create(
@@ -348,13 +362,9 @@ class ScrapeViewSet(BaseViewSet):
             )
             from job_hunting.lib.scraper import _log_scrape_status
             _log_scrape_status(scrape.id, "hold")
-            # Bind to an explicit job_post relationship if provided, else fall back
-            # to matching by URL. Inherit the job post's company when none supplied.
-            rels = (data.get("data") or {}).get("relationships") or {} if isinstance(data.get("data"), dict) else {}
-            jp_rel = rels.get("job-post") or rels.get("job_post")
-            linked_jp = None
-            if jp_rel and isinstance(jp_rel.get("data"), dict):
-                linked_jp = JobPost.objects.filter(pk=int(jp_rel["data"]["id"])).first()
+            # Bind to the JobPost: explicit relationship takes precedence,
+            # otherwise fall back to matching by URL. Inherit the job
+            # post's company when none supplied.
             if not linked_jp:
                 linked_jp = JobPost.objects.filter(link=url).first()
             if linked_jp:
