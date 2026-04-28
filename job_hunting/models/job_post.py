@@ -56,6 +56,24 @@ class JobPost(GetMixin, models.Model):
     apply_url_status = models.CharField(max_length=16, default="unknown")
     apply_url_resolved_at = models.DateTimeField(null=True, blank=True)
 
+    # Whether the posting is still accepting applications, populated
+    # from the description by the extractor's text-signal pass (see
+    # lib/text_signals.py). null = unknown — historical rows we never
+    # scanned default here so we don't lie about state. The list view
+    # excludes "closed" by default; per-post UI surfaces a chip only
+    # in the closed case.
+    APPLICATION_STATUS_CHOICES = [
+        ("open", "Open"),
+        ("closed", "Closed"),
+    ]
+    application_status = models.CharField(
+        max_length=16,
+        choices=APPLICATION_STATUS_CHOICES,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+
     # Dedupe fields. Populated in save(); never read or written by the
     # apply-resolver. See models/job_post_dedupe.py.
     canonical_link = models.CharField(

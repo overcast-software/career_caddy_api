@@ -280,6 +280,19 @@ class JobPostViewSet(BaseViewSet):
                     description__isnull=False, _desc_len__gte=450
                 ).exclude(description="")
 
+        # Application status: default-hide closed posts. Pass
+        # ?include_closed=true to opt back in (list-view toggle), or
+        # ?filter[application_status]=closed for an exact match. Posts
+        # with NULL status (historical / never-scanned) always show.
+        app_status_filter = request.query_params.get("filter[application_status]")
+        include_closed = str(
+            request.query_params.get("include_closed") or ""
+        ).lower() in ("1", "true", "yes")
+        if app_status_filter is not None:
+            qs = qs.filter(application_status=app_status_filter)
+        elif not include_closed:
+            qs = qs.exclude(application_status="closed")
+
         company_id_filter = request.query_params.get("filter[company_id]")
         if company_id_filter is not None:
             qs = qs.filter(company_id=company_id_filter)
