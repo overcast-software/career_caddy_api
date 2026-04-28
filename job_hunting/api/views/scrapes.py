@@ -22,7 +22,6 @@ from ._schema import (
     _JSONAPI_ITEM,
 )
 from ..serializers import ScrapeSerializer, ScrapeProfileSerializer
-from job_hunting.lib.scraper import Scraper
 from job_hunting.models import (
     JobPost,
     Scrape,
@@ -283,232 +282,143 @@ class ScrapeViewSet(BaseViewSet):
             if url is None:
                 url = attrs.get("url")
 
-        # "hold" status: create the scrape record without dispatching the scraper.
-        # Used by MCP agents to queue URLs for later processing.
+        # The synchronous browser-MCP scrape path (`Scraper(...).dispatch()`)
+        # is gone — every scrape now creates as `hold` and the
+        # hold-poller picks it up. If a caller passes status != "hold"
+        # we coerce to hold and log a warning; older clients should
+        # migrate to explicit hold but we don't break them.
         req_status = attrs.get("status") or data.get("status")
-        if req_status == "hold":
-            if not url:
-                return Response(
-                    {"errors": [{"detail": "URL is required"}]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            # Resolve any explicit JobPost relationship the caller sent.
-            # Doing this BEFORE the dedupe check lets jp.show's "Run scrape"
-            # / "Scrape & Score" actions re-scrape the post they're already
-            # viewing — the caller has named the post, so we're not at risk
-            # of minting a duplicate. The dedupe gate exists to protect the
-            # context-free callers (chat agent, bookmarklet, list-row
-            # Scrape & Score), which don't pass a relationship.
-            rels = (data.get("data") or {}).get("relationships") or {} if isinstance(data.get("data"), dict) else {}
-            jp_rel = rels.get("job-post") or rels.get("job_post")
-            linked_jp = None
-            if jp_rel and isinstance(jp_rel.get("data"), dict):
-                linked_jp = JobPost.objects.filter(pk=int(jp_rel["data"]["id"])).first()
-
-            # Dedupe gate: if no relationship was supplied, refuse to mint a
-            # redundant scrape when the URL already maps to a JobPost.
-            # Respond 409 with the existing post id in errors[].meta so the
-            # chat agent / frontend / extension can navigate the user
-            # instead of triggering a re-scrape they didn't ask for.
-            #
-            # The 409 shape (errors[], no data) matters: the frontend calls
-            # this via Ember Data createRecord('scrape').save(). Returning
-            # 200 with data.type='job-post' would push a foreign type into
-            # the in-flight scrape identifier and collide with an existing
-            # job-post:N lid in the store. Errors-only with a non-2xx
-            # status keeps Ember Data from touching the store.
-            if linked_jp is None:
-                from job_hunting.models.job_post_dedupe import canonicalize_link
-                canonical = canonicalize_link(url)
-                existing_jp = None
-                if canonical:
-                    existing_jp = JobPost.objects.filter(
-                        canonical_link=canonical
-                    ).first()
-                if existing_jp is None:
-                    existing_jp = JobPost.objects.filter(link=url).first()
-                if existing_jp is not None:
-                    logger.info(
-                        "ScrapeViewSet.create: url already maps to job_post id=%s; "
-                        "skipping scrape",
-                        existing_jp.id,
-                    )
-                    return Response(
-                        {
-                            "errors": [
-                                {
-                                    "status": "409",
-                                    "code": "duplicate",
-                                    "title": "URL maps to existing job post",
-                                    "detail": (
-                                        f"URL already maps to job post "
-                                        f"#{existing_jp.id}; not creating a scrape."
-                                    ),
-                                    "meta": {
-                                        "existing_job_post_id": existing_jp.id,
-                                    },
-                                }
-                            ]
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-            source = attrs.get("source") or data.get("source") or "scrape"
-            scrape = Scrape.objects.create(
-                url=url,
-                status="hold",
-                created_by=request.user,
-                source=source,
-            )
-            from job_hunting.lib.scraper import _log_scrape_status
-            _log_scrape_status(scrape.id, "hold")
-            # Bind to the JobPost: explicit relationship takes precedence,
-            # otherwise fall back to matching by URL. Inherit the job
-            # post's company when none supplied.
-            if not linked_jp:
-                linked_jp = JobPost.objects.filter(link=url).first()
-            if linked_jp:
-                scrape.job_post = linked_jp
-                if not scrape.company_id and linked_jp.company_id:
-                    scrape.company_id = linked_jp.company_id
-                scrape.save()
-            logger.info("ScrapeViewSet.create: hold scrape id=%s url=%s", scrape.id, url)
-            scr_ser = self.get_serializer()
-            return Response(
-                {"data": scr_ser.to_resource(scrape)},
-                status=status.HTTP_201_CREATED,
-            )
-
-        # Check if scraping is enabled
-        if not getattr(settings, "SCRAPING_ENABLED", False):
-            logger.warning("ScrapeViewSet.create: SCRAPING_ENABLED=False, rejecting request")
-            return Response(
-                {"errors": [{"detail": "Scraping functionality is disabled"}]},
-                status=status.HTTP_501_NOT_IMPLEMENTED,
+        if req_status and req_status != "hold":
+            logger.warning(
+                "ScrapeViewSet.create: caller requested status=%r; coercing "
+                "to 'hold' (synchronous scrape path removed).",
+                req_status,
             )
 
         if not url:
-            logger.warning("ScrapeViewSet.create: missing url in request body")
             return Response(
                 {"errors": [{"detail": "URL is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Resolve any explicit JobPost relationship the caller sent.
+        # Doing this BEFORE the dedupe check lets jp.show's "Run scrape"
+        # / "Scrape & Score" actions re-scrape the post they're already
+        # viewing — the caller has named the post, so we're not at risk
+        # of minting a duplicate. The dedupe gate exists to protect the
+        # context-free callers (chat agent, bookmarklet, list-row
+        # Scrape & Score), which don't pass a relationship.
+        rels = (data.get("data") or {}).get("relationships") or {} if isinstance(data.get("data"), dict) else {}
+        jp_rel = rels.get("job-post") or rels.get("job_post")
+        linked_jp = None
+        if jp_rel and isinstance(jp_rel.get("data"), dict):
+            linked_jp = JobPost.objects.filter(pk=int(jp_rel["data"]["id"])).first()
 
-        logger.info("ScrapeViewSet.create url=%s", url)
-
-        # Check for existing scrape with the same URL
-        existing_scrape = Scrape.objects.filter(url=url).first()
-
-        # If there's an existing scrape that's pending or completed, return it
-        if existing_scrape:
-            logger.info(
-                "ScrapeViewSet.create: existing scrape found id=%s status=%s",
-                existing_scrape.id,
-                existing_scrape.status,
-            )
-            if existing_scrape.status in ("pending", "processing", "running"):
-                # Return the existing pending/processing/running scrape
-                scr_ser = self.get_serializer()
-                scrape_resource = scr_ser.to_resource(existing_scrape)
+        # Dedupe gate: if no relationship was supplied, refuse to mint a
+        # redundant scrape when the URL already maps to a JobPost.
+        # Respond 409 with the existing post id in errors[].meta so the
+        # chat agent / frontend / extension can navigate the user
+        # instead of triggering a re-scrape they didn't ask for.
+        #
+        # The 409 shape (errors[], no data) matters: the frontend calls
+        # this via Ember Data createRecord('scrape').save(). Returning
+        # 200 with data.type='job-post' would push a foreign type into
+        # the in-flight scrape identifier and collide with an existing
+        # job-post:N lid in the store. Errors-only with a non-2xx
+        # status keeps Ember Data from touching the store.
+        if linked_jp is None:
+            from job_hunting.models.job_post_dedupe import canonicalize_link
+            canonical = canonicalize_link(url)
+            existing_jp = None
+            if canonical:
+                existing_jp = JobPost.objects.filter(
+                    canonical_link=canonical
+                ).first()
+            if existing_jp is None:
+                existing_jp = JobPost.objects.filter(link=url).first()
+            if existing_jp is not None:
+                logger.info(
+                    "ScrapeViewSet.create: url already maps to job_post id=%s; "
+                    "skipping scrape",
+                    existing_jp.id,
+                )
                 return Response(
                     {
-                        "data": scrape_resource,
-                        "meta": {"message": "Scrape already in progress for this URL"},
+                        "errors": [
+                            {
+                                "status": "409",
+                                "code": "duplicate",
+                                "title": "URL maps to existing job post",
+                                "detail": (
+                                    f"URL already maps to job post "
+                                    f"#{existing_jp.id}; not creating a scrape."
+                                ),
+                                "meta": {
+                                    "existing_job_post_id": existing_jp.id,
+                                },
+                            }
+                        ]
                     },
-                    status=status.HTTP_200_OK,
+                    status=status.HTTP_409_CONFLICT,
                 )
-            elif existing_scrape.status == "completed":
-                # Return the existing completed scrape
-                scr_ser = self.get_serializer()
-                scrape_resource = scr_ser.to_resource(existing_scrape)
-                return Response(
-                    {
-                        "data": scrape_resource,
-                        "meta": {
-                            "message": "Scrape already completed for this URL. Use the redo action to re-scrape."
-                        },
-                    },
-                    status=status.HTTP_200_OK,
-                )
-            # If failed, we'll create a new scrape below
-            logger.info("ScrapeViewSet.create: existing scrape status=%s, creating new scrape", existing_scrape.status)
 
         source = attrs.get("source") or data.get("source") or "scrape"
         scrape = Scrape.objects.create(
             url=url,
-            status="pending",
+            status="hold",
             created_by=request.user,
             source=source,
         )
-        logger.info("ScrapeViewSet.create: created scrape id=%s", scrape.id)
         from job_hunting.lib.scraper import _log_scrape_status
-        _log_scrape_status(scrape.id, "pending")
-
-        # Associate with an existing job post (and its company) if the URL matches
-        existing_jp = JobPost.objects.filter(link=url).first()
-        if existing_jp:
-            scrape.job_post = existing_jp
-            scrape.company_id = existing_jp.company_id
+        _log_scrape_status(scrape.id, "hold")
+        # Bind to the JobPost: explicit relationship takes precedence,
+        # otherwise fall back to matching by URL. Inherit the job
+        # post's company when none supplied.
+        if not linked_jp:
+            linked_jp = JobPost.objects.filter(link=url).first()
+        if linked_jp:
+            scrape.job_post = linked_jp
+            if not scrape.company_id and linked_jp.company_id:
+                scrape.company_id = linked_jp.company_id
             scrape.save()
-            logger.info("ScrapeViewSet.create: linked scrape id=%s to job_post id=%s company_id=%s", scrape.id, existing_jp.id, existing_jp.company_id)
-
-        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3012")
-        logger.info("ScrapeViewSet.create: dispatching scraper browser_service_url=%s scrape_id=%s", browser_service_url, scrape.id)
-        Scraper(browser_service_url, url, scrape_id=scrape.id).dispatch()
-
+        logger.info("ScrapeViewSet.create: hold scrape id=%s url=%s", scrape.id, url)
         scr_ser = self.get_serializer()
-        scrape_resource = scr_ser.to_resource(scrape)
-        return Response({"data": scrape_resource}, status=status.HTTP_202_ACCEPTED)
+        return Response(
+            {"data": scr_ser.to_resource(scrape)},
+            status=status.HTTP_201_CREATED,
+        )
 
     @extend_schema(
         tags=["Scrapes"],
-        summary="Re-scrape a URL (async — resets to pending)",
+        summary="Re-queue a scrape — flips status to 'hold' so the poller picks it up",
         responses={
-            202: OpenApiResponse(description="Scrape restarted"),
-            400: OpenApiResponse(description="Already pending/processing"),
-            501: OpenApiResponse(description="Scraping disabled"),
+            202: OpenApiResponse(description="Scrape re-queued"),
+            404: OpenApiResponse(description="Not found"),
         },
     )
     @action(detail=True, methods=["post"])
     def redo(self, request, pk=None):
-        """Redo a scrape - resets status to pending and starts a new scrape process"""
+        """Re-queue a scrape: set status='hold' and let the poller pick it up.
 
-        # Check if scraping is enabled
-        if not getattr(settings, "SCRAPING_ENABLED", False):
-            logger.warning("ScrapeViewSet.redo: SCRAPING_ENABLED=False, rejecting request")
-            return Response(
-                {"errors": [{"detail": "Scraping functionality is disabled"}]},
-                status=status.HTTP_501_NOT_IMPLEMENTED,
-            )
-
+        The synchronous browser-MCP dispatch path is gone; redo is now
+        just a status flip. Returns 202 (poller will work on it).
+        """
         obj = Scrape.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         logger.info("ScrapeViewSet.redo: id=%s previous_status=%s url=%s", obj.id, obj.status, obj.url)
-
-        # Don't allow redo if already pending or processing
-        # if obj.status in ("pending", "processing"):
-        #     return Response(
-        #         {"errors": [{"detail": f"Scrape is already {obj.status}"}]},
-        #         status=status.HTTP_400_BAD_REQUEST,
-        #     )
-
-        obj.status = "pending"
+        obj.status = "hold"
         obj.save()
 
         from job_hunting.lib.scraper import _log_scrape_status
-        _log_scrape_status(obj.id, "pending", note="Redo requested")
+        _log_scrape_status(obj.id, "hold", note="Redo requested")
 
-        browser_service_url = getattr(settings, "BROWSER_SERVICE_URL", "http://localhost:3012")
-        logger.info("ScrapeViewSet.redo: dispatching browser_service_url=%s scrape_id=%s", browser_service_url, obj.id)
-        Scraper(browser_service_url, obj.url, scrape_id=obj.id).dispatch()
-
-        # Return the updated scrape
         scr_ser = self.get_serializer()
-        scrape_resource = scr_ser.to_resource(obj)
         return Response(
-            {"data": scrape_resource, "meta": {"message": "Scrape restarted"}},
+            {
+                "data": scr_ser.to_resource(obj),
+                "meta": {"message": "Re-queued; the hold-poller will pick it up."},
+            },
             status=status.HTTP_202_ACCEPTED,
         )
 
