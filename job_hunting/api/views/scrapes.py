@@ -972,7 +972,14 @@ class ScrapeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["get"], url_path="scrape-statuses")
     def scrape_statuses(self, request, pk=None):
-        """List status history for a scrape."""
+        """List status history for a scrape. Owner-or-staff gated;
+        returns the full graph_payload, which can carry exception text
+        and other internal-only diagnostic detail."""
+        scrape = Scrape.objects.filter(pk=pk).first()
+        if not scrape:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and scrape.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         from job_hunting.models.scrape_status import ScrapeStatus
         qs = ScrapeStatus.objects.filter(scrape_id=int(pk)).select_related("status").order_by("logged_at")
         data = []
