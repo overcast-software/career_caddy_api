@@ -83,6 +83,35 @@ class ScrapeCreateDedupByLinkTests(TestCase):
             Scrape.objects.filter(url="https://other.example/jobs/1").exists()
         )
 
+    def test_dedup_skipped_when_job_post_relationship_provided(self):
+        """jp.show's Run scrape / Scrape & Score sends
+        relationships.job-post.data.id pointing at the post being viewed.
+        That's an explicit re-scrape opt-in — bypass the dedupe so the
+        user can refresh a thin description against the same post."""
+        jp = JobPost.objects.create(
+            title="Refresh me",
+            company=self.company,
+            link="https://acme.example/jobs/55",
+            created_by=self.user,
+        )
+        body = {
+            "data": {
+                "attributes": {
+                    "url": "https://acme.example/jobs/55",
+                    "status": "hold",
+                },
+                "relationships": {
+                    "job-post": {"data": {"type": "job-post", "id": str(jp.id)}}
+                },
+            }
+        }
+        resp = self.client.post("/api/v1/scrapes/", body, format="json")
+        self.assertEqual(resp.status_code, 201)
+        scrape = Scrape.objects.filter(url="https://acme.example/jobs/55").first()
+        self.assertIsNotNone(scrape)
+        self.assertEqual(scrape.job_post_id, jp.id)
+        self.assertEqual(scrape.company_id, self.company.id)
+
     def test_match_by_raw_link_when_canonical_unset(self):
         """Defensive fallback for any historical row without canonical_link
         populated. save() backfills canonical_link, but force-null the
