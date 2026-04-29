@@ -9,11 +9,11 @@ Three surfaces:
   scrapes.py::graph_trace). Kept there so per-scrape auth stays with
   the scrape detail permissions.
 
-The canonical graph definition lives in ai/lib/scrape_graph/graph.py
+The canonical graph definition lives in agents/scrape_graph/graph.py
 (ai/ owns the runtime). api/ reads a committed snapshot from
 graph_static.json next to this file; regenerate it with
 `uv run caddy-export-graph` in ai/ after changing node topology. A
-drift test in ai/tests/ guards against stale snapshots.
+drift test in agents/tests/ guards against stale snapshots.
 """
 from __future__ import annotations
 
