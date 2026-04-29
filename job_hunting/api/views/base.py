@@ -90,9 +90,14 @@ class BaseViewSet(viewsets.ViewSet):
         """Fetch a single object by PK."""
         return self.model.objects.filter(pk=int(pk)).first()
 
-    def get_serializer(self, *args, slim=False, **kwargs):
+    def get_serializer(self, *args, slim=False, request=None, **kwargs):
         ser = self.serializer_class()
         ser.slim = slim
+        # Propagate request so the serializer can honor JSON:API
+        # fields[<type>] sparse-fieldsets in to_resource(). DRF ViewSets
+        # always have self.request set on dispatch; included serializers
+        # already get this via _build_included.
+        ser.request = request if request is not None else getattr(self, "request", None)
         return ser
 
     def _is_slim_request(self, request) -> bool:
