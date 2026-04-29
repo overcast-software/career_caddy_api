@@ -653,6 +653,7 @@ class ScrapeSerializer(BaseSerializer):
     model = Scrape
     attributes = [
         "url",
+        "source_link",
         "css_selectors",
         "job_content",
         "external_link",
