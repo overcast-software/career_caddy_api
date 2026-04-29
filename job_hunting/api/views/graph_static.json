@@ -16,7 +16,37 @@
       "id": "Navigate",
       "group": "scrape",
       "label": "Navigate",
-      "description": "Drives the browser to the submitted URL and records the landed final_url. Navigation failure stamps failure_reason but still advances (later nodes see empty content)."
+      "description": "Drives the browser to the submitted URL and records the landed final_url. Hands off to DetectObstacle so login walls / account choosers get cleared before any URL canonicalization or content waits run."
+    },
+    {
+      "id": "DetectObstacle",
+      "group": "obstacle",
+      "label": "Detect obstacle",
+      "description": "Scans the page body for login-wall signals immediately after Navigate. Clean \u2192 ResolveFinalUrl; walled \u2192 routes to the obstacle handler with available retries (RememberMe \u2192 WaitRetry \u2192 Agent \u2192 Fail)."
+    },
+    {
+      "id": "ObstacleRememberMe",
+      "group": "obstacle",
+      "label": "Remember-me reauth",
+      "description": "Tries the 'Continue as <you>' re-auth path using a known profile selector. Recorded per-attempt so we don't loop on it."
+    },
+    {
+      "id": "ObstacleWaitRetry",
+      "group": "obstacle",
+      "label": "Wait + retry",
+      "description": "Soaks up transient auth walls by sleeping 3s and re-checking. Caps at 3 waits before escalating to ObstacleAgent."
+    },
+    {
+      "id": "ObstacleAgent",
+      "group": "obstacle",
+      "label": "Obstacle agent",
+      "description": "LLM-driven fallback: inspects the page and proposes a CSS selector to click. On success, the winning selector is fed back into the ScrapeProfile's probation gate."
+    },
+    {
+      "id": "ObstacleFail",
+      "group": "terminal",
+      "label": "Obstacle fail",
+      "description": "Terminal: every obstacle path has been exhausted. Returns outcome='failure' with failure_reason='login_wall' so the caller can re-queue after seeding cookies."
     },
     {
       "id": "ResolveFinalUrl",
@@ -52,37 +82,7 @@
       "id": "ExpandTruncations",
       "group": "scrape",
       "label": "Expand truncations",
-      "description": "Clicks 'Show more' / 'Read more' affordances so the captured content isn't a stub. Best-effort \u2014 failures don't block."
-    },
-    {
-      "id": "DetectObstacle",
-      "group": "obstacle",
-      "label": "Detect obstacle",
-      "description": "Scans the page body for login-wall signals. Clean \u2192 Capture; walled \u2192 routes to the obstacle handler with available retries (RememberMe \u2192 WaitRetry \u2192 Agent \u2192 Fail)."
-    },
-    {
-      "id": "ObstacleRememberMe",
-      "group": "obstacle",
-      "label": "Remember-me reauth",
-      "description": "Tries the 'Continue as <you>' re-auth path using a known profile selector. Recorded per-attempt so we don't loop on it."
-    },
-    {
-      "id": "ObstacleWaitRetry",
-      "group": "obstacle",
-      "label": "Wait + retry",
-      "description": "Soaks up transient auth walls by sleeping 3s and re-checking. Caps at 3 waits before escalating to ObstacleAgent."
-    },
-    {
-      "id": "ObstacleAgent",
-      "group": "obstacle",
-      "label": "Obstacle agent",
-      "description": "LLM-driven fallback: inspects the page and proposes a CSS selector to click. On success, the winning selector is fed back into the ScrapeProfile's probation gate."
-    },
-    {
-      "id": "ObstacleFail",
-      "group": "terminal",
-      "label": "Obstacle fail",
-      "description": "Terminal: every obstacle path has been exhausted. Returns outcome='failure' with failure_reason='login_wall' so the caller can re-queue after seeding cookies."
+      "description": "Clicks 'Show more' / 'Read more' affordances so the captured content isn't a stub. Best-effort \u2014 failures don't block. Hands directly to Capture (obstacles are now caught upstream after Navigate)."
     },
     {
       "id": "Capture",
@@ -174,7 +174,51 @@
     },
     {
       "from": "Navigate",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleAgent"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleFail"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleRememberMe"
+    },
+    {
+      "from": "DetectObstacle",
+      "to": "ObstacleWaitRetry"
+    },
+    {
+      "from": "DetectObstacle",
       "to": "ResolveFinalUrl"
+    },
+    {
+      "from": "ObstacleRememberMe",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "ObstacleRememberMe",
+      "to": "ObstacleWaitRetry"
+    },
+    {
+      "from": "ObstacleWaitRetry",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "ObstacleWaitRetry",
+      "to": "ObstacleAgent"
+    },
+    {
+      "from": "ObstacleAgent",
+      "to": "DetectObstacle"
+    },
+    {
+      "from": "ObstacleAgent",
+      "to": "ObstacleFail"
     },
     {
       "from": "ResolveFinalUrl",
@@ -202,51 +246,7 @@
     },
     {
       "from": "ExpandTruncations",
-      "to": "DetectObstacle"
-    },
-    {
-      "from": "DetectObstacle",
       "to": "Capture"
-    },
-    {
-      "from": "DetectObstacle",
-      "to": "ObstacleAgent"
-    },
-    {
-      "from": "DetectObstacle",
-      "to": "ObstacleFail"
-    },
-    {
-      "from": "DetectObstacle",
-      "to": "ObstacleRememberMe"
-    },
-    {
-      "from": "DetectObstacle",
-      "to": "ObstacleWaitRetry"
-    },
-    {
-      "from": "ObstacleRememberMe",
-      "to": "DetectObstacle"
-    },
-    {
-      "from": "ObstacleRememberMe",
-      "to": "ObstacleWaitRetry"
-    },
-    {
-      "from": "ObstacleWaitRetry",
-      "to": "DetectObstacle"
-    },
-    {
-      "from": "ObstacleWaitRetry",
-      "to": "ObstacleAgent"
-    },
-    {
-      "from": "ObstacleAgent",
-      "to": "DetectObstacle"
-    },
-    {
-      "from": "ObstacleAgent",
-      "to": "ObstacleFail"
     },
     {
       "from": "Capture",
