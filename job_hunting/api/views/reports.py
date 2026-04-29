@@ -78,10 +78,15 @@ KNOWN_SOURCES = ["manual", "email", "paste", "scrape", "chat", "import"]
 
 
 def _user_scoped_job_posts(user_id):
+    # Visibility mirrors JobPostViewSet.list — discovery + scrape signals
+    # included so reports don't undercount email-ingested or hold-poller
+    # posts.
     return JobPost.objects.filter(
         Q(created_by_id=user_id)
         | Q(applications__user_id=user_id)
         | Q(scores__user_id=user_id)
+        | Q(scrapes__created_by_id=user_id)
+        | Q(discoveries__user_id=user_id)
     ).distinct()
 
 

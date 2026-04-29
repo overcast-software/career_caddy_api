@@ -199,6 +199,110 @@ class TestProcessEvaluation(TestCase):
         extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
         self.assertEqual(extractor.last_outcome, "created")
 
+    def test_duplicate_full_description_merges_empty_company(self):
+        """Hold-poller scrape lands on existing full-description post with
+        NULL company. Pre-merge code dropped the freshly-extracted company
+        on the floor (`last_outcome="duplicate"` + early return). The
+        merge call now backfills company_id while still leaving populated
+        fields (title, description, location) untouched."""
+        from job_hunting.models import JobPostDiscovery
+
+        rich_desc = "This is a full job posting. " * 20
+        existing = JobPost.objects.create(
+            title="Original Title",
+            company=None,  # the bug shape: full content, no company linkage
+            link="https://example.com/job/1",
+            description=rich_desc,
+            created_by=self.user,
+        )
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        self.assertEqual(extractor.last_outcome, "duplicate")
+        existing.refresh_from_db()
+        self.assertIsNotNone(
+            existing.company_id,
+            "duplicate-full-desc branch must merge empty company_id from "
+            "incoming scrape — same shape as the cc_auto Microsoft regression",
+        )
+        self.assertEqual(existing.company.name, "Acme Corp")
+        # Populated fields stay untouched.
+        self.assertEqual(existing.title, "Original Title")
+        self.assertEqual(existing.description, rich_desc)
+        # And discovery for the scrape's owner is recorded.
+        self.assertTrue(
+            JobPostDiscovery.objects.filter(
+                job_post=existing, user=self.user
+            ).exists()
+        )
+
+    def test_extractor_records_discovery_for_scrape_owner(self):
+        """Every successful process_evaluation must leave a
+        JobPostDiscovery row tying the scrape's owner to the resulting
+        JobPost. Without this, the user's only signal on a hold-poller
+        post is `scrapes__created_by` — which we want to retire."""
+        from job_hunting.models import JobPostDiscovery
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        job = JobPost.objects.get(title="Senior Engineer")
+        disc = JobPostDiscovery.objects.filter(
+            job_post=job, user=self.user
+        ).first()
+        self.assertIsNotNone(
+            disc,
+            "extractor must record discovery for scrape.created_by — "
+            "discovery is the canonical visibility signal",
+        )
+        # Discovery source mirrors the scrape's source. The fixture
+        # scrape uses the model default "manual"; an email-pipeline
+        # hold-poller scrape would land "email" here instead.
+        self.assertEqual(disc.source, "manual")
+
+    def test_extractor_discovery_source_carries_scrape_source(self):
+        """When a scrape carries an explicit source (e.g. 'email' from
+        cc_auto's auto-scrape, or 'paste' from /scrapes/from-text),
+        the resulting JobPostDiscovery.source must match — provenance
+        flows through both records."""
+        from job_hunting.models import JobPostDiscovery
+
+        email_scrape = Scrape.objects.create(
+            url="https://example.com/job/email",
+            status="extracting",
+            created_by=self.user,
+            source="email",
+        )
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(email_scrape, self.parsed_data, user=self.user)
+
+        job = JobPost.objects.get(link="https://example.com/job/email")
+        disc = JobPostDiscovery.objects.get(job_post=job, user=self.user)
+        self.assertEqual(disc.source, "email")
+
+    def test_extractor_discovery_is_idempotent(self):
+        """Repeat scrape from the same user shouldn't create duplicate
+        discoveries (unique constraint catches it; we go through
+        get_or_create)."""
+        from job_hunting.models import JobPostDiscovery
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+        scrape2 = Scrape.objects.create(
+            url="https://example.com/job/1",  # same link → same JobPost
+            status="extracting",
+            created_by=self.user,
+        )
+        extractor2 = JobPostExtractor()
+        extractor2.process_evaluation(scrape2, self.parsed_data, user=self.user)
+
+        job = JobPost.objects.get(title="Senior Engineer")
+        self.assertEqual(
+            JobPostDiscovery.objects.filter(job_post=job, user=self.user).count(),
+            1,
+        )
+
 
 class TestParseScrape(TestCase):
     """Test parse_scrape orchestration function."""

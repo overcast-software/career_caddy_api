@@ -139,6 +139,32 @@ class BaseSerializer:
         declared = set(self.attributes)
         return [a for a in self.attributes if a in requested & declared]
 
+    def _requested_includes(self) -> set:
+        """Parse the request's `?include=` (and `?includes=`) into a set of
+        relationship names matched against this serializer's relationships
+        keys. Tolerant of dasherized/underscored variants. Returns the
+        empty set when no include is requested."""
+        request = getattr(self, "request", None)
+        if request is None:
+            return set()
+        raw_parts = []
+        for key in ("include", "includes"):
+            val = request.query_params.get(key)
+            if val:
+                raw_parts.extend(s.strip() for s in str(val).split(",") if s.strip())
+        if not raw_parts:
+            return set()
+        rel_keys = set(self.relationships.keys())
+        out = set()
+        for name in raw_parts:
+            if name in rel_keys:
+                out.add(name)
+                continue
+            dasher = name.replace("_", "-")
+            if dasher in rel_keys:
+                out.add(dasher)
+        return out
+
     def _field_requested(self, name: str) -> bool:
         """For attributes built outside the declared `attributes` list (e.g.
         Resume.summary, which is computed in to_resource overrides rather
@@ -166,12 +192,13 @@ class BaseSerializer:
         # JSON:API resource self link
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
         if self.relationships:
+            included_rels = self._requested_includes()
             rel_out = {}
             for rel_name, cfg in self.relationships.items():
                 rel_attr = cfg["attr"]
                 rel_type = cfg["type"]
                 uselist = cfg.get("uselist", True)
-                
+
                 # Safely get target, catching DoesNotExist errors
                 target = None
                 try:
@@ -179,7 +206,7 @@ class BaseSerializer:
                 except Exception:
                     # Relationship doesn't exist or target is missing - skip it
                     target = None
-                
+
                 if uselist:
                     # Map relationship name to URL segment for special cases
                     rel_segment = rel_name
@@ -187,10 +214,23 @@ class BaseSerializer:
                         "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                         "related": f"{_resource_base_path(self.type)}/{obj.id}/{rel_segment}",
                     }
-                    # Per JSON:API spec: only emit `links` for to-many relationships.
-                    # Emitting `data: []` falsely asserts zero items; full objects
-                    # come through `included` when explicitly requested.
-                    rel_out[rel_name] = {"links": links}
+                    rel_payload: Dict[str, Any] = {"links": links}
+                    # JSON:API spec: emitting `data` for a to-many asserts the
+                    # complete linkage. Only emit when the client requested
+                    # this relationship via `?include=` — i.e. when we are
+                    # sideloading the items anyway. Without the linkage,
+                    # Ember Data refetches via the related link even though
+                    # the records are already in `included`. With it, the
+                    # client resolves the sideload from one round trip.
+                    if rel_name in included_rels:
+                        try:
+                            _, items = self.get_related(obj, rel_name)
+                            rel_payload["data"] = [
+                                {"type": rel_type, "id": str(item.id)} for item in items
+                            ]
+                        except Exception:
+                            pass
+                    rel_out[rel_name] = rel_payload
                 else:
                     # Determine target_id with FK fallback
                     target_id = None
@@ -741,12 +781,19 @@ class CompanySerializer(BaseSerializer):
         user_id = getattr(getattr(request, "user", None), "id", None) if request else None
         if rel_name == "job-posts":
             qs = JobPost.objects.filter(company_id=obj.id)
+            # Visibility filter mirrors JobPostViewSet.list — without
+            # `scrapes` and `discoveries` here, sideloaded company.job-posts
+            # disagrees with what /companies/<id>/job-posts/ returns.
             if user_id:
-                qs = qs.filter(
-                    Q(created_by_id=user_id) |
-                    Q(applications__user_id=user_id) |
-                    Q(scores__user_id=user_id)
-                ).distinct()
+                is_staff = bool(getattr(getattr(request, "user", None), "is_staff", False))
+                if not is_staff:
+                    qs = qs.filter(
+                        Q(created_by_id=user_id) |
+                        Q(applications__user_id=user_id) |
+                        Q(scores__user_id=user_id) |
+                        Q(scrapes__created_by_id=user_id) |
+                        Q(discoveries__user_id=user_id)
+                    ).distinct()
             return "job-post", list(qs)
         elif rel_name == "job-applications":
             qs = JobApplication.objects.filter(company_id=obj.id)
