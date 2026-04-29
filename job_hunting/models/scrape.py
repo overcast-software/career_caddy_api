@@ -14,6 +14,10 @@ class Scrape(GetMixin, models.Model):
         related_name="created_scrapes",
     )
     url = models.CharField(max_length=2000, null=True, blank=True)
+    # The original URL the caller submitted, before tracker resolution.
+    # Set when ``url`` was rewritten from a tracker (SendGrid click,
+    # LinkedIn /comm/, etc.) to its destination at ingest time.
+    source_link = models.CharField(max_length=2000, null=True, blank=True)
     company = models.ForeignKey(
         "Company",
         on_delete=models.SET_NULL,

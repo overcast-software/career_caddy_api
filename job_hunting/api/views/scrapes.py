@@ -300,6 +300,51 @@ class ScrapeViewSet(BaseViewSet):
                 {"errors": [{"detail": "URL is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Tracker-URL resolution. Marketing emails wrap real job-posting
+        # URLs in per-recipient click trackers (SendGrid, LinkedIn /comm/,
+        # click.ziprecruiter.com, …). Each such URL is unique per
+        # recipient but redirects to the same destination, so dedupe
+        # against the raw string misses duplicates and dead trackers
+        # would mint dead scrapes. Resolve them HERE so the rest of the
+        # path (dedupe, persistence) sees the canonical destination.
+        from job_hunting.lib.tracker_resolver import (
+            is_tracker_host,
+            resolve_tracker,
+        )
+        source_link: str | None = None
+        if is_tracker_host(url):
+            resolution = resolve_tracker(url)
+            if resolution.error or not resolution.ok:
+                detail = (
+                    f"Tracker URL did not resolve: status={resolution.status_code} "
+                    f"error={resolution.error}"
+                )
+                logger.info(
+                    "ScrapeViewSet.create: rejecting tracker url=%s — %s",
+                    url, detail,
+                )
+                return Response(
+                    {"errors": [{
+                        "status": "400",
+                        "code": "tracker_unresolved",
+                        "title": "Tracker URL did not resolve",
+                        "detail": detail,
+                        "meta": {
+                            "submitted_url": url,
+                            "status_code": resolution.status_code,
+                        },
+                    }]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if resolution.resolved_url and resolution.resolved_url != url:
+                source_link = url
+                url = resolution.resolved_url
+                logger.info(
+                    "ScrapeViewSet.create: resolved tracker source_link=%s -> url=%s",
+                    source_link, url,
+                )
+
         # Resolve any explicit JobPost relationship the caller sent.
         # Doing this BEFORE the dedupe check lets jp.show's "Run scrape"
         # / "Scrape & Score" actions re-scrape the post they're already
@@ -364,6 +409,7 @@ class ScrapeViewSet(BaseViewSet):
         source = attrs.get("source") or data.get("source") or "scrape"
         scrape = Scrape.objects.create(
             url=url,
+            source_link=source_link,
             status="hold",
             created_by=request.user,
             source=source,
