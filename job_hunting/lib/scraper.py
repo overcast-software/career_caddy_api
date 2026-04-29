@@ -3,7 +3,7 @@
 Once contained the synchronous `Scraper` class that POSTed to a
 browser-MCP HTTP endpoint and updated the Scrape row in a background
 thread. That path is gone — every scrape now starts as `status=hold`
-and the hold-poller (ai/scripts/hold_poller.py) drives extraction.
+and the hold-poller (agents/pollers/hold_poller.py) drives extraction.
 What remains here are the bookkeeping helpers that the views still
 call to log status transitions and (post-extraction) parse content
 into a JobPost.

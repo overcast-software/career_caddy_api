@@ -20,7 +20,7 @@ class ScrapeProfile(GetMixin, models.Model):
     css_selectors = models.JSONField(null=True, blank=True)
     url_rewrites = models.JSONField(null=True, blank=True)
     # Per-host directions for the apply-destination resolver
-    # (ResolveApplyUrl in ai/lib/scrape_graph). Shape:
+    # (ResolveApplyUrl in agents/scrape_graph). Shape:
     #   {
     #     "internal_apply_markers": [".jobs-apply-button--easy-apply", ...],
     #     "apply_link_selectors":   ["a[data-tracking-control-name='apply']", ...],
