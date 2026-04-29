@@ -125,13 +125,43 @@ class BaseSerializer:
             },
         }
 
+    def _requested_fieldset(self):
+        """Return the explicit attribute list from `fields[<type>]`, or None
+        when no sparse-fieldset filter applies. Honors JSON:API spec; only
+        attributes already declared on the serializer are surfaced."""
+        request = getattr(self, "request", None)
+        if request is None:
+            return None
+        raw = request.query_params.get(f"fields[{self.type}]")
+        if raw is None:
+            return None
+        requested = {s.strip() for s in str(raw).split(",") if s.strip()}
+        declared = set(self.attributes)
+        return [a for a in self.attributes if a in requested & declared]
+
+    def _field_requested(self, name: str) -> bool:
+        """For attributes built outside the declared `attributes` list (e.g.
+        Resume.summary, which is computed in to_resource overrides rather
+        than read off the model). Returns True when no fieldset filter is
+        in effect; otherwise checks the raw requested set so callers can
+        opt in to dynamic attributes by name."""
+        request = getattr(self, "request", None)
+        if request is None:
+            return True
+        raw = request.query_params.get(f"fields[{self.type}]")
+        if raw is None:
+            return True
+        return name in {s.strip() for s in str(raw).split(",") if s.strip()}
+
     def to_resource(self, obj) -> Dict[str, Any]:
         if self.slim:
             return self.to_slim_resource(obj)
+        fieldset = self._requested_fieldset()
+        attrs_to_emit = self.attributes if fieldset is None else fieldset
         res = {
             "type": self.type,
             "id": str(obj.id),
-            "attributes": {k: _to_primitive(getattr(obj, k)) for k in self.attributes},
+            "attributes": {k: _to_primitive(getattr(obj, k)) for k in attrs_to_emit},
         }
         # JSON:API resource self link
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
@@ -456,11 +486,13 @@ class ResumeSerializer(BaseSerializer):
         if self.slim:
             res["meta"] = self._build_counts(obj)
             return res
-        # Convenience attribute: active summary content
-        try:
-            res.setdefault("attributes", {})["summary"] = obj.active_summary_content()
-        except Exception:
-            pass
+        # Convenience attribute: active summary content. Respect
+        # fields[resume] sparse-fieldsets — only emit when not filtered out.
+        if self._field_requested("summary"):
+            try:
+                res.setdefault("attributes", {})["summary"] = obj.active_summary_content()
+            except Exception:
+                pass
         return res
 
     def _build_counts(self, obj):
