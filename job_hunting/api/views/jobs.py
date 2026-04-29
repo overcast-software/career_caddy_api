@@ -43,6 +43,7 @@ from ..serializers import (
 )
 from job_hunting.api.permissions import IsGuestReadOnly
 from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
 from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.models import (
     Status,
@@ -394,11 +395,17 @@ class JobPostViewSet(BaseViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        # Visibility mirrors JobPostViewSet.list: any of the five per-user
+        # signals grants access. Discovery is the canonical email-ingest
+        # signal — without this clause GET /job-posts/<id>/ 404s for a
+        # post the user just received via cc_auto.
         has_access = (
+            request.user.is_staff or
             obj.created_by_id == request.user.id or
             obj.applications.filter(user_id=request.user.id).exists() or
             obj.scores.filter(user_id=request.user.id).exists() or
-            obj.scrapes.filter(created_by_id=request.user.id).exists()
+            obj.scrapes.filter(created_by_id=request.user.id).exists() or
+            obj.discoveries.filter(user_id=request.user.id).exists()
         )
         if not has_access:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -439,6 +446,16 @@ class JobPostViewSet(BaseViewSet):
         if attrs.get("link"):
             existing = JobPost.objects.filter(link=attrs["link"]).first()
             if existing:
+                # Backfill empty fields from the incoming POST. JobPost is
+                # universal: cc_auto's email path commonly hits a row that
+                # an earlier scrape created as a stub (link known, company
+                # NULL, title thin). Without this merge the new association
+                # is silently dropped — the post stays off
+                # /companies/<id>/job-posts even though we now know the
+                # company. Only ever fills NULLs; never overwrites an
+                # existing value (a wrong cc_auto guess shouldn't clobber
+                # a good prior association).
+                merge_empty_fields_from_attrs(existing, attrs)
                 _record_discovery(existing)
                 return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         obj = JobPost(**attrs)
@@ -452,6 +469,7 @@ class JobPostViewSet(BaseViewSet):
         obj.content_fingerprint = fingerprint(obj)
         dupe = find_duplicate(obj)
         if dupe:
+            merge_empty_fields_from_attrs(dupe, attrs)
             _record_discovery(dupe)
             return Response({"data": ser.to_resource(dupe)}, status=status.HTTP_200_OK)
         obj.save()

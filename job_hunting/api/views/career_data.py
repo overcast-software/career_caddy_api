@@ -394,7 +394,9 @@ def career_data_import(request):
 
         # -- job-posts --
         if "job-posts" in wbook.sheetnames:
-            from job_hunting.models import Company
+            from job_hunting.models import Company, JobPostDiscovery
+            from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
+            from decimal import Decimal
             for row in _rows_as_dicts(wbook["job-posts"]):
                 old_id = row.get("id")
                 link = row.get("link")
@@ -410,24 +412,51 @@ def career_data_import(request):
                     existing = JobPost.objects.filter(
                         title=row["title"], company=company, created_by=request.user
                     ).first()
+                # Build the attrs dict once — used for both fresh-create and
+                # dedupe-merge. Mirrors the create() endpoint's contract:
+                # JobPost is universal, so import shouldn't silently drop
+                # the row's company/salary/etc onto the floor when a
+                # link-matching row already exists.
+                row_attrs = {
+                    "title": row.get("title"),
+                    "company_id": company.id if company is not None else None,
+                    "description": row.get("description"),
+                    "link": link,
+                    "posted_date": _parse_date(row.get("posted_date")),
+                    "extraction_date": _parse_date(row.get("extraction_date")),
+                    "salary_min": Decimal(str(row["salary_min"])) if row.get("salary_min") is not None else None,
+                    "salary_max": Decimal(str(row["salary_max"])) if row.get("salary_max") is not None else None,
+                    "location": row.get("location"),
+                    "remote": row.get("remote"),
+                }
                 if existing:
                     if old_id is not None:
                         jp_id_map[int(old_id)] = existing.id
+                    merge_empty_fields_from_attrs(existing, row_attrs)
+                    JobPostDiscovery.objects.get_or_create(
+                        job_post=existing,
+                        user=request.user,
+                        defaults={"source": "import"},
+                    )
                     stats["job-posts"]["skipped"] += 1
                     continue
-                from decimal import Decimal
                 jp = JobPost.objects.create(
                     title=row.get("title"),
                     company=company,
                     description=row.get("description"),
                     link=link,
-                    posted_date=_parse_date(row.get("posted_date")),
-                    extraction_date=_parse_date(row.get("extraction_date")),
-                    salary_min=Decimal(str(row["salary_min"])) if row.get("salary_min") is not None else None,
-                    salary_max=Decimal(str(row["salary_max"])) if row.get("salary_max") is not None else None,
+                    posted_date=row_attrs["posted_date"],
+                    extraction_date=row_attrs["extraction_date"],
+                    salary_min=row_attrs["salary_min"],
+                    salary_max=row_attrs["salary_max"],
                     location=row.get("location"),
                     remote=row.get("remote"),
                     created_by=request.user,
+                )
+                JobPostDiscovery.objects.get_or_create(
+                    job_post=jp,
+                    user=request.user,
+                    defaults={"source": "import"},
                 )
                 if old_id is not None:
                     jp_id_map[int(old_id)] = jp.id

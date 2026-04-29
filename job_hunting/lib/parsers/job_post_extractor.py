@@ -12,10 +12,11 @@ from pydantic_ai.providers.ollama import OllamaProvider
 
 from urllib.parse import urlparse
 
+from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 from job_hunting.lib.services.application_flow import _is_thin_description
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
-from job_hunting.models import Company, JobPost, Scrape
+from job_hunting.models import Company, JobPost, JobPostDiscovery, Scrape
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,15 @@ class JobPostExtractor:
                     job.save(update_fields=update_fields)
             else:
                 self.last_outcome = "duplicate"
+                # Even on a full-description duplicate, fill any NULL/empty
+                # fields the existing post is missing — same merge policy
+                # the create() endpoint uses on its dedupe paths. Without
+                # this the hold-poller silently drops the scrape's
+                # company_id / posting_status / source onto the floor.
+                merge_attrs = dict(job_defaults)
+                if company is not None and not job.company_id:
+                    merge_attrs["company_id"] = company.id
+                merge_empty_fields_from_attrs(job, merge_attrs)
         elif job is None:
             job, _ = JobPost.objects.get_or_create(
                 title=validated_data.title,
@@ -298,6 +308,18 @@ class JobPostExtractor:
             update_fields.append("company_id")
         if update_fields:
             scrape.save(update_fields=update_fields)
+
+        # Record JobPostDiscovery for the scrape's owner so the post is
+        # visible to them via the canonical discovery signal — same shape
+        # the create() endpoint records on POST. Without this the only
+        # signal connecting the user to the post is `scrapes__created_by`,
+        # which we want to retire as discovery becomes the canonical edge.
+        if scrape.created_by_id:
+            JobPostDiscovery.objects.get_or_create(
+                job_post=job,
+                user_id=scrape.created_by_id,
+                defaults={"source": getattr(scrape, "source", None) or "scrape"},
+            )
         return True
 
     def _get_model_name(self) -> str:

@@ -113,6 +113,49 @@ class TestCareerDataImport(TestCase):
         self.assertEqual(JobPost.objects.count(), 1)
         self.assertEqual(Question.objects.count(), 1)
 
+    def test_import_records_discovery_for_caller(self):
+        """CSV import must record JobPostDiscovery for the importer.
+        Without this, imported posts have zero per-user signals and
+        are invisible until the user manually triggers another action."""
+        from job_hunting.models import JobPostDiscovery
+
+        f = self._make_xlsx()
+        self.client.post("/api/v1/career-data/import/", {"file": f}, format="multipart")
+        jp = JobPost.objects.get(link="https://newco.com/dev")
+        disc = JobPostDiscovery.objects.filter(
+            job_post=jp, user=self.superuser
+        ).first()
+        self.assertIsNotNone(disc, "import must record discovery for caller")
+        self.assertEqual(disc.source, "import")
+
+    def test_import_dedupe_merges_empty_company(self):
+        """A pre-existing JobPost with the same link but NULL company
+        gets its company filled from the imported row. Same merge policy
+        as the create() endpoint."""
+        from job_hunting.models import JobPostDiscovery
+
+        existing = JobPost.objects.create(
+            title="Stub",
+            company=None,
+            link="https://newco.com/dev",
+            description="x" * 500,
+            created_by=self.regular,
+        )
+        f = self._make_xlsx()
+        self.client.post("/api/v1/career-data/import/", {"file": f}, format="multipart")
+        existing.refresh_from_db()
+        self.assertIsNotNone(
+            existing.company_id,
+            "import must merge empty company_id onto existing duplicate",
+        )
+        self.assertEqual(existing.company.name, "NewCo")
+        # And the importer gets a discovery row even on the dedupe path.
+        self.assertTrue(
+            JobPostDiscovery.objects.filter(
+                job_post=existing, user=self.superuser, source="import"
+            ).exists()
+        )
+
     def test_import_skips_duplicates(self):
         f1 = self._make_xlsx()
         self.client.post("/api/v1/career-data/import/", {"file": f1}, format="multipart")
