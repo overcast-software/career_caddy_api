@@ -159,12 +159,20 @@ class JobPostViewSet(BaseViewSet):
         return errors
 
     def list(self, request):
-        qs = JobPost.objects.filter(
-            Q(created_by_id=request.user.id) |
-            Q(applications__user_id=request.user.id) |
-            Q(scores__user_id=request.user.id) |
-            Q(scrapes__created_by_id=request.user.id)
-        ).distinct()
+        # JobPost is a shared resource (see JobPost model docstring).
+        # Staff users see every post; regular users see only posts they
+        # have a per-user signal on (created, applied, scored, scraped,
+        # or discovered via ingestion).
+        if request.user.is_staff:
+            qs = JobPost.objects.all()
+        else:
+            qs = JobPost.objects.filter(
+                Q(created_by_id=request.user.id) |
+                Q(applications__user_id=request.user.id) |
+                Q(scores__user_id=request.user.id) |
+                Q(scrapes__created_by_id=request.user.id) |
+                Q(discoveries__user_id=request.user.id)
+            ).distinct()
         link_filter = request.query_params.get("filter[link]")
         if link_filter is not None:
             qs = qs.filter(link=link_filter)
@@ -419,9 +427,19 @@ class JobPostViewSet(BaseViewSet):
             return Response(
                 {"errors": [{"detail": v} for v in date_errors.values()]}, status=400
             )
+        from job_hunting.models import JobPostDiscovery
+
+        def _record_discovery(post):
+            JobPostDiscovery.objects.get_or_create(
+                job_post=post,
+                user=request.user,
+                defaults={"source": attrs.get("source") or "manual"},
+            )
+
         if attrs.get("link"):
             existing = JobPost.objects.filter(link=attrs["link"]).first()
             if existing:
+                _record_discovery(existing)
                 return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         obj = JobPost(**attrs)
         # Populate dedupe fields pre-save so find_duplicate sees them.
@@ -434,11 +452,13 @@ class JobPostViewSet(BaseViewSet):
         obj.content_fingerprint = fingerprint(obj)
         dupe = find_duplicate(obj)
         if dupe:
+            _record_discovery(dupe)
             return Response({"data": ser.to_resource(dupe)}, status=status.HTTP_200_OK)
         obj.save()
         if not obj.posted_date:
             obj.posted_date = obj.created_at.date()
             obj.save(update_fields=["posted_date"])
+        _record_discovery(obj)
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
