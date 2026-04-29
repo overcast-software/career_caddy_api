@@ -45,7 +45,7 @@ class Resume(GetMixin, models.Model):
 
     @property
     def tool_skills(self):
-        return self.skills_by_type("Tools/Platform")
+        return self.skills_by_type("Tool/Platform")
 
     @property
     def security_skills(self):
