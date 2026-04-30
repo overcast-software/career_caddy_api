@@ -379,6 +379,76 @@ class TestParseScrape(TestCase):
         self.assertEqual(job.created_by, self.user)
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_paste_scrape_falls_back_to_job_content_when_llm_omits_description(
+        self, mock_analyze
+    ):
+        """LLM returns description=None on a source='paste' scrape →
+        scrape.job_content (the user's raw paste) becomes the description.
+        Without this fallback we silently dropped the user's text on the
+        floor (job-posts/1490 inbox bug)."""
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer", company_name="TestCo", description=None,
+        )
+        self.scrape.source = "paste"
+        self.scrape.job_content = (
+            "About the job: Build great things. Five years of experience required. "
+            "Remote-friendly, full-time, immediate start."
+        )
+        self.scrape.save(update_fields=["source", "job_content"])
+
+        parse_scrape(self.scrape.id, user_id=self.user.id, sync=True)
+
+        self.scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=self.scrape.job_post_id)
+        self.assertIn("Build great things", job.description)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_browser_scrape_does_not_fallback_to_html_dump(self, mock_analyze):
+        """Non-paste scrapes must NOT use job_content as description —
+        for browser-fetched scrapes job_content is HTML/page text with
+        nav/footer noise, not description-clean."""
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer", company_name="TestCo", description=None,
+        )
+        self.scrape.source = "scrape"
+        self.scrape.job_content = "<html><nav>menu</nav><body>raw</body></html>"
+        self.scrape.save(update_fields=["source", "job_content"])
+
+        parse_scrape(self.scrape.id, user_id=self.user.id, sync=True)
+
+        self.scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=self.scrape.job_post_id)
+        self.assertIsNone(job.description)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_force_noop_writes_distinct_status_note(self, mock_analyze):
+        """force re-parse that produces no field changes surfaces a
+        force_noop note so the frontend can flash 'nothing changed'
+        instead of a generic success — otherwise a wasted parse looks
+        identical to a useful one."""
+        company = Company.objects.create(name="TestCo")
+        existing = JobPost.objects.create(
+            title="Engineer",
+            company=company,
+            description="Already complete.",
+            created_by=self.user,
+        )
+        self.scrape.job_post_id = existing.id
+        self.scrape.save(update_fields=["job_post_id"])
+        # LLM extracts the same values that are already on the post.
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer", company_name="TestCo", description="Already complete.",
+        )
+
+        parse_scrape(self.scrape.id, user_id=self.user.id, sync=True, force=True)
+
+        latest = self.scrape.scrape_statuses.order_by("-id").first()
+        self.assertIsNotNone(latest)
+        self.assertEqual(
+            latest.note, f"force_noop: re-parse of JobPost #{existing.id} found no new fields",
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
     def test_duplicate_link_writes_duplicate_status_note(self, mock_analyze):
         """parse_scrape tags the completion note so the frontend can branch."""
         mock_analyze.return_value = ParsedJobData(

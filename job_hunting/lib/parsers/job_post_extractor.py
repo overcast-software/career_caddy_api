@@ -169,6 +169,24 @@ class JobPostExtractor:
         except Company.MultipleObjectsReturned:
             company = Company.objects.filter(name=validated_data.company_name).first()
 
+        # Effective description: prefer LLM output; fall back to the
+        # user's raw paste when the LLM omitted it AND the scrape is
+        # paste-sourced (the paste IS the description). Browser-fetched
+        # scrapes can't fall back this way — their job_content is HTML/
+        # page text with nav/footer noise. The fallback is only consumed
+        # by the fresh-create path below; the force/link-hit branches
+        # still gate on validated_data.description so an LLM-omitted
+        # description never overwrites an existing populated one
+        # (test_reextract_skips_none_fields).
+        effective_description = validated_data.description
+        if (
+            not effective_description
+            and getattr(scrape, "source", None) == "paste"
+        ):
+            fallback = (scrape.job_content or "").strip()
+            if fallback:
+                effective_description = fallback
+
         job_defaults = {}
         if user:
             job_defaults["created_by"] = user
@@ -191,7 +209,10 @@ class JobPostExtractor:
         # default-hide-closed filter still surfaces the post.
         from job_hunting.lib.text_signals import detect_posting_status
 
-        detected_status = detect_posting_status(validated_data.description)
+        # Detect against the effective text (paste fallback included)
+        # so a "Position has been filled" phrase in the user's paste is
+        # still seen when the LLM produced no description.
+        detected_status = detect_posting_status(effective_description)
         if detected_status is not None:
             job_defaults["posting_status"] = detected_status
         # Carry scrape provenance onto the JobPost so downstream analytics
@@ -227,6 +248,14 @@ class JobPostExtractor:
                         update_fields.append(field)
                 if update_fields:
                     job.save(update_fields=update_fields)
+                    self.last_outcome = "force_updated"
+                else:
+                    # Surfaces in the scrape-status note as
+                    # "force_noop: nothing to update" so the frontend can
+                    # tell the user their re-parse changed nothing —
+                    # otherwise a "wasted parse" looks identical to a
+                    # successful one (job-posts/1490 inbox bug).
+                    self.last_outcome = "force_noop"
 
         # Prefer link-based lookup since link is unique. Branch on
         # stub-vs-full: a thin-description hit is safe to overwrite
@@ -266,10 +295,13 @@ class JobPostExtractor:
                     merge_attrs["company_id"] = company.id
                 merge_empty_fields_from_attrs(job, merge_attrs)
         elif job is None:
+            create_defaults = {**job_defaults, "link": link}
+            if "description" not in create_defaults and effective_description:
+                create_defaults["description"] = effective_description
             job, _ = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company=company,
-                defaults={**job_defaults, "link": link},
+                defaults=create_defaults,
             )
         elif not force or not scrape.job_post_id:
             # Update fields that may have been missing on a prior pass
@@ -599,6 +631,10 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
                 note = f"duplicate: existing JobPost #{jp_id}"
             elif outcome == "updated_stub" and jp_id:
                 note = f"updated_stub: upgraded JobPost #{jp_id}"
+            elif outcome == "force_noop" and jp_id:
+                note = f"force_noop: re-parse of JobPost #{jp_id} found no new fields"
+            elif outcome == "force_updated" and jp_id:
+                note = f"force_updated: refreshed JobPost #{jp_id}"
             else:
                 note = "Parsed successfully"
             _log_scrape_status(scrape_id, "completed", note=note)
