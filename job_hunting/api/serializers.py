@@ -647,6 +647,7 @@ class JobPostSerializer(BaseSerializer):
         "extraction_date",
         "created_at",
         "link",
+        "canonical_link",
         "salary_min",
         "salary_max",
         "location",
