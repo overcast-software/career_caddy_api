@@ -118,6 +118,12 @@ class JobPost(GetMixin, models.Model):
                 self.posted_date = self.created_at.date()
             else:
                 self.posted_date = timezone.now().date()
+        # Ember Data serializes unset string @attr as null on createRecord,
+        # so the JSON:API POST body carries `apply_url_status: null`. The
+        # model default is Python-side only — there is no DB DEFAULT — so
+        # an explicit None propagates to INSERT and trips the NOT NULL.
+        if self.apply_url_status is None:
+            self.apply_url_status = "unknown"
         if self.link and not self.canonical_link:
             self.canonical_link = canonicalize_link(self.link)
         if not self.content_fingerprint:

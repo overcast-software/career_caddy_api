@@ -28,6 +28,13 @@ class TestJobPostModel(TestCase):
         with self.assertRaises(Exception):
             JobPost.objects.create(link="https://example.com/job/1")
 
+    def test_apply_url_status_none_coerces_to_unknown(self):
+        # Ember Data sends apply_url_status=null on createRecord; the
+        # column is NOT NULL with no DB default, so save() must coerce.
+        jp = JobPost(title="T", apply_url_status=None)
+        jp.save()
+        self.assertEqual(jp.apply_url_status, "unknown")
+
 
 class TestJobPostAPI(TestCase):
     def setUp(self):
