@@ -109,7 +109,7 @@ def _to_decimal(value) -> Optional[Decimal]:
         return None
 
 
-_DEFAULT_PARSER_MODEL = "gpt-4o"
+_DEFAULT_PARSER_MODEL = "openai:gpt-4o"
 
 
 class JobPostExtractor:
@@ -157,24 +157,43 @@ class JobPostExtractor:
     def _build_agent_for_model(self, model_name: str) -> "Agent":
         """Construct a pydantic-ai Agent bound to the given model spec.
 
-        Accepts pydantic-ai `provider:model` notation (`openai:…`,
-        `anthropic:…`, `ollama:…`) — strips known prefixes so the
-        underlying SDK gets the bare name. Used directly by the
+        Requires pydantic-ai `provider:model` notation (`openai:…`,
+        `anthropic:…`, `ollama:…`) — dispatches to the matching SDK
+        model class so the right provider's HTTP client is used. Bare
+        names (no prefix) raise ValueError — env vars must spell out
+        the provider so the wrong-client misroute that produced the
+        Tier2 `model_not_found` incident (scrape #237 / jp 1550,
+        2026-04-30) cannot recur silently. Used directly by the
         scrape-graph's Tier1/2/3 nodes when they need to escalate
         without reusing the cached default agent.
         """
-        if model_name.startswith("ollama:"):
-            ollama_model_name = model_name.split(":", 1)[1]
+        if ":" not in model_name:
+            raise ValueError(
+                f"Model spec {model_name!r} must use 'provider:model' form "
+                "(e.g. 'openai:gpt-4o', 'anthropic:claude-haiku-4-5'). "
+                "Set JOB_PARSER_MODEL or CADDY_DEFAULT_MODEL accordingly."
+            )
+        provider, bare_name = model_name.split(":", 1)
+        if provider == "ollama":
             model = OpenAIChatModel(
-                model_name=ollama_model_name,
+                model_name=bare_name,
                 provider=OllamaProvider(
                     base_url=os.environ.get("OLLAMA_API_BASE", "http://localhost:11434/v1")
                 ),
             )
+        elif provider == "anthropic":
+            # Lazy import — keeps the anthropic SDK optional for installs
+            # that only configure OpenAI/Ollama.
+            from pydantic_ai.models.anthropic import AnthropicModel
+
+            model = AnthropicModel(bare_name)
+        elif provider == "openai":
+            model = OpenAIResponsesModel(bare_name)
         else:
-            if model_name.startswith("openai:"):
-                model_name = model_name.split(":", 1)[1]
-            model = OpenAIResponsesModel(model_name)
+            raise ValueError(
+                f"Unknown provider {provider!r} in model spec {model_name!r}. "
+                "Supported: 'openai', 'anthropic', 'ollama'."
+            )
         return Agent(model, output_type=ParsedJobData)
 
     def get_agent(self):
@@ -454,6 +473,11 @@ class JobPostExtractor:
             return f"openai:{model.model_name}"
         if isinstance(model, OpenAIChatModel):
             return f"ollama:{model.model_name}"
+        # Match by class name to avoid forcing the anthropic SDK import
+        # at module load — _build_agent_for_model imports it lazily.
+        cls_name = type(model).__name__
+        if cls_name == "AnthropicModel":
+            return f"anthropic:{getattr(model, 'model_name', model)}"
         return str(model)
 
     def _get_profile_hints(self, scrape: Scrape) -> str:

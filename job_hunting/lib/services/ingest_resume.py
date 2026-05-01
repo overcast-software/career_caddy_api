@@ -670,7 +670,11 @@ class IngestResume:
 
         if os.getenv("OPENAI_API_KEY"):
             try:
-                model = OpenAIModel("gpt-5")
+                # gpt-4o (not gpt-5) — gpt-5 access is gated on some
+                # OpenAI tiers and silently 400s with model_not_found.
+                # Override via RESUME_INGEST_MODEL=openai:gpt-5 if the
+                # account has access.
+                model = OpenAIModel("gpt-4o")
                 return Agent(
                     model,
                     output_type=ParsedResume,
@@ -763,11 +767,19 @@ class IngestResume:
             logger.exception("Failed to record resume_importer usage")
 
     def _agent_from_spec(self, spec: str):
-        """Parse 'provider:model_name' and return an Agent."""
-        if ":" in spec:
-            provider, model_name = spec.split(":", 1)
-        else:
-            provider, model_name = "openai", spec
+        """Parse 'provider:model_name' and return an Agent.
+
+        Bare names (no ':') raise ValueError — RESUME_INGEST_MODEL must
+        spell out the provider so the wrong-client misroute that bit
+        the scrape graph (Tier2 'anthropic:claude-haiku-4-5' going to
+        OpenAI's HTTP client, 2026-04-30) cannot recur here.
+        """
+        if ":" not in spec:
+            raise ValueError(
+                f"RESUME_INGEST_MODEL {spec!r} must use 'provider:model' "
+                "form (e.g. 'openai:gpt-4o', 'anthropic:claude-sonnet-4-6')."
+            )
+        provider, model_name = spec.split(":", 1)
 
         if provider == "anthropic":
             from pydantic_ai.models.anthropic import AnthropicModel
