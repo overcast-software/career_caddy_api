@@ -20,6 +20,12 @@ from job_hunting.models import Company, JobPost, JobPostDiscovery, Scrape
 
 logger = logging.getLogger(__name__)
 
+# Fields the persist-update branches must never overwrite on an existing
+# JobPost. `source` is JobPost provenance (set on creation only) — a
+# later scrape must not flip an email-originated post to "scrape".
+# `created_by` is the original owner and must never change.
+_NO_OVERWRITE_FIELDS = {"created_by", "source"}
+
 
 class ParsedJobData(BaseModel):
     """Pydantic model for structured extraction from scraped job content."""
@@ -215,11 +221,14 @@ class JobPostExtractor:
         detected_status = detect_posting_status(effective_description)
         if detected_status is not None:
             job_defaults["posting_status"] = detected_status
-        # Carry scrape provenance onto the JobPost so downstream analytics
-        # (sankey 'stub' detection, per-source funnel) can attribute the
-        # post to its origin. Falls back to 'manual' if somehow unset.
-        scrape_source = getattr(scrape, "source", None) or "manual"
-        job_defaults["source"] = scrape_source
+        # `source` is JobPost provenance — set on creation only. Re-scrapes
+        # of an existing post must NOT clobber the original origin (e.g. an
+        # email-originated stub being upgraded by a later scrape stays
+        # source="email"). Per-scrape provenance lives on Scrape.source
+        # and per-user discovery on JobPostDiscovery.source. Held in a
+        # local rather than `job_defaults` so the update branches don't
+        # smear it.
+        create_only_source = getattr(scrape, "source", None) or "manual"
 
         # Use the scrape URL as the canonical link — it's the known-good source.
         # The LLM-extracted link may be an apply URL, redirect, or null.
@@ -241,7 +250,7 @@ class JobPostExtractor:
                     job.title = validated_data.title
                     update_fields.append("title")
                 for field, value in job_defaults.items():
-                    if value is None or field == "created_by":
+                    if value is None or field in _NO_OVERWRITE_FIELDS:
                         continue
                     if getattr(job, field) != value:
                         setattr(job, field, value)
@@ -276,7 +285,7 @@ class JobPostExtractor:
                     job.company = company
                     update_fields.append("company_id")
                 for field, value in job_defaults.items():
-                    if value is None or field == "created_by":
+                    if value is None or field in _NO_OVERWRITE_FIELDS:
                         continue
                     if getattr(job, field) != value:
                         setattr(job, field, value)
@@ -290,12 +299,15 @@ class JobPostExtractor:
                 # the create() endpoint uses on its dedupe paths. Without
                 # this the hold-poller silently drops the scrape's
                 # company_id / posting_status / source onto the floor.
-                merge_attrs = dict(job_defaults)
+                merge_attrs = {
+                    k: v for k, v in job_defaults.items()
+                    if k not in _NO_OVERWRITE_FIELDS
+                }
                 if company is not None and not job.company_id:
                     merge_attrs["company_id"] = company.id
                 merge_empty_fields_from_attrs(job, merge_attrs)
         elif job is None:
-            create_defaults = {**job_defaults, "link": link}
+            create_defaults = {**job_defaults, "link": link, "source": create_only_source}
             if "description" not in create_defaults and effective_description:
                 create_defaults["description"] = effective_description
             job, _ = JobPost.objects.get_or_create(

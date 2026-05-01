@@ -541,3 +541,110 @@ class TestUpdateScrapeProfile(TestCase):
             _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
         profile = ScrapeProfile.objects.get(hostname="example.com")
         self.assertEqual(profile.preferred_tier, "0")
+
+
+class TestSourcePreservation(TestCase):
+    """JobPost.source is provenance: assign on creation only.
+
+    A later scrape upgrading or reparsing an existing JobPost must not
+    overwrite the original origin. Regression for jp-1483 where an
+    email-originated stub got flipped to source='scrape' once the
+    hold-poller scraped the canonical URL the next day.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="provuser", password="pass")
+        self.company = Company.objects.create(name="Optum")
+        self.parsed = ParsedJobData(
+            title="Senior Software Engineer",
+            company_name="Optum",
+            description="Build great things. " * 30,
+            location="Remote",
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_persist_preserves_existing_source_on_stub_upgrade(self, mock_analyze):
+        mock_analyze.return_value = self.parsed
+        existing = JobPost.objects.create(
+            title="Senior Software Engineer",
+            company=self.company,
+            link="https://example.com/job/1",
+            description="stub",
+            source="email",
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/job/1",
+            status="completed",
+            job_content="page text " * 50,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "email")
+        # Sanity: the stub-upgrade branch did fire (description was
+        # replaced) so we know we're testing the right path.
+        self.assertNotEqual(existing.description, "stub")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_persist_preserves_existing_source_on_force_reparse(self, mock_analyze):
+        mock_analyze.return_value = self.parsed
+        existing = JobPost.objects.create(
+            title="Senior Software Engineer",
+            company=self.company,
+            link="https://example.com/job/1",
+            description="prior full description " * 20,
+            source="email",
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/job/1",
+            status="completed",
+            job_content="page text " * 50,
+            source="scrape",
+            job_post=existing,
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True, force=True)
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "email")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_persist_preserves_existing_source_on_full_duplicate(self, mock_analyze):
+        mock_analyze.return_value = self.parsed
+        rich = "full description text " * 30
+        existing = JobPost.objects.create(
+            title="Senior Software Engineer",
+            company=self.company,
+            link="https://example.com/job/1",
+            description=rich,
+            source="email",
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/job/1",
+            status="completed",
+            job_content="page text " * 50,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "email")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_persist_sets_source_on_cold_create(self, mock_analyze):
+        mock_analyze.return_value = self.parsed
+        scrape = Scrape.objects.create(
+            url="https://example.com/cold-create",
+            status="completed",
+            job_content="page text " * 50,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        scrape.refresh_from_db()
+        self.assertIsNotNone(scrape.job_post_id)
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(job.source, "scrape")
