@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -26,6 +27,24 @@ logger = logging.getLogger(__name__)
 # `created_by` is the original owner and must never change.
 _NO_OVERWRITE_FIELDS = {"created_by", "source"}
 
+# Synthetic "[CLOSED — applications no longer accepted]" prefix the
+# Tier1 extractor occasionally prepends when a profile extraction_hints
+# blob instructs it to. Stripped before persistence — posting_status is
+# the authoritative closed signal, not banner text in the description.
+_CLOSED_BANNER_PREFIX = re.compile(
+    r"^\s*(?:\*\*)?\s*\[\s*closed\b[^\]]*\]\s*(?:\*\*)?\s*\n*",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_closed_banner_prefix(text: str) -> str:
+    """Remove a leading [CLOSED ...] banner the LLM may have synthesized.
+
+    Substring-only at the START of the text (LLMs render banners as
+    prefixes, not mid-sentence). Idempotent.
+    """
+    return _CLOSED_BANNER_PREFIX.sub("", text)
+
 
 class ParsedJobData(BaseModel):
     """Pydantic model for structured extraction from scraped job content."""
@@ -41,6 +60,23 @@ class ParsedJobData(BaseModel):
     location: Optional[str] = Field(None, max_length=255, description="Job location (city, state, country)")
     remote: Optional[bool] = Field(None, description="True if the role is remote or hybrid-remote")
     link: Optional[str] = Field(None, max_length=1000, description="Canonical URL / apply link for the job posting")
+    # Substring evidence the LLM saw a closed-posting banner. None when no
+    # banner was present. The post-extraction validator confirms this string
+    # appears in `job_content` before honoring it; otherwise we treat it as
+    # hallucination and refuse to mark the post closed via this channel.
+    # Background: jp 1550 (linkedin Lululemon, 2026-05-01) showed Tier1Mini
+    # fabricating "[CLOSED — applications no longer accepted]" prefixes on
+    # active postings driven by a profile extraction_hints instruction.
+    closed_evidence: Optional[str] = Field(
+        None,
+        max_length=300,
+        description=(
+            "VERBATIM quote (5+ words) from the source page that proves the "
+            "posting is closed (e.g. 'we are no longer accepting applications "
+            "for this role'). MUST appear character-for-character in the "
+            "source. Leave None if there is no such phrase."
+        ),
+    )
 
     @field_validator("title")
     @classmethod
@@ -210,17 +246,59 @@ class JobPostExtractor:
             job_defaults["location"] = validated_data.location
         if validated_data.remote is not None:
             job_defaults["remote"] = validated_data.remote
-        # Read posting_status off the description text. None means
-        # "no signal" — leave the column NULL so the list view's
-        # default-hide-closed filter still surfaces the post.
+        # Read posting_status off the source text — NOT off the LLM
+        # description, which can be polluted by hallucinated banners
+        # (jp 1550 incident, 2026-05-01: linkedin extraction_hints
+        # told Tier1Mini to lead the description with
+        # "[CLOSED — applications no longer accepted]" on an active
+        # posting). Two-channel detection:
+        #   1. closed_evidence — the LLM quotes the source verbatim;
+        #      we substring-validate against scrape.job_content. If the
+        #      quote is real → posting is closed.
+        #   2. detect_posting_status on scrape.job_content (the raw
+        #      page text) — phrase-match against the curated list.
+        # We do NOT trust phrase detection on the LLM-rendered
+        # description anymore: the LLM is a regex-defeating attacker
+        # in this threat model.
         from job_hunting.lib.text_signals import detect_posting_status
 
-        # Detect against the effective text (paste fallback included)
-        # so a "Position has been filled" phrase in the user's paste is
-        # still seen when the LLM produced no description.
-        detected_status = detect_posting_status(effective_description)
+        raw_source = (scrape.job_content or "").strip()
+        detected_status = None
+        if raw_source:
+            detected_status = detect_posting_status(raw_source)
+        if (
+            detected_status is None
+            and getattr(validated_data, "closed_evidence", None)
+        ):
+            evidence = (validated_data.closed_evidence or "").strip()
+            if evidence and evidence in raw_source:
+                detected_status = "closed"
+                logger.info(
+                    "JobPostExtractor: closed_evidence substantiated for "
+                    "scrape=%s (quote=%r)", scrape.id, evidence[:80],
+                )
+            elif evidence:
+                logger.warning(
+                    "JobPostExtractor: discarding unsubstantiated "
+                    "closed_evidence for scrape=%s — quote not present in "
+                    "job_content (quote=%r)",
+                    scrape.id, evidence[:80],
+                )
         if detected_status is not None:
             job_defaults["posting_status"] = detected_status
+
+        # Belt-and-suspenders: strip any "[CLOSED ...]" / "**[CLOSED ...]**"
+        # prefix the LLM may have prepended to the description. Even if
+        # the source text genuinely is closed, that prefix is a synthetic
+        # rendering decision — the column-level posting_status above is
+        # the authoritative signal. Without this strip, the regex in
+        # text_signals.py keeps re-firing on every re-parse and any
+        # downstream consumer reading description sees a banner that
+        # didn't come from the page.
+        if "description" in job_defaults and job_defaults["description"]:
+            job_defaults["description"] = _strip_closed_banner_prefix(
+                job_defaults["description"]
+            )
         # `source` is JobPost provenance — set on creation only. Re-scrapes
         # of an existing post must NOT clobber the original origin (e.g. an
         # email-originated stub being upgraded by a later scrape stays

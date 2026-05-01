@@ -648,3 +648,113 @@ class TestSourcePreservation(TestCase):
         self.assertIsNotNone(scrape.job_post_id)
         job = JobPost.objects.get(pk=scrape.job_post_id)
         self.assertEqual(job.source, "scrape")
+
+
+class TestClosedBannerHallucinationGuard(TestCase):
+    """Defends against the jp 1550 incident (2026-05-01).
+
+    A linkedin extraction_hints blob instructed Tier1Mini to lead the
+    description with "[CLOSED — applications no longer accepted]" on
+    every post. The model dutifully synthesized that prefix on an
+    ACTIVE Lululemon Senior Cybersecurity Engineer posting; the
+    text_signals regex matched the synthesized prefix and flipped
+    posting_status to "closed". Two-channel guard:
+      1. closed_evidence must be a verbatim substring of job_content
+      2. _strip_closed_banner_prefix removes synthetic [CLOSED ...]
+         from the description regardless of posting_status outcome
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="hallu", password="pass")
+        self.company = Company.objects.create(name="Lululemon")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_unsubstantiated_closed_evidence_is_discarded(self, mock_analyze):
+        # Page text is unambiguously active — no closed phrase anywhere.
+        active_page = (
+            "About the job. We are hiring. Apply now. Reposted 6 days ago. "
+            "Over 100 people clicked apply. Senior Cybersecurity Engineer."
+        )
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Cybersecurity Engineer",
+            company_name="Lululemon",
+            description="**[CLOSED — applications no longer accepted]** "
+                        "About the job. We are hiring.",
+            closed_evidence="role is closed and no longer accepting applications",
+        )
+        scrape = Scrape.objects.create(
+            url="https://www.linkedin.com/jobs/view/4383047961/",
+            status="completed",
+            job_content=active_page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        # Evidence quote was NOT in source → posting_status must remain None
+        self.assertIsNone(job.posting_status)
+        # Synthetic [CLOSED ...] prefix on the LLM description must be
+        # stripped before persistence
+        self.assertFalse(
+            job.description.lstrip().lower().startswith("[closed"),
+            f"Banner survived strip: {job.description[:80]!r}",
+        )
+        self.assertFalse(
+            job.description.lstrip().startswith("**"),
+            f"Markdown-bold prefix not stripped: {job.description[:80]!r}",
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_substantiated_closed_evidence_marks_post_closed(self, mock_analyze):
+        # Source page does carry a closed phrase verbatim.
+        closed_page = (
+            "Senior Engineer. About this role. We are no longer accepting "
+            "applications for this position. Thanks for your interest."
+        )
+        evidence = "no longer accepting applications for this position"
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Lululemon",
+            description="Senior Engineer. About this role. Thanks for your interest.",
+            closed_evidence=evidence,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/closed-role",
+            status="completed",
+            job_content=closed_page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        # Evidence found in source → posting_status correctly set
+        self.assertEqual(job.posting_status, "closed")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_strip_closed_banner_prefix_idempotent(self, mock_analyze):
+        # No evidence, no source phrase — but the LLM still injected the
+        # prefix. _strip_closed_banner_prefix must remove it.
+        from job_hunting.lib.parsers.job_post_extractor import (
+            _strip_closed_banner_prefix,
+        )
+        cases = [
+            "**[CLOSED — applications no longer accepted]** About the job.",
+            "[CLOSED] About the job.",
+            "[CLOSED: applications no longer accepted]\n\nAbout the job.",
+            "  **[Closed - applications no longer accepted]**\nAbout the job.",
+            "About the job. [CLOSED] mid-text reference.",  # only prefix stripped
+        ]
+        expectations = [
+            "About the job.",
+            "About the job.",
+            "About the job.",
+            "About the job.",
+            "About the job. [CLOSED] mid-text reference.",
+        ]
+        for raw, expected in zip(cases, expectations):
+            self.assertEqual(
+                _strip_closed_banner_prefix(raw).lstrip(), expected,
+                f"Failed on input: {raw!r}",
+            )
