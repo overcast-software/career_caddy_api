@@ -22,7 +22,7 @@ class TestModelResolution(TestCase):
         extractor = JobPostExtractor()
         with patch.dict(os.environ, {}, clear=True):
             name = extractor._resolve_model_name()
-        self.assertEqual(name, "gpt-4o")
+        self.assertEqual(name, "openai:gpt-4o")
 
     def test_role_specific_env_var(self):
         extractor = JobPostExtractor()
@@ -71,6 +71,80 @@ class TestModelResolution(TestCase):
         ):
             extractor.get_agent()
         self.assertEqual(captured["name"], "gpt-4o-mini")
+
+    def test_anthropic_prefix_routes_to_anthropic_model(self):
+        """Tier2/3 escalation passes 'anthropic:claude-haiku-4-5' /
+        'anthropic:claude-sonnet-4-6' through llm-extract. The dispatch
+        must construct an AnthropicModel with the bare name — not pass
+        'anthropic:...' through to OpenAIResponsesModel, which 400s with
+        'model_not_found' (incident: scrape #237 → jp 1550 LinkedIn,
+        2026-04-30)."""
+        extractor = JobPostExtractor()
+        captured = {}
+
+        class _FakeAnthropicModel:
+            def __init__(self, name):
+                captured["name"] = name
+                captured["cls"] = "AnthropicModel"
+
+        class _FakeOpenAIResponsesModel:
+            def __init__(self, name):
+                captured["name"] = name
+                captured["cls"] = "OpenAIResponsesModel"
+
+        class _FakeAgent:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        with (
+            patch(
+                "pydantic_ai.models.anthropic.AnthropicModel", _FakeAnthropicModel
+            ),
+            patch(
+                "job_hunting.lib.parsers.job_post_extractor.OpenAIResponsesModel",
+                _FakeOpenAIResponsesModel,
+            ),
+            patch(
+                "job_hunting.lib.parsers.job_post_extractor.Agent", _FakeAgent
+            ),
+        ):
+            extractor._build_agent_for_model("anthropic:claude-haiku-4-5")
+        self.assertEqual(captured["cls"], "AnthropicModel")
+        self.assertEqual(captured["name"], "claude-haiku-4-5")
+
+    def test_build_agent_rejects_bare_name(self):
+        """Bare model names (no provider:) must raise ValueError. The
+        dispatch function is the only place env values land in pydantic-
+        ai, so this is the chokepoint that enforces the explicit-prefix
+        policy. Prevents the silent OpenAI-misroute that produced the
+        Tier2 incident on 2026-04-30."""
+        extractor = JobPostExtractor()
+        with self.assertRaises(ValueError) as ctx:
+            extractor._build_agent_for_model("gpt-4o")
+        self.assertIn("provider:model", str(ctx.exception))
+
+    def test_build_agent_rejects_unknown_provider(self):
+        extractor = JobPostExtractor()
+        with self.assertRaises(ValueError) as ctx:
+            extractor._build_agent_for_model("cohere:command-r")
+        self.assertIn("Unknown provider", str(ctx.exception))
+
+    def test_get_model_name_recognizes_anthropic(self):
+        """AiUsage rows must label anthropic models as 'anthropic:<name>',
+        not str(model). Mirrors the OpenAI/Ollama branches so pricing.py
+        lookups succeed."""
+        extractor = JobPostExtractor()
+
+        class _FakeAnthropicModel:
+            model_name = "claude-haiku-4-5"
+
+        _FakeAnthropicModel.__name__ = "AnthropicModel"
+
+        class _FakeAgent:
+            model = _FakeAnthropicModel()
+
+        extractor.agent = _FakeAgent()
+        self.assertEqual(extractor._get_model_name(), "anthropic:claude-haiku-4-5")
 
 
 class TestProcessEvaluation(TestCase):
