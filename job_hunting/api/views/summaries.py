@@ -1,4 +1,5 @@
 import math
+import threading
 
 from rest_framework import status
 from rest_framework.response import Response
@@ -222,65 +223,95 @@ class SummaryViewSet(BaseViewSet):
         injected_prompt = injected_prompt or None
 
         if content:
+            # Manual content — create synchronously, already complete
             summary = Summary.objects.create(
                 job_post_id=job_post.id if job_post else None,
                 user_id=user_id,
                 content=content,
+                status="completed",
             )
-        else:
-            if not job_post:
+            if resume is not None:
+                ResumeSummary.objects.filter(resume_id=resume.id).update(active=False)
+                ResumeSummary.objects.get_or_create(
+                    resume_id=resume.id, summary_id=summary.id, defaults={"active": True}
+                )
+                ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).update(
+                    active=True
+                )
+                ResumeSummary.ensure_single_active_for_resume(resume.id)
+            ser = self.get_serializer()
+            payload = {"data": ser.to_resource(summary)}
+            include_rels = self._parse_include(request)
+            if include_rels:
+                payload["included"] = self._build_included([summary], include_rels, request)
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        # AI generation path — create a pending record and dispatch async
+        if not job_post:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": "Provide 'attributes.content' or a job-post relationship to generate content"
+                        }
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        client = get_client(required=False)
+        if client is None:
+            return Response(
+                {
+                    "errors": [
+                        {"detail": "AI client not configured. Set OPENAI_API_KEY."}
+                    ]
+                },
+                status=503,
+            )
+
+        career_markdown = None
+        if resume is None:
+            career_data = CareerData.for_user(user_id)
+            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+            career_markdown = prompt_builder.build_from_career_data(career_data)
+            if not career_markdown.strip():
                 return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": "Provide 'attributes.content' or a job-post relationship to generate content"
-                            }
-                        ]
-                    },
+                    {"errors": [{"detail": "No career data found for this user. Add favorite resumes or provide a resume relationship."}]},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            client = get_client(required=False)
-            if client is None:
-                return Response(
-                    {
-                        "errors": [
-                            {"detail": "AI client not configured. Set OPENAI_API_KEY."}
-                        ]
-                    },
-                    status=503,
-                )
+        summary = Summary.objects.create(
+            job_post_id=job_post.id,
+            user_id=user_id,
+            status="pending",
+        )
+        summary_id = summary.id
+        captured_injected_prompt = injected_prompt
+        captured_resume = resume
+        captured_career_markdown = career_markdown
 
-            if resume is None:
-                # No resume — use the user's full career data
-                career_data = CareerData.for_user(user_id)
-                prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
-                career_markdown = prompt_builder.build_from_career_data(career_data)
-                if not career_markdown.strip():
-                    return Response(
-                        {"errors": [{"detail": "No career data found for this user. Add favorite resumes or provide a resume relationship."}]},
-                        status=status.HTTP_400_BAD_REQUEST,
+        def _generate():
+            import django
+            django.db.close_old_connections()
+            try:
+                if captured_resume is None:
+                    svc = SummaryService(client, job=job_post, resume_markdown=captured_career_markdown, user_id=user_id)
+                else:
+                    svc = SummaryService(client, job=job_post, resume=captured_resume)
+                generated_content = svc.generate_content(injected_prompt=captured_injected_prompt)
+                Summary.objects.filter(pk=summary_id).update(content=generated_content, status="completed")
+                if captured_resume is not None:
+                    ResumeSummary.objects.filter(resume_id=captured_resume.id).update(active=False)
+                    ResumeSummary.objects.get_or_create(
+                        resume_id=captured_resume.id, summary_id=summary_id, defaults={"active": True}
                     )
-                summary_service = SummaryService(client, job=job_post, resume_markdown=career_markdown, user_id=user_id)
-            else:
-                summary_service = SummaryService(client, job=job_post, resume=resume)
+                    ResumeSummary.objects.filter(resume_id=captured_resume.id, summary_id=summary_id).update(active=True)
+                    ResumeSummary.ensure_single_active_for_resume(captured_resume.id)
+            except Exception:
+                Summary.objects.filter(pk=summary_id).update(status="failed")
 
-            summary = summary_service.generate_summary(injected_prompt=injected_prompt)
-
-        # Link to resume when one was provided
-        if resume is not None:
-            ResumeSummary.objects.filter(resume_id=resume.id).update(active=False)
-            ResumeSummary.objects.get_or_create(
-                resume_id=resume.id, summary_id=summary.id, defaults={"active": True}
-            )
-            ResumeSummary.objects.filter(resume_id=resume.id, summary_id=summary.id).update(
-                active=True
-            )
-            ResumeSummary.ensure_single_active_for_resume(resume.id)
+        threading.Thread(target=_generate, daemon=True).start()
 
         ser = self.get_serializer()
-        payload = {"data": ser.to_resource(summary)}
-        include_rels = self._parse_include(request)
-        if include_rels:
-            payload["included"] = self._build_included([summary], include_rels, request)
-        return Response(payload, status=status.HTTP_201_CREATED)
+        return Response({"data": ser.to_resource(summary)}, status=status.HTTP_202_ACCEPTED)

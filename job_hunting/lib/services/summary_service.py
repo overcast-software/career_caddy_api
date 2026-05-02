@@ -16,7 +16,7 @@ class SummaryService:
         self.env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         self.ai_client = ai_client
 
-    def generate_summary(self, injected_prompt=None) -> Summary:
+    def generate_content(self, injected_prompt=None) -> str:
         if self._resume_markdown is not None:
             resume_markdown = self._resume_markdown
         else:
@@ -58,7 +58,11 @@ class SummaryService:
             ],
             # max_tokens=150 not supported with gpt-5
         )
-        content = response.choices[0].message.content.strip()
+        return response.choices[0].message.content.strip()
+
+    def generate_summary(self, injected_prompt=None) -> Summary:
+        user_id = self._user_id or (self.resume.user_id if self.resume else None)
+        content = self.generate_content(injected_prompt)
         return Summary.objects.create(
             job_post_id=self.job.id,
             user_id=user_id,
