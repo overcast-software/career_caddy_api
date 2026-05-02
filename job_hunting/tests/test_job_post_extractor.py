@@ -311,6 +311,110 @@ class TestProcessEvaluation(TestCase):
             ).exists()
         )
 
+    def test_cold_path_thin_existing_upgrades_from_full(self):
+        """jp 1603 incident: an extension scrape from welcometothejungle.com
+        deduped to an email-sourced LinkedIn JP via title+company match.
+        The existing JP had only the LinkedIn off-platform-managed page
+        chrome (~32 words) as its description; the new scrape carried the
+        full role description from the aggregator. Layer 1 mirrors the
+        link-hit-thin branch into the cold path so the rich description
+        wins. Without this, get_or_create returns the existing match and
+        silently drops the new defaults."""
+        company = Company.objects.create(name="Acme Corp")
+        existing = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            link="https://email-sourced.example.com/job/old",
+            description="Apply Save Sign in About",  # 5 words → thin
+            location="Stale Location",
+            created_by=self.user,
+        )
+
+        rich_desc = (
+            "We are looking for a Senior Engineer to join our team. "
+            "Responsibilities include building scalable services. "
+            "Required skills: Python, Django, distributed systems. "
+        ) * 6  # ~96 words → clears STUB_MIN_WORDS=60
+
+        self.parsed_data.description = rich_desc
+        self.parsed_data.location = "Remote"
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        self.assertEqual(extractor.last_outcome, "updated_stub_via_fingerprint")
+        existing.refresh_from_db()
+        self.assertEqual(existing.description, rich_desc)
+        self.assertEqual(existing.location, "Remote")
+        # Link is in _NO_OVERWRITE_FIELDS-adjacent territory: it isn't in
+        # job_defaults at all (set only on cold-create), so the original
+        # email-attested link survives.
+        self.assertEqual(existing.link, "https://email-sourced.example.com/job/old")
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.job_post_id, existing.id)
+
+    def test_cold_path_full_existing_keeps_description(self):
+        """Both descriptions non-thin: fall through to duplicate_via_fingerprint
+        (NULL-fill only, no overwrite). Layer 2 will arbitrate this case;
+        Layer 1 deliberately preserves the existing populated description."""
+        company = Company.objects.create(name="Acme Corp")
+        rich_desc = "Full original description with substantial content. " * 20  # ~140 words
+        existing = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            link="https://email-sourced.example.com/job/old",
+            description=rich_desc,
+            created_by=self.user,
+        )
+
+        new_desc = "Different rich description from a second source. " * 20  # ~140 words
+        self.parsed_data.description = new_desc
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        self.assertEqual(extractor.last_outcome, "duplicate_via_fingerprint")
+        existing.refresh_from_db()
+        # Description deliberately preserved — Layer 2 is the layer that
+        # decides between two non-thin descriptions.
+        self.assertEqual(existing.description, rich_desc)
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.job_post_id, existing.id)
+
+    def test_cold_path_created_outcome_unchanged(self):
+        """Fresh title+company → get_or_create returns created=True →
+        last_outcome stays at the default 'created' set at the top of
+        process_evaluation. No new fingerprint sentinel for the create
+        path (the create itself is the upgrade)."""
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+        # Default outcome from process_evaluation entry point.
+        self.assertEqual(extractor.last_outcome, "created")
+        self.assertTrue(JobPost.objects.filter(title="Senior Engineer").exists())
+
+    def test_cold_path_thin_existing_thin_new_falls_to_duplicate(self):
+        """Both descriptions thin: the upgrade gate requires the NEW desc
+        to clear STUB_MIN_WORDS. If it doesn't, fall through to
+        duplicate_via_fingerprint (NULL-fill) — never overwrite a stub
+        with another stub."""
+        company = Company.objects.create(name="Acme Corp")
+        existing = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            link="https://email-sourced.example.com/job/old",
+            description="five word stub description here",  # 5 words → thin
+            created_by=self.user,
+        )
+
+        self.parsed_data.description = "also a tiny new description"  # 5 words → thin
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
+
+        self.assertEqual(extractor.last_outcome, "duplicate_via_fingerprint")
+        existing.refresh_from_db()
+        self.assertEqual(existing.description, "five word stub description here")
+
     def test_extractor_records_discovery_for_scrape_owner(self):
         """Every successful process_evaluation must leave a
         JobPostDiscovery row tying the scrape's owner to the resulting

@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 
 from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
-from job_hunting.lib.services.application_flow import _is_thin_description
+from job_hunting.lib.services.application_flow import (
+    _is_thin_description,
+    STUB_MIN_WORDS,
+)
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 from job_hunting.models import Company, JobPost, JobPostDiscovery, Scrape
 
@@ -407,11 +410,44 @@ class JobPostExtractor:
             create_defaults = {**job_defaults, "link": link, "source": create_only_source}
             if "description" not in create_defaults and effective_description:
                 create_defaults["description"] = effective_description
-            job, _ = JobPost.objects.get_or_create(
+            job, created = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company=company,
                 defaults=create_defaults,
             )
+            # When get_or_create matches an existing post (created=False),
+            # `defaults` are silently dropped. Without this block the
+            # cold-path (title, company) match is asymmetric with the
+            # link-hit branch above: a thin existing post would upgrade
+            # on a link match but never on a fingerprint match.
+            # jp 1603 incident (2026-05-02): an extension scrape from
+            # welcometothejungle.com deduped to an email-sourced LinkedIn
+            # JP via title+company, and the rich description was lost.
+            if not created:
+                if (
+                    _is_thin_description(job)
+                    and effective_description
+                    and len(effective_description.split()) >= STUB_MIN_WORDS
+                ):
+                    self.last_outcome = "updated_stub_via_fingerprint"
+                    update_fields = []
+                    for field, value in job_defaults.items():
+                        if value is None or field in _NO_OVERWRITE_FIELDS:
+                            continue
+                        if getattr(job, field) != value:
+                            setattr(job, field, value)
+                            update_fields.append(field)
+                    if update_fields:
+                        job.save(update_fields=update_fields)
+                else:
+                    self.last_outcome = "duplicate_via_fingerprint"
+                    merge_attrs = {
+                        k: v for k, v in job_defaults.items()
+                        if k not in _NO_OVERWRITE_FIELDS
+                    }
+                    if company is not None and not job.company_id:
+                        merge_attrs["company_id"] = company.id
+                    merge_empty_fields_from_attrs(job, merge_attrs)
         elif not force or not scrape.job_post_id:
             # Update fields that may have been missing on a prior pass
             update_fields = []
