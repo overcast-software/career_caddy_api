@@ -12,6 +12,10 @@ from job_hunting.models import Company, JobPost, Scrape
 User = get_user_model()
 
 
+# Existing tests predate the Phase 0 length floor; relax it so they keep
+# focusing on what they were written to test. Length bounds get their own
+# coverage in TestScrapeFromTextPolicy below.
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
 class TestScrapeFromText(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -87,6 +91,7 @@ class TestScrapeFromText(TestCase):
         self.assertIn(resp.status_code, (401, 403))
 
 
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
 class TestScrapeFromTextDuplicateLink(TestCase):
     """Inbox bug: pasting a URL whose JobPost already exists used to create
     a Scrape and run the full LLM extraction before the dedup check fired —
@@ -181,6 +186,182 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Senior Engineer at Toptal"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        mock_parse.assert_called_once()
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextSourceHint(TestCase):
+    """The browser extension submits with source='extension' so analytics
+    can distinguish web-paste, email-pipeline, and extension-driven
+    JobPosts. Endpoint defaults to 'paste' so the existing web form
+    keeps working without any frontend change."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="srcuser", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_default_source_is_paste(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Some content"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.source, "paste")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_extension_source_persists(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Content", "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.source, "extension")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_email_source_persists(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Content", "source": "email"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.source, "email")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_source_normalized_to_lowercase(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Content", "source": "Extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.source, "extension")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_invalid_source_falls_back_to_paste(self, _mock_parse):
+        # Whitespace / special chars / overlong values must not crash —
+        # provenance attribution should never block ingestion.
+        for bad in [
+            "spaces in here",
+            "punct!",
+            "x" * 100,
+            "../etc/passwd",
+            "; DROP TABLE",
+        ]:
+            with self.subTest(source=bad):
+                resp = self.client.post(
+                    "/api/v1/scrapes/from-text/",
+                    data={"text": "c", "source": bad},
+                    format="json",
+                )
+                self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+                scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+                self.assertEqual(scrape.source, "paste")
+                Scrape.objects.all().delete()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_blank_source_falls_back_to_paste(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "c", "source": "   "},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.source, "paste")
+
+
+class TestScrapeFromTextPolicy(TestCase):
+    """Phase 0 ingest defenses — see plan dazzling-stirring-church.md.
+
+    Hard-rejects URLs and text payloads that don't make sense, before we
+    spend an LLM call on them.
+    """
+
+    LONG_TEXT = "Senior Engineer at Acme. Remote. " * 10  # ~330 chars
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="policy", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_rejects_self_host_link(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": self.LONG_TEXT,
+                "link": "https://careercaddy.online/dashboard",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertEqual(
+            resp.json()["errors"][0]["code"], "blocked_self"
+        )
+        self.assertEqual(Scrape.objects.count(), 0)
+        mock_parse.assert_not_called()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_rejects_javascript_scheme_link(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": self.LONG_TEXT, "link": "javascript:alert(1)"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertEqual(resp.json()["errors"][0]["code"], "blocked_scheme")
+        mock_parse.assert_not_called()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_rejects_localhost_link(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": self.LONG_TEXT, "link": "http://localhost:4200/x"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertEqual(resp.json()["errors"][0]["code"], "blocked_private")
+        mock_parse.assert_not_called()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_short_text_rejected(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "too short for a real posting"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.json()["errors"][0]["code"], "text_too_short")
+        mock_parse.assert_not_called()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_oversize_text_rejected(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "x" * 600_000},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertEqual(resp.json()["errors"][0]["code"], "text_too_long")
+        mock_parse.assert_not_called()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_happy_path_with_public_link_passes(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": self.LONG_TEXT, "link": "https://jobs.lever.co/acme/1"},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
