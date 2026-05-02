@@ -1,3 +1,4 @@
+import logging
 import math
 
 from datetime import timedelta
@@ -58,6 +59,9 @@ from job_hunting.models import (
     JobApplicationStatus,
     ResumeSummary,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _attach_active_application_status(job_posts, user_id):
@@ -434,6 +438,40 @@ class JobPostViewSet(BaseViewSet):
             return Response(
                 {"errors": [{"detail": v} for v in date_errors.values()]}, status=400
             )
+
+        # URL hygiene — Phase 0 of the ingest defense lift to JobPost POST.
+        # Mirrors the policy gate POST /scrapes/ already runs (see
+        # scrapes.py:377-391). Hard-rejects non-http schemes, our own
+        # domain, and private/internal hosts so cc_auto, the chat agent,
+        # and the manual create form can't seed JobPost rows with junk
+        # URLs. Tracker-redirect resolution is intentionally NOT lifted
+        # here in this slice — see todo.org "Ingest abuse defense — Phase 2"
+        # and notes.org Scrape Log 2026-05-01 for why
+        # (LinkedIn /comm/ HEAD-redirects to a login wall without auth, so
+        # naive resolve_tracker would persist worse URLs than the wrapped
+        # ones we'd be trying to strip).
+        link = attrs.get("link")
+        if link:
+            from job_hunting.lib.url_policy import (
+                UrlPolicyError,
+                validate_submission_url,
+            )
+            try:
+                attrs["link"] = validate_submission_url(link)
+            except UrlPolicyError as e:
+                logger.info(
+                    "JobPostViewSet.create: rejecting link=%s — %s (%s)",
+                    link, e, e.code,
+                )
+                return Response(
+                    {"errors": [{
+                        "status": "422",
+                        "code": e.code,
+                        "detail": str(e),
+                    }]},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
         from job_hunting.models import JobPostDiscovery
 
         def _record_discovery(post):
