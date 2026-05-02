@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 
 from django.db.models import F, Q
 from django.conf import settings
@@ -28,8 +29,36 @@ from job_hunting.models import (
     ScrapeProfile,
 )
 from job_hunting.lib.services.application_flow import _is_thin_description
+from job_hunting.lib.url_policy import UrlPolicyError, validate_submission_url
+
+
+# Phase 0 ingest bounds — see plan: dazzling-stirring-church.md
+FROM_TEXT_MIN_LEN = 200
+FROM_TEXT_MAX_LEN = 500_000  # 500KB; keeps a single LLM call within budget
 
 logger = logging.getLogger(__name__)
+
+
+_SOURCE_HINT_RE = re.compile(r"^[a-z0-9_\-]{1,32}$")
+
+
+def _normalize_source_hint(raw):
+    """Validate the optional source hint sent to /scrapes/from-text/.
+
+    Returns a lowercase a-z0-9_- token, falling back to "paste" (the
+    historical default for this endpoint) when the input is missing,
+    empty, or fails validation. Refuses to raise — a bad hint is a soft
+    failure since provenance attribution should never block ingestion.
+    """
+    if not isinstance(raw, str):
+        return "paste"
+    candidate = raw.strip().lower()
+    if not candidate:
+        return "paste"
+    if not _SOURCE_HINT_RE.match(candidate):
+        logger.warning("from-text rejected source hint %r; defaulting to 'paste'", raw)
+        return "paste"
+    return candidate
 
 
 @extend_schema_view(
@@ -345,6 +374,22 @@ class ScrapeViewSet(BaseViewSet):
                     source_link, url,
                 )
 
+        try:
+            url = validate_submission_url(url)
+        except UrlPolicyError as e:
+            logger.info(
+                "ScrapeViewSet.create: rejecting url=%s — %s (%s)",
+                url, e, e.code,
+            )
+            return Response(
+                {"errors": [{
+                    "status": "422",
+                    "code": e.code,
+                    "detail": str(e),
+                }]},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
         # Resolve any explicit JobPost relationship the caller sent.
         # Doing this BEFORE the dedupe check lets jp.show's "Run scrape"
         # / "Scrape & Score" actions re-scrape the post they're already
@@ -515,6 +560,17 @@ class ScrapeViewSet(BaseViewSet):
                     allow_blank=True,
                     help_text="Optional source URL for deduplication",
                 ),
+                "source": drf_serializers.CharField(
+                    required=False,
+                    allow_blank=True,
+                    help_text=(
+                        "Provenance hint stored on Scrape.source and propagated "
+                        "to JobPost.source on cold-create. Defaults to 'paste'. "
+                        "Known values: 'paste' (web form), 'extension' (browser "
+                        "extension), 'email' (cc_auto). Free-form CharField; "
+                        "rejected if not a-z0-9_- and ≤32 chars."
+                    ),
+                ),
             },
         ),
         responses={
@@ -539,12 +595,53 @@ class ScrapeViewSet(BaseViewSet):
         text = (data.get("text") or "").strip()
         link = (data.get("link") or "").strip() or None
         force = bool(data.get("force"))
+        source = _normalize_source_hint(data.get("source"))
 
         if not text:
             return Response(
                 {"errors": [{"detail": "text is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if len(text) < FROM_TEXT_MIN_LEN:
+            return Response(
+                {"errors": [{
+                    "status": "400",
+                    "code": "text_too_short",
+                    "detail": (
+                        f"Pasted text is too short ({len(text)} chars); "
+                        f"need at least {FROM_TEXT_MIN_LEN}. The page may not "
+                        "have finished loading."
+                    ),
+                }]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(text) > FROM_TEXT_MAX_LEN:
+            return Response(
+                {"errors": [{
+                    "status": "422",
+                    "code": "text_too_long",
+                    "detail": (
+                        f"Pasted text is {len(text)} chars; max is "
+                        f"{FROM_TEXT_MAX_LEN}. Trim to the job posting itself."
+                    ),
+                }]},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        if link:
+            try:
+                link = validate_submission_url(link)
+            except UrlPolicyError as e:
+                return Response(
+                    {"errors": [{
+                        "status": "422",
+                        "code": e.code,
+                        "detail": str(e),
+                    }]},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
 
         if link and not force:
             existing = JobPost.objects.filter(link=link).first()
@@ -580,10 +677,10 @@ class ScrapeViewSet(BaseViewSet):
             job_content=text,
             status="pending",
             created_by=request.user,
-            source="paste",
+            source=source,
         )
         from job_hunting.lib.scraper import _log_scrape_status
-        _log_scrape_status(scrape.id, "pending", note="paste ingest")
+        _log_scrape_status(scrape.id, "pending", note=f"{source} ingest")
 
         from job_hunting.lib.parsers.job_post_extractor import parse_scrape
         parse_scrape(scrape.id, user_id=request.user.id)
