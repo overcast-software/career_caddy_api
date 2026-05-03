@@ -406,6 +406,15 @@ class JobPostExtractor:
                 if company is not None and not job.company_id:
                     merge_attrs["company_id"] = company.id
                 merge_empty_fields_from_attrs(job, merge_attrs)
+                # Layer 2 arbiter: when both descriptions are non-thin, ask
+                # the LLM which is better and apply its decision.
+                if effective_description:
+                    self._maybe_apply_arbiter(
+                        job=job, scrape=scrape,
+                        new_description=effective_description,
+                        new_source=getattr(scrape, "source", None) or "",
+                        new_link=link or "",
+                    )
         elif job is None:
             create_defaults = {**job_defaults, "link": link, "source": create_only_source}
             if "description" not in create_defaults and effective_description:
@@ -448,6 +457,14 @@ class JobPostExtractor:
                     if company is not None and not job.company_id:
                         merge_attrs["company_id"] = company.id
                     merge_empty_fields_from_attrs(job, merge_attrs)
+                    # Layer 2 arbiter: same as the link-hit duplicate path.
+                    if effective_description:
+                        self._maybe_apply_arbiter(
+                            job=job, scrape=scrape,
+                            new_description=effective_description,
+                            new_source=getattr(scrape, "source", None) or "",
+                            new_link=link or "",
+                        )
         elif not force or not scrape.job_post_id:
             # Update fields that may have been missing on a prior pass
             update_fields = []
@@ -498,6 +515,42 @@ class JobPostExtractor:
                 defaults={"source": getattr(scrape, "source", None) or "scrape"},
             )
         return True
+
+    def _maybe_apply_arbiter(
+        self,
+        *,
+        job,
+        scrape,
+        new_description: str,
+        new_source: str,
+        new_link: str,
+    ) -> None:
+        """Run the DescriptionArbiter and apply the winning description.
+
+        Only fires when the existing description is non-thin and the
+        incoming description is also non-thin. A keep_existing result is
+        a no-op on the job row but always produces an audit record.
+        """
+        from job_hunting.lib.services.application_flow import _is_thin_description
+
+        if _is_thin_description(job):
+            return
+
+        from job_hunting.lib.parsers.description_arbiter import maybe_arbitrate_and_persist
+
+        winning = maybe_arbitrate_and_persist(
+            job_post=job,
+            scrape=scrape,
+            new_description=new_description,
+            new_source=new_source,
+            new_link=new_link,
+        )
+        if winning is None:
+            return
+        current = (job.description or "").strip()
+        if winning != current:
+            job.description = winning
+            job.save(update_fields=["description"])
 
     def _get_model_name(self) -> str:
         if self.agent is None:

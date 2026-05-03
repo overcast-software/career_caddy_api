@@ -64,6 +64,7 @@ def _agent_role_specs():
         ("resume_ingest", "Parses uploaded resume into structured records", "RESUME_INGEST_MODEL", _resume_ingest_default()),
         ("job_parser", "Extracts JobPost fields from scraped HTML", "JOB_PARSER_MODEL", global_default if os.environ.get("CADDY_DEFAULT_MODEL") else "gpt-4o"),
         ("hint_generator", "Suggests scrape selectors / tier-0 hints", "HINT_GENERATOR_MODEL", "openai:gpt-4o-mini"),
+        ("description_arbiter", "Picks between two job descriptions when scrapes disagree", "DESCRIPTION_ARBITER_MODEL", "openai:gpt-4o-mini"),
     ]
 
 
