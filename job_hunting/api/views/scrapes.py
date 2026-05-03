@@ -683,7 +683,7 @@ class ScrapeViewSet(BaseViewSet):
         _log_scrape_status(scrape.id, "pending", note=f"{source} ingest")
 
         from job_hunting.lib.parsers.job_post_extractor import parse_scrape
-        parse_scrape(scrape.id, user_id=request.user.id)
+        parse_scrape(scrape.id, user_id=request.user.id, sync=True)
 
         scr_ser = self.get_serializer()
         return Response(

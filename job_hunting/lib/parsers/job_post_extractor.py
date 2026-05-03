@@ -245,7 +245,7 @@ class JobPostExtractor:
         effective_description = validated_data.description
         if (
             not effective_description
-            and getattr(scrape, "source", None) == "paste"
+            and getattr(scrape, "source", None) in ("paste", "extension")
         ):
             fallback = (scrape.job_content or "").strip()
             if fallback:
