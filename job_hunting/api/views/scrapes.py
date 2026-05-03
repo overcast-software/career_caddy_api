@@ -685,6 +685,14 @@ class ScrapeViewSet(BaseViewSet):
         from job_hunting.lib.parsers.job_post_extractor import parse_scrape
         parse_scrape(scrape.id, user_id=request.user.id, sync=True)
 
+        scrape.refresh_from_db()
+        if scrape.job_post_id:
+            try:
+                from job_hunting.api.views.scores import _auto_score_job_post
+                _auto_score_job_post(scrape.job_post_id, request.user.id)
+            except Exception:
+                logger.exception("from_text: auto-score failed for scrape %s", scrape.id)
+
         scr_ser = self.get_serializer()
         return Response(
             {"data": scr_ser.to_resource(scrape)},

@@ -11,7 +11,7 @@ Regression tests for the score create and list bugs:
 3. JobPostSerializer.get_related("scores"): linked_relationships must only
    emit score IDs belonging to the requesting user, not all users' scores.
 """
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
@@ -99,7 +99,8 @@ class TestScoreCreateStaffInference(TestCase):
                 },
             }
         }
-        with patch("job_hunting.api.views.scores.threading.Thread") as mock_thread:
+        with patch("job_hunting.api.views.scores.get_client", return_value=MagicMock()), \
+             patch("job_hunting.api.views.scores.threading.Thread") as mock_thread:
             mock_thread.return_value.start = lambda: None
             resp = client.post(
                 SCORES_URL,
@@ -156,7 +157,8 @@ class TestScoreMultiTenancy(TestCase):
                 },
             }
         }
-        with patch("job_hunting.api.views.scores.threading.Thread") as mock_thread:
+        with patch("job_hunting.api.views.scores.get_client", return_value=MagicMock()), \
+             patch("job_hunting.api.views.scores.threading.Thread") as mock_thread:
             mock_thread.return_value.start = lambda: None
             return client.post(
                 SCORES_URL,

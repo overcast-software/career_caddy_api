@@ -420,3 +420,60 @@ class TestScrapeFromTextSyncExtraction(TestCase):
             ("completed", "failed"),
             f"Scrape {scrape_id} must be terminal after sync=True parse, got {scrape.status!r}",
         )
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextAutoScore(TestCase):
+    """from_text fires auto-scoring after a successful sync parse."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="autoscorer", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.api.views.scores._auto_score_job_post")
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_auto_score_fired_after_successful_parse(self, mock_analyze, mock_auto_score):
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+        from job_hunting.models import Company
+
+        Company.objects.create(name="AutoCorp")
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer",
+            company_name="AutoCorp",
+            description="Build things reliably at scale. " * 5,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Engineer at AutoCorp. " * 20},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        mock_auto_score.assert_called_once()
+        _, call_kwargs = mock_auto_score.call_args
+        # user_id is the second positional arg
+        self.assertEqual(mock_auto_score.call_args[0][1], self.user.id)
+
+    @patch("job_hunting.api.views.scores._auto_score_job_post")
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_auto_score_not_fired_when_parse_creates_no_job_post(self, mock_parse, mock_auto_score):
+        """parse_scrape no-op → scrape has no job_post_id → no Score attempt."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "content"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        mock_auto_score.assert_not_called()
+
+    @patch("job_hunting.api.views.scores._auto_score_job_post")
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_auto_score_error_does_not_break_response(self, mock_parse, mock_auto_score):
+        """A scoring error must never surface to the from-text caller."""
+        mock_auto_score.side_effect = Exception("boom")
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "content"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)

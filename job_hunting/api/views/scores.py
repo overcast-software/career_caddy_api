@@ -28,6 +28,83 @@ from job_hunting.models import (
 logger = logging.getLogger(__name__)
 
 
+def _auto_score_job_post(job_post_id: int, user_id: int) -> bool:
+    """Create a pending Score and kick off a scoring thread for job_post_id.
+
+    Returns True if the thread was started. Silent no-op (False) when
+    preconditions aren't met: no AI client, missing description, or no career data.
+    Never raises — callers wrap this in try/except anyway but this keeps the
+    contract clean.
+    """
+    client = get_client(required=False)
+    if client is None:
+        return False
+
+    jp = JobPost.objects.filter(pk=job_post_id).first()
+    if not jp or not jp.description or not jp.description.strip():
+        return False
+
+    career_data = CareerData.for_user(user_id)
+    prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+    resume_markdown = prompt_builder.build_from_career_data(career_data)
+    if not resume_markdown.strip():
+        return False
+
+    my_score = Score.objects.filter(
+        job_post_id=job_post_id, resume_id=None, user_id=user_id
+    ).first()
+    if my_score:
+        my_score.status = "pending"
+        my_score.score = None
+        my_score.explanation = None
+        my_score.save()
+    else:
+        my_score = Score.objects.create(
+            job_post_id=job_post_id,
+            resume_id=None,
+            user_id=user_id,
+            status="pending",
+        )
+
+    score_id = my_score.id
+    captured_description = jp.description
+    my_job_scorer = JobScorer(client)
+
+    def _score():
+        import django
+        django.db.close_old_connections()
+        try:
+            result = my_job_scorer.score_job_match(captured_description, resume_markdown)
+            Score.objects.filter(pk=score_id).update(
+                score=result.score,
+                explanation=result.evaluation,
+                status="completed",
+            )
+        except Exception:
+            logger.exception("auto_score: scoring failed for score_id=%s", score_id)
+            Score.objects.filter(pk=score_id).update(status="failed")
+            return
+        try:
+            usage = getattr(result, "_usage", None)
+            model_name = getattr(result, "_model_name", "unknown")
+            if usage:
+                AiUsage.objects.create(
+                    user_id=user_id,
+                    agent_name="job_scorer",
+                    model_name=model_name,
+                    trigger="auto_score",
+                    request_tokens=usage.request_tokens or 0,
+                    response_tokens=usage.response_tokens or 0,
+                    total_tokens=usage.total_tokens or 0,
+                    request_count=usage.requests or 1,
+                )
+        except Exception:
+            logger.exception("auto_score: failed to record AI usage for score_id=%s", score_id)
+
+    threading.Thread(target=_score, daemon=True).start()
+    return True
+
+
 @extend_schema_view(
     list=extend_schema(tags=["Scores"], summary="List scores"),
     retrieve=extend_schema(tags=["Scores"], summary="Retrieve a score"),
