@@ -44,6 +44,7 @@ class TestScrapeFromText(TestCase):
         args, kwargs = mock_parse.call_args
         self.assertEqual(args[0], scrape.id)
         self.assertEqual(kwargs.get("user_id"), self.user.id)
+        self.assertTrue(kwargs.get("sync"), "from_text must call parse_scrape with sync=True")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
     def test_optional_link_stored(self, mock_parse):
@@ -366,3 +367,56 @@ class TestScrapeFromTextPolicy(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         mock_parse.assert_called_once()
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextSyncExtraction(TestCase):
+    """from_text must call parse_scrape with sync=True so the scrape reaches
+    a terminal status before the HTTP response is returned. Without this,
+    extension-submitted scrapes could get stuck in extracting if the daemon
+    thread dies (scrape 273 incident, 2026-05-02)."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="syncuser", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_parse_scrape_called_with_sync_true(self, mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Real job content here", "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        _, kwargs = mock_parse.call_args
+        self.assertTrue(
+            kwargs.get("sync"),
+            "from_text must invoke parse_scrape(..., sync=True) to prevent stuck-extracting scrapes",
+        )
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_scrape_is_terminal_when_response_returns(self, mock_analyze):
+        """With sync=True, parse_scrape runs inline. The scrape must be in
+        a terminal status (completed or failed) before the 202 is returned,
+        so the extension's first poll always sees a result."""
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+
+        mock_analyze.return_value = ParsedJobData(
+            title="Staff Engineer",
+            company_name="SyncCorp",
+            description="Build reliable distributed systems at scale. " * 5,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Staff Engineer at SyncCorp. " * 30, "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape_id = int(resp.json()["data"]["id"])
+        scrape = Scrape.objects.get(pk=scrape_id)
+        self.assertIn(
+            scrape.status,
+            ("completed", "failed"),
+            f"Scrape {scrape_id} must be terminal after sync=True parse, got {scrape.status!r}",
+        )

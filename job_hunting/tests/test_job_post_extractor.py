@@ -581,6 +581,29 @@ class TestParseScrape(TestCase):
         self.assertIn("Build great things", job.description)
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_extension_scrape_falls_back_to_job_content_when_llm_omits_description(
+        self, mock_analyze
+    ):
+        """Extension scrapes use source='extension'. When LLM returns
+        description=None, job_content (the browser-captured text) becomes
+        the fallback description — same as paste. Without this, the rich
+        capture from the extension would be silently lost."""
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer", company_name="TestCo", description=None,
+        )
+        self.scrape.source = "extension"
+        self.scrape.job_content = (
+            "Real description text " * 20  # > STUB_MIN_WORDS
+        )
+        self.scrape.save(update_fields=["source", "job_content"])
+
+        parse_scrape(self.scrape.id, user_id=self.user.id, sync=True)
+
+        self.scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=self.scrape.job_post_id)
+        self.assertIn("Real description text", job.description)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
     def test_browser_scrape_does_not_fallback_to_html_dump(self, mock_analyze):
         """Non-paste scrapes must NOT use job_content as description —
         for browser-fetched scrapes job_content is HTML/page text with
