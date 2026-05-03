@@ -32,3 +32,4 @@ from .waitlist import Waitlist as Waitlist
 from .invitation import Invitation as Invitation
 from .ai_usage import AiUsage as AiUsage
 from .scrape_profile import ScrapeProfile as ScrapeProfile
+from .job_post_description_decision import JobPostDescriptionDecision as JobPostDescriptionDecision

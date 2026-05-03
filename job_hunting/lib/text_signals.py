@@ -41,6 +41,25 @@ _CLOSED_RE = re.compile(
 )
 
 
+def jaccard_5gram(a: str, b: str) -> float:
+    """Return Jaccard similarity of the 5-gram token sets of two strings.
+
+    Tokens are lowercased words. Returns 0.0 when either input is empty.
+    Used as a cheapness gate in DescriptionArbiter before calling the LLM.
+    """
+    def _ngrams(text: str, n: int = 5):
+        tokens = re.sub(r"\s+", " ", text.lower()).split()
+        return set(
+            tuple(tokens[i : i + n]) for i in range(max(0, len(tokens) - n + 1))
+        )
+
+    a_set = _ngrams(a)
+    b_set = _ngrams(b)
+    if not a_set or not b_set:
+        return 0.0
+    return len(a_set & b_set) / len(a_set | b_set)
+
+
 def detect_posting_status(text: Optional[str]) -> Optional[str]:
     """Return ``"closed"`` if a closed-posting phrase appears in
     ``text``, otherwise ``None``.
