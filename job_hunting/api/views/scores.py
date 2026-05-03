@@ -102,7 +102,7 @@ class ScoreViewSet(BaseViewSet):
         job_post_id = _rel_id(
             "job-post", "job_post", "jobPost", "job-posts", "jobPosts"
         )
-        user_id = _rel_id("user", "users")
+        raw_user_id = _rel_id("user", "users")
         resume_id = _rel_id("resume", "resumes")
 
         if job_post_id is None:
@@ -113,7 +113,7 @@ class ScoreViewSet(BaseViewSet):
 
         job_post_id = int(job_post_id)
         # Infer user from auth token; relationship is optional
-        user_id = int(user_id) if user_id is not None else request.user.id
+        user_id = int(raw_user_id) if raw_user_id is not None else request.user.id
         # Missing or null resume defaults to career-data scoring (equivalent to resume_id=0)
         resume_id = int(resume_id) if resume_id is not None else 0
 
@@ -123,6 +123,13 @@ class ScoreViewSet(BaseViewSet):
                 {"errors": [{"detail": "Job post not found"}]},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        # When a staff service-account caller (e.g. score_poller) omits the
+        # user relationship, infer the target user from the job post's creator
+        # so the score lands under the correct user, not the daemon's account.
+        if raw_user_id is None and request.user.is_staff and jp.created_by_id:
+            user_id = jp.created_by_id
+
         if not jp.description or not jp.description.strip():
             return Response(
                 {"errors": [{"detail": "Job post has no description to score against"}]},
@@ -246,6 +253,12 @@ class ScoreViewSet(BaseViewSet):
 
     def list(self, request):
         qs = Score.objects.filter(user_id=request.user.id).order_by("-created_at", "-id")
+        job_post_id = request.query_params.get("filter[job_post_id]")
+        if job_post_id:
+            try:
+                qs = qs.filter(job_post_id=int(job_post_id))
+            except (TypeError, ValueError):
+                pass
         total = qs.count()
         page_number, page_size = self._page_params()
         total_pages = math.ceil(total / page_size) if page_size else 1
