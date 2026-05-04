@@ -1043,11 +1043,32 @@ class JobApplicationViewSet(BaseViewSet):
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 
-        items = list(qs.all())
-        items = self.paginate(items)
+        total = qs.count()
+        page_number, page_size = self._page_params()
+        total_pages = math.ceil(total / page_size) if page_size else 1
+        offset = (page_number - 1) * page_size
+        items = list(qs.all()[offset: offset + page_size])
+
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
-        payload = {"data": data}
+        payload = {
+            "data": data,
+            "meta": {
+                "total": total,
+                "page": page_number,
+                "per_page": page_size,
+                "total_pages": total_pages,
+            },
+        }
+        if page_number < total_pages:
+            base = request.build_absolute_uri(request.path)
+            qp = request.query_params.dict()
+            qp["page"] = page_number + 1
+            qp["per_page"] = page_size
+            payload["links"] = {"next": base + "?" + "&".join(f"{k}={v}" for k, v in qp.items())}
+        else:
+            payload["links"] = {"next": None}
+
         include_rels = self._parse_include(request)
         if include_rels:
             payload["included"] = self._build_included(items, include_rels, request)
