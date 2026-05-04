@@ -70,13 +70,19 @@
       "id": "WaitReadySelector",
       "group": "scrape",
       "label": "Wait ready selector",
-      "description": "When the profile has a ready_selector (signals SPA content has rendered), waits up to 5s for it. Hit \u2192 ExpandTruncations; miss \u2192 SettleWait."
+      "description": "When the profile has a ready_selector (signals SPA content has rendered), waits up to 5s for it. Hit \u2192 ScrollToLoad; miss \u2192 SettleWait. Emits matched_selector / timed_out so traces distinguish a real hit from a 5s timeout."
     },
     {
       "id": "SettleWait",
       "group": "scrape",
       "label": "Settle wait",
       "description": "Fallback fixed 2s sleep when no ready_selector is known, giving SPAs a chance to finish rendering before capture."
+    },
+    {
+      "id": "ScrollToLoad",
+      "group": "scrape",
+      "label": "Scroll to load",
+      "description": "Scrolls the page in ~250ms increments to trigger IntersectionObserver-driven lazy hydration (LinkedIn's 'About the job' card is the canonical case). Stops on ready_selector match, scrollHeight stall, or ~5s budget. Emits ticks / matched_selector / final_scroll_y telemetry."
     },
     {
       "id": "ExpandTruncations",
@@ -234,7 +240,7 @@
     },
     {
       "from": "WaitReadySelector",
-      "to": "ExpandTruncations"
+      "to": "ScrollToLoad"
     },
     {
       "from": "WaitReadySelector",
@@ -242,6 +248,10 @@
     },
     {
       "from": "SettleWait",
+      "to": "ScrollToLoad"
+    },
+    {
+      "from": "ScrollToLoad",
       "to": "ExpandTruncations"
     },
     {
