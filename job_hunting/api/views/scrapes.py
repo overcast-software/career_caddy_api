@@ -30,6 +30,7 @@ from job_hunting.models import (
 )
 from job_hunting.lib.services.application_flow import _is_thin_description
 from job_hunting.lib.url_policy import UrlPolicyError, validate_submission_url
+from job_hunting.models.job_post_dedupe import canonicalize_link
 
 
 # Phase 0 ingest bounds — see plan: dazzling-stirring-church.md
@@ -644,7 +645,17 @@ class ScrapeViewSet(BaseViewSet):
                 )
 
         if link and not force:
-            existing = JobPost.objects.filter(link=link).first()
+            # Match either the raw submitted link or the canonicalized
+            # form so a /comm/jobs/view/ submission dedups against a
+            # legacy /jobs/view/ row (and vice versa). The canonical
+            # leg uses the host's ScrapeProfile.url_rewrites; the raw
+            # leg covers rows whose canonical_link wasn't backfilled.
+            canonical = canonicalize_link(link)
+            existing = (
+                JobPost.objects
+                .filter(Q(link=link) | Q(canonical_link=canonical))
+                .first()
+            )
             if existing and not _is_thin_description(existing):
                 return Response(
                     {

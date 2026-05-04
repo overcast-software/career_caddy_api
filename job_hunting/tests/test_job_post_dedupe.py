@@ -1,8 +1,9 @@
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 
-from job_hunting.models import Company, JobPost
+from job_hunting.models import Company, JobPost, ScrapeProfile
 from job_hunting.models.job_post_dedupe import (
+    _profile_url_rewrites_for_host,
     canonicalize_link,
     fingerprint,
     find_duplicate,
@@ -32,6 +33,68 @@ class TestCanonicalizeLink(TestCase):
         # Opaque token IS the identifier; no tracking params to strip.
         url = "https://www.ziprecruiter.com/ekm/AAFu8_x25OYUUjsmCpD2H7FIn"
         self.assertEqual(canonicalize_link(url), url)
+
+
+class TestCanonicalizeLinkProfileRewrites(TestCase):
+    """Host-scoped path rewrites from ScrapeProfile.url_rewrites should
+    collapse URL variants (e.g. LinkedIn /comm/jobs/view/ vs /jobs/view/)
+    onto a single canonical_link so dedup recognises them as the same job.
+    """
+
+    def setUp(self):
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="linkedin.com",
+            defaults={"url_rewrites": [{
+                "match": r"^https?://www\.linkedin\.com/comm/jobs/view/",
+                "rewrite": "https://www.linkedin.com/jobs/view/",
+            }]},
+        )
+
+    def tearDown(self):
+        _profile_url_rewrites_for_host.cache_clear()
+
+    def test_linkedin_comm_path_rewritten_to_canonical(self):
+        comm = "https://www.linkedin.com/comm/jobs/view/4409035385/"
+        canonical = "https://www.linkedin.com/jobs/view/4409035385/"
+        self.assertEqual(canonicalize_link(comm), canonical)
+
+    def test_linkedin_canonical_path_unchanged(self):
+        url = "https://www.linkedin.com/jobs/view/4409035385/"
+        self.assertEqual(canonicalize_link(url), url)
+
+    def test_canonicalize_strips_tracking_after_path_rewrite(self):
+        comm = (
+            "https://www.linkedin.com/comm/jobs/view/4409035385/"
+            "?trk=email&utm_source=foo"
+        )
+        got = canonicalize_link(comm)
+        self.assertIn("/jobs/view/4409035385/", got)
+        self.assertNotIn("/comm/", got)
+        self.assertNotIn("trk=", got)
+        self.assertNotIn("utm_", got)
+
+    def test_unknown_host_passes_through(self):
+        url = "https://no-profile.example/jobs/1?utm_source=x"
+        got = canonicalize_link(url)
+        self.assertNotIn("utm_source", got)
+        self.assertIn("/jobs/1", got)
+
+    def test_reads_legacy_css_selectors_url_rewrites(self):
+        """Some profiles authored rewrites inside the css_selectors blob
+        rather than the top-level url_rewrites column."""
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.create(
+            hostname="legacy.example",
+            css_selectors={
+                "url_rewrites": [{
+                    "match": r"^https?://legacy\.example/old/",
+                    "rewrite": "https://legacy.example/new/",
+                }],
+            },
+        )
+        got = canonicalize_link("https://legacy.example/old/job/1")
+        self.assertEqual(got, "https://legacy.example/new/job/1")
 
 
 class TestFingerprint(TestCase):

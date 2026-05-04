@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import timedelta
+from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+from job_hunting.lib.url_canonicalize import apply_url_rewrites
 
 
 _TRACKING_PARAMS = {
@@ -23,15 +26,73 @@ _TRACKING_PARAMS = {
 _WS = re.compile(r"\s+")
 
 
-def canonicalize_link(url: str | None) -> str | None:
-    """Strip known tracking query params; return None for falsy input.
+@lru_cache(maxsize=256)
+def _profile_url_rewrites_for_host(host: str) -> tuple:
+    """Return the host's `url_rewrites` rules as a hashable tuple.
 
-    Opaque path tokens (e.g. ziprecruiter ``/ekm/<token>``) are left alone —
-    the token IS the identifier on those hosts. Dedupe falls through to the
-    content fingerprint in that case.
+    Cached per-process. Profile edits won't be picked up until restart —
+    acceptable today (rewrites change rarely, and prod restarts on every
+    deploy). If that becomes a problem, swap to a TTL cache or wire a
+    post_save signal on ScrapeProfile to call `cache_clear()`.
+
+    Reads both top-level `url_rewrites` and `css_selectors.url_rewrites`
+    because some legacy profiles authored the rules inside `css_selectors`
+    (the agents-side LoadProfile flattens that blob); top-level wins when
+    both exist and are non-empty.
+    """
+    if not host:
+        return ()
+    try:
+        from job_hunting.models.scrape_profile import ScrapeProfile
+        profile = ScrapeProfile.objects.filter(hostname=host).first()
+    except Exception:
+        return ()
+    if not profile:
+        return ()
+    rules = profile.url_rewrites
+    if not rules and isinstance(profile.css_selectors, dict):
+        rules = profile.css_selectors.get("url_rewrites")
+    if not isinstance(rules, list) or not rules:
+        return ()
+    return tuple(
+        (r.get("match"), r.get("rewrite"))
+        for r in rules
+        if isinstance(r, dict) and r.get("match") and r.get("rewrite") is not None
+    )
+
+
+def _rewrite_via_profile(url: str) -> str:
+    """Apply the host's ScrapeProfile.url_rewrites to `url`, if any."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return url
+    if host.startswith("www."):
+        host = host[4:]
+    rules_tuple = _profile_url_rewrites_for_host(host)
+    if not rules_tuple:
+        return url
+    rules = [{"match": m, "rewrite": r} for m, r in rules_tuple]
+    return apply_url_rewrites(url, rules)
+
+
+def canonicalize_link(url: str | None) -> str | None:
+    """Apply host-specific path rewrites then strip tracking query params.
+
+    Two-stage:
+    1. Look up `ScrapeProfile.url_rewrites` for the URL's host and apply
+       the first matching regex rule. This collapses host-specific URL
+       variants (e.g. LinkedIn `/comm/jobs/view/` → `/jobs/view/`) onto a
+       single canonical form so dedup recognises them as the same job.
+    2. Strip known tracking query params (utm_*, gh_*, etc.) and the
+       fragment. Opaque path tokens (e.g. ziprecruiter `/ekm/<token>`)
+       are left alone — the token IS the identifier on those hosts.
+
+    Returns None for falsy input.
     """
     if not url:
         return None
+    url = _rewrite_via_profile(url)
     try:
         u = urlparse(url)
     except ValueError:
