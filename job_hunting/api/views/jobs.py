@@ -168,7 +168,22 @@ class JobPostViewSet(BaseViewSet):
         # Staff users see every post; regular users see only posts they
         # have a per-user signal on (created, applied, scored, scraped,
         # or discovered via ingestion).
-        if request.user.is_staff:
+        #
+        # Exception: filter[link] is a *global* canonical-link lookup,
+        # used by the browser extension's popup-open "is this URL already
+        # tracked?" check. The user is providing the specific URL — this
+        # isn't enumeration of someone else's library, it's duplicate
+        # detection. Bypass the per-user-signal filter so a JobPost
+        # someone else created is still visible when the user asks
+        # specifically for it.
+        link_filter = request.query_params.get("filter[link]")
+        if link_filter is not None:
+            from job_hunting.models.job_post_dedupe import canonicalize_link
+            canonical = canonicalize_link(link_filter)
+            qs = JobPost.objects.filter(
+                Q(link=link_filter) | Q(canonical_link=canonical)
+            )
+        elif request.user.is_staff:
             qs = JobPost.objects.all()
         else:
             qs = JobPost.objects.filter(
@@ -178,9 +193,6 @@ class JobPostViewSet(BaseViewSet):
                 Q(scrapes__created_by_id=request.user.id) |
                 Q(discoveries__user_id=request.user.id)
             ).distinct()
-        link_filter = request.query_params.get("filter[link]")
-        if link_filter is not None:
-            qs = qs.filter(link=link_filter)
 
         hostname_filter = request.query_params.get("filter[hostname]")
         if hostname_filter is not None:

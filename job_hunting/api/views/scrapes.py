@@ -572,6 +572,15 @@ class ScrapeViewSet(BaseViewSet):
                         "rejected if not a-z0-9_- and ≤32 chars."
                     ),
                 ),
+                "auto_score": drf_serializers.BooleanField(
+                    required=False,
+                    default=True,
+                    help_text=(
+                        "When true (default), score the resulting JobPost "
+                        "against the user's career data inline. Set false to "
+                        "skip scoring — the JobPost is still parsed and saved."
+                    ),
+                ),
             },
         ),
         responses={
@@ -597,6 +606,8 @@ class ScrapeViewSet(BaseViewSet):
         link = (data.get("link") or "").strip() or None
         force = bool(data.get("force"))
         source = _normalize_source_hint(data.get("source"))
+        auto_score_raw = data.get("auto_score")
+        auto_score = True if auto_score_raw is None else bool(auto_score_raw)
 
         if not text:
             return Response(
@@ -707,7 +718,7 @@ class ScrapeViewSet(BaseViewSet):
         parse_scrape(scrape.id, user_id=request.user.id, sync=True)
 
         scrape.refresh_from_db()
-        if scrape.job_post_id:
+        if scrape.job_post_id and auto_score:
             try:
                 from job_hunting.api.views.scores import _auto_score_job_post
                 _auto_score_job_post(scrape.job_post_id, request.user.id)
