@@ -97,9 +97,34 @@ def fetch_page_title(
     return ("ok", title_text or None, r.status_code)
 
 
+# Substrings that signal we're looking at an auth wall / bot challenge
+# rather than the real job page. LinkedIn's /comm/ links 100% land here
+# without a session cookie; Indeed and Glassdoor sit behind Cloudflare
+# JS challenges. Treating these as "mismatch" would drown the report in
+# false positives — they're "indeterminate" by definition.
+AUTH_WALL_MARKERS = (
+    "sign in",
+    "log in",
+    "login",
+    "just a moment",
+    "access denied",
+    "verify you are human",
+    "are you a robot",
+    "captcha",
+    "attention required",
+)
+
+
+def is_auth_wall(page_title: str) -> bool:
+    lowered = page_title.lower()
+    return any(m in lowered for m in AUTH_WALL_MARKERS)
+
+
 def classify(stored_title: str, page_title: str | None, threshold: float) -> str:
     """Return one of: match, mismatch, indeterminate."""
     if not page_title:
+        return "indeterminate"
+    if is_auth_wall(page_title):
         return "indeterminate"
     j = jaccard(stored_title, page_title)
     r = ratio(stored_title, page_title)
