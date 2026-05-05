@@ -15,6 +15,30 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from job_hunting.lib.url_canonicalize import apply_url_rewrites
 
 
+# Source-of-truth ranking. Higher value beats lower when two writes for
+# the same canonical_link / fingerprint collide. The extension is treated
+# as the most-authoritative because the user verified the page in their
+# own browser before pushing it; email-pipeline writes are LLM-extracted
+# from third-party digests and routinely hallucinate (the jp 1724 SNBL
+# incident). When a higher-trust source lands on top of a lower-trust
+# existing post, we overwrite the post in place and write a
+# JobPostOverwriteDecision audit row.
+SOURCE_TRUST = {
+    "extension": 100,
+    "paste": 80,
+    "scrape": 70,
+    "redirect": 60,
+    "manual": 50,
+    "email": 20,
+    "email_direct": 20,
+}
+
+
+def source_trust(source: str | None) -> int:
+    """Return a trust score for a JobPost source. Unknown → manual (50)."""
+    return SOURCE_TRUST.get(source or "manual", SOURCE_TRUST["manual"])
+
+
 _TRACKING_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
     "gh_src", "gh_jid",

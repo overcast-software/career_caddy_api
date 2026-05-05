@@ -656,7 +656,17 @@ class ScrapeViewSet(BaseViewSet):
                 .filter(Q(link=link) | Q(canonical_link=canonical))
                 .first()
             )
-            if existing and not _is_thin_description(existing):
+            # Trust-aware short-circuit: if the incoming push outranks
+            # the existing post's source (e.g. extension overwriting an
+            # email-pipeline hallucination), let it through — parse_scrape
+            # will overwrite fields in place and write an audit row. The
+            # 409 only fires when the new push is same-or-lower trust.
+            from job_hunting.models.job_post_dedupe import source_trust
+            if (
+                existing
+                and not _is_thin_description(existing)
+                and source_trust(source) <= source_trust(existing.source)
+            ):
                 return Response(
                     {
                         "errors": [

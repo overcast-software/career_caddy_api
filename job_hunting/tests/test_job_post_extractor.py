@@ -4,7 +4,14 @@ from unittest.mock import patch
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 
-from job_hunting.models import Company, JobPost, Scrape, ScrapeProfile
+from job_hunting.models import (
+    Company,
+    JobPost,
+    JobPostOverwriteDecision,
+    Scrape,
+    ScrapeProfile,
+)
+from job_hunting.models.job_post_dedupe import source_trust
 from job_hunting.lib.parsers.job_post_extractor import (
     JobPostExtractor,
     ParsedJobData,
@@ -764,7 +771,11 @@ class TestSourcePreservation(TestCase):
         )
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
-    def test_persist_preserves_existing_source_on_stub_upgrade(self, mock_analyze):
+    def test_persist_preserves_existing_source_on_same_trust_stub_upgrade(self, mock_analyze):
+        # Source preservation invariant — kept narrow to the same-trust
+        # case (email vs email_direct, both trust 20). The cross-trust
+        # case (e.g. scrape onto email) is now an OVERWRITE, covered in
+        # test_extension_overwrites_email_jobpost.
         mock_analyze.return_value = self.parsed
         existing = JobPost.objects.create(
             title="Senior Software Engineer",
@@ -778,7 +789,7 @@ class TestSourcePreservation(TestCase):
             url="https://example.com/job/1",
             status="completed",
             job_content="page text " * 50,
-            source="scrape",
+            source="email_direct",
             created_by=self.user,
         )
         parse_scrape(scrape.id, user_id=self.user.id, sync=True)
@@ -812,7 +823,11 @@ class TestSourcePreservation(TestCase):
         self.assertEqual(existing.source, "email")
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
-    def test_persist_preserves_existing_source_on_full_duplicate(self, mock_analyze):
+    def test_persist_preserves_existing_source_on_same_trust_full_duplicate(self, mock_analyze):
+        # Source preservation invariant — kept narrow to the same-trust
+        # case (email vs email_direct, both trust 20). The cross-trust
+        # case is now an OVERWRITE, covered in
+        # test_extension_overwrites_email_jobpost_full_description.
         mock_analyze.return_value = self.parsed
         rich = "full description text " * 30
         existing = JobPost.objects.create(
@@ -827,7 +842,7 @@ class TestSourcePreservation(TestCase):
             url="https://example.com/job/1",
             status="completed",
             job_content="page text " * 50,
-            source="scrape",
+            source="email_direct",
             created_by=self.user,
         )
         parse_scrape(scrape.id, user_id=self.user.id, sync=True)
@@ -959,3 +974,246 @@ class TestClosedBannerHallucinationGuard(TestCase):
                 _strip_closed_banner_prefix(raw).lstrip(), expected,
                 f"Failed on input: {raw!r}",
             )
+
+
+class TestSourceTrustRanking(TestCase):
+    """The trust ladder that decides which source wins on collision."""
+
+    def test_extension_outranks_email(self):
+        self.assertGreater(source_trust("extension"), source_trust("email"))
+        self.assertGreater(source_trust("extension"), source_trust("email_direct"))
+
+    def test_paste_outranks_scrape_outranks_manual_outranks_email(self):
+        self.assertGreater(source_trust("paste"), source_trust("scrape"))
+        self.assertGreater(source_trust("scrape"), source_trust("manual"))
+        self.assertGreater(source_trust("manual"), source_trust("email"))
+
+    def test_email_and_email_direct_tie(self):
+        self.assertEqual(source_trust("email"), source_trust("email_direct"))
+
+    def test_unknown_source_treated_as_manual(self):
+        self.assertEqual(source_trust("nonsense"), source_trust("manual"))
+        self.assertEqual(source_trust(None), source_trust("manual"))
+
+
+class TestTrustAwareOverwrite(TestCase):
+    """Higher-trust source on collision overwrites all overwritable
+    fields and writes a JobPostOverwriteDecision audit row.
+
+    Symmetric with the ship message: the cc_auto self-heal path. An
+    extension push that canonical-link-collides with a hallucinated
+    email-pipeline post replaces the wrong title/company/description in
+    place — no separate audit step, no manual triage required.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="trust", password="pass")
+        self.email_company = Company.objects.create(name="Wrong Company LLC")
+        self.real_company = Company.objects.create(name="Real Company Inc")
+        self.parsed_real = ParsedJobData(
+            title="Real Job Title",
+            company_name="Real Company Inc",
+            description="Real description from the actual page. " * 20,
+            location="San Francisco, CA",
+            remote=True,
+        )
+
+    def _make_existing_email_post(self, *, link, description):
+        return JobPost.objects.create(
+            title="Hallucinated Email Title",
+            company=self.email_company,
+            link=link,
+            description=description,
+            location="Wrong Location",
+            source="email",
+            created_by=self.user,
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_extension_overwrites_email_jobpost_full_description(self, mock_analyze):
+        mock_analyze.return_value = self.parsed_real
+        link = "https://example.com/real-job/abc"
+        existing = self._make_existing_email_post(
+            link=link, description="hallucinated description " * 30,
+        )
+        scrape = Scrape.objects.create(
+            url=link,
+            status="completed",
+            job_content="real page text " * 50,
+            source="extension",
+            created_by=self.user,
+        )
+
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.title, "Real Job Title")
+        self.assertEqual(existing.company_id, self.real_company.id)
+        self.assertEqual(existing.location, "San Francisco, CA")
+        self.assertEqual(existing.remote, True)
+        self.assertIn("Real description", existing.description)
+        # The whole point: source flipped to the higher-trust new value.
+        self.assertEqual(existing.source, "extension")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_extension_overwrites_writes_audit_row(self, mock_analyze):
+        mock_analyze.return_value = self.parsed_real
+        link = "https://example.com/audit-job/xyz"
+        existing = self._make_existing_email_post(
+            link=link, description="long existing description " * 25,
+        )
+        scrape = Scrape.objects.create(
+            url=link,
+            status="completed",
+            job_content="real page text " * 50,
+            source="extension",
+            created_by=self.user,
+        )
+
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        decisions = JobPostOverwriteDecision.objects.filter(job_post=existing)
+        self.assertEqual(decisions.count(), 1)
+        d = decisions.first()
+        self.assertEqual(d.previous_source, "email")
+        self.assertEqual(d.new_source, "extension")
+        self.assertEqual(d.triggering_scrape_id, scrape.id)
+        self.assertEqual(d.created_by_id, self.user.id)
+        # Diff captures the actual changes — title and source at minimum.
+        self.assertIn("title", d.changed_fields)
+        self.assertEqual(
+            d.changed_fields["title"]["before"], "Hallucinated Email Title"
+        )
+        self.assertEqual(d.changed_fields["title"]["after"], "Real Job Title")
+        self.assertIn("source", d.changed_fields)
+        self.assertEqual(d.changed_fields["source"]["before"], "email")
+        self.assertEqual(d.changed_fields["source"]["after"], "extension")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_extension_overwrites_email_stub(self, mock_analyze):
+        # Same flip applies to the stub-upgrade path (link hit, thin
+        # existing description). Symmetry across both branches matters
+        # because the cc_auto hallucination case can be either: jp 1724
+        # had a thin description ("This remote position offers $50K-
+        # $85K..."); other rows might have richer hallucinated bodies.
+        mock_analyze.return_value = self.parsed_real
+        link = "https://example.com/stub-job/123"
+        existing = self._make_existing_email_post(link=link, description="")
+        scrape = Scrape.objects.create(
+            url=link,
+            status="completed",
+            job_content="real page text " * 50,
+            source="extension",
+            created_by=self.user,
+        )
+
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "extension")
+        self.assertEqual(existing.title, "Real Job Title")
+        self.assertEqual(
+            JobPostOverwriteDecision.objects.filter(job_post=existing).count(), 1
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_email_does_not_overwrite_extension_jobpost(self, mock_analyze):
+        # Trust ranking is one-way: lower-trust never overwrites higher-
+        # trust. Even though an email-sourced scrape lands on a canonical
+        # link match, the extension-originated post is preserved.
+        mock_analyze.return_value = self.parsed_real
+        link = "https://example.com/extension-first/aa"
+        existing = JobPost.objects.create(
+            title="Extension-Authored Title",
+            company=self.real_company,
+            link=link,
+            description="extension-authored description " * 30,
+            source="extension",
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url=link,
+            status="completed",
+            job_content="email digest text " * 50,
+            source="email",
+            created_by=self.user,
+        )
+
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "extension")
+        self.assertEqual(existing.title, "Extension-Authored Title")
+        self.assertFalse(
+            JobPostOverwriteDecision.objects.filter(job_post=existing).exists()
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_same_trust_no_overwrite_no_audit(self, mock_analyze):
+        # paste vs paste = same trust = legacy duplicate-merge behavior,
+        # no overwrite, no audit row. Important so re-paste of the same
+        # URL doesn't keep churning audit rows.
+        mock_analyze.return_value = self.parsed_real
+        link = "https://example.com/paste-vs-paste/q"
+        existing = JobPost.objects.create(
+            title="Original Title",
+            company=self.email_company,
+            link=link,
+            description="original full description " * 30,
+            source="paste",
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url=link,
+            status="completed",
+            job_content="re-paste text " * 50,
+            source="paste",
+            created_by=self.user,
+        )
+
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "paste")
+        self.assertEqual(existing.title, "Original Title")
+        self.assertFalse(
+            JobPostOverwriteDecision.objects.filter(job_post=existing).exists()
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_overwrite_via_fingerprint_match(self, mock_analyze):
+        # Symmetric path: when the existing post is matched via
+        # title+company fingerprint (no link match), the trust-aware
+        # overwrite still fires. jp 1603 incident territory.
+        # ParsedJobData.title and .company_name must equal the existing
+        # post's title+company for the fingerprint branch to fire.
+        mock_analyze.return_value = ParsedJobData(
+            title="Common Title",
+            company_name="Real Company Inc",
+            description="Updated description from extension. " * 25,
+            location="Updated Location",
+        )
+        existing = JobPost.objects.create(
+            title="Common Title",
+            company=self.real_company,
+            link="https://other-host.example.com/different-link",
+            description="email-stub description",
+            source="email",
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/extension-saw-this",
+            status="completed",
+            job_content="extension page text " * 50,
+            source="extension",
+            created_by=self.user,
+        )
+
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.source, "extension")
+        self.assertEqual(existing.location, "Updated Location")
+        self.assertEqual(
+            JobPostOverwriteDecision.objects.filter(job_post=existing).count(), 1
+        )

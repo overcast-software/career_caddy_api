@@ -20,7 +20,14 @@ from job_hunting.lib.services.application_flow import (
     STUB_MIN_WORDS,
 )
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
-from job_hunting.models import Company, JobPost, JobPostDiscovery, Scrape
+from job_hunting.models import (
+    Company,
+    JobPost,
+    JobPostDiscovery,
+    JobPostOverwriteDecision,
+    Scrape,
+)
+from job_hunting.models.job_post_dedupe import source_trust
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +45,22 @@ _CLOSED_BANNER_PREFIX = re.compile(
     r"^\s*(?:\*\*)?\s*\[\s*closed\b[^\]]*\]\s*(?:\*\*)?\s*\n*",
     flags=re.IGNORECASE,
 )
+
+
+def _to_jsonable(v):
+    """Best-effort coercion to JSONField-safe types. Decimals and
+    datetimes are stringified — the audit row only needs to be
+    human-readable, not round-trippable."""
+    if v is None or isinstance(v, (str, int, bool, float)):
+        return v
+    return str(v)
+
+
+def _jsonify_diff(diff: dict) -> dict:
+    return {
+        field: {"before": _to_jsonable(c["before"]), "after": _to_jsonable(c["after"])}
+        for field, c in diff.items()
+    }
 
 
 def _strip_closed_banner_prefix(text: str) -> str:
@@ -375,7 +398,20 @@ class JobPostExtractor:
             link_hit = JobPost.objects.filter(link=link).first()
         if link_hit is not None:
             job = link_hit
-            if _is_thin_description(link_hit):
+            # Trust-rank overwrite first: extension > paste > scrape >
+            # ... > email. When a higher-trust source lands on a lower-
+            # trust existing post, blow away the existing fields. This
+            # is the self-heal path for cc_auto-hallucinated posts (the
+            # jp 1724 SNBL case) — the extension push from the real
+            # page replaces the email-pipeline's wrong title/company in
+            # place, leaving an audit row in JobPostOverwriteDecision.
+            if self._trust_aware_overwrite(
+                job=job, scrape=scrape, validated_data=validated_data,
+                job_defaults=job_defaults, company=company,
+                link=link, user=user,
+            ):
+                pass  # _trust_aware_overwrite set last_outcome and saved
+            elif _is_thin_description(link_hit):
                 self.last_outcome = "updated_stub"
                 update_fields = []
                 if validated_data.title and job.title != validated_data.title:
@@ -433,7 +469,16 @@ class JobPostExtractor:
             # welcometothejungle.com deduped to an email-sourced LinkedIn
             # JP via title+company, and the rich description was lost.
             if not created:
-                if (
+                # Trust-rank overwrite first — symmetric with the
+                # link-hit branch above. A higher-trust extension push
+                # that title+company-matches an email post still wins.
+                if self._trust_aware_overwrite(
+                    job=job, scrape=scrape, validated_data=validated_data,
+                    job_defaults=job_defaults, company=company,
+                    link=link, user=user,
+                ):
+                    pass
+                elif (
                     _is_thin_description(job)
                     and effective_description
                     and len(effective_description.split()) >= STUB_MIN_WORDS
@@ -514,6 +559,77 @@ class JobPostExtractor:
                 user_id=scrape.created_by_id,
                 defaults={"source": getattr(scrape, "source", None) or "scrape"},
             )
+        return True
+
+    def _trust_aware_overwrite(
+        self,
+        *,
+        job,
+        scrape,
+        validated_data,
+        job_defaults,
+        company,
+        link,
+        user,
+    ) -> bool:
+        """Higher-trust source wins on collision.
+
+        When the incoming scrape's source outranks the existing post's
+        source (per ``source_trust``), overwrite every overwritable
+        field on the existing post with the parsed values, flip
+        ``source`` to the new source, and write a
+        ``JobPostOverwriteDecision`` audit row capturing the diff.
+
+        Returns True iff an overwrite happened. Callers should treat
+        True as the terminal field-write outcome and skip the
+        thin/non-thin merge branches.
+        """
+        new_source = getattr(scrape, "source", None) or "manual"
+        existing_source = job.source or "manual"
+        if source_trust(new_source) <= source_trust(existing_source):
+            return False
+
+        diff: dict[str, dict] = {}
+
+        # Title and company are special — they're get_or_create lookup
+        # keys upstream and never appear in job_defaults.
+        if validated_data.title and job.title != validated_data.title:
+            diff["title"] = {"before": job.title, "after": validated_data.title}
+            job.title = validated_data.title
+        if company is not None and job.company_id != company.id:
+            diff["company_id"] = {"before": job.company_id, "after": company.id}
+            job.company = company
+
+        # Link is canonical-derived — recompute canonical_link in save().
+        if link and job.link != link:
+            diff["link"] = {"before": job.link, "after": link}
+            job.link = link
+            job.canonical_link = None
+
+        for field, value in job_defaults.items():
+            if value is None or field in _NO_OVERWRITE_FIELDS:
+                continue
+            current = getattr(job, field, None)
+            if current != value:
+                diff[field] = {"before": current, "after": value}
+                setattr(job, field, value)
+
+        # The whole point of this path: source flips on collision so the
+        # next ranking comparison reads the new (higher) trust level.
+        diff["source"] = {"before": existing_source, "after": new_source}
+        job.source = new_source
+
+        job.save()
+
+        JobPostOverwriteDecision.objects.create(
+            job_post=job,
+            triggering_scrape=scrape,
+            previous_source=existing_source,
+            new_source=new_source,
+            changed_fields=_jsonify_diff(diff),
+            created_by=user,
+        )
+        self.last_outcome = "overwritten"
         return True
 
     def _maybe_apply_arbiter(
