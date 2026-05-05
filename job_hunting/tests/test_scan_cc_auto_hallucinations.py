@@ -57,6 +57,25 @@ class TestSimilarityHelpers(TestCase):
         self.assertEqual(scan.classify("Anything", None, threshold=0.3),
                          "indeterminate")
 
+    def test_classify_indeterminate_when_page_is_auth_wall(self):
+        # The exact jp 1730 incident: link goes to LinkedIn, plain HTTP
+        # fetch lands on the login wall, page <title> is the LinkedIn
+        # sign-in chrome — NOT a hallucination, just an unauthed fetch.
+        self.assertEqual(
+            scan.classify(
+                "Local Contract Nurse RN - ED - Emergency Department",
+                "LinkedIn Login, Sign in | LinkedIn",
+                threshold=0.3,
+            ),
+            "indeterminate",
+        )
+
+    def test_classify_indeterminate_for_cloudflare_challenge(self):
+        self.assertEqual(
+            scan.classify("Senior Engineer", "Just a moment...", threshold=0.3),
+            "indeterminate",
+        )
+
 
 class TestCommand(TestCase):
     def setUp(self):
