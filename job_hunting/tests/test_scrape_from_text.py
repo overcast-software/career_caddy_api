@@ -114,11 +114,16 @@ class TestScrapeFromTextDuplicateLink(TestCase):
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
     def test_non_stub_duplicate_returns_409_without_creating_scrape(self, mock_parse):
+        # Trust-aware short-circuit: 409 only fires when the new push is
+        # SAME-or-lower-trust than the existing post. The from-text
+        # endpoint defaults source="paste"; set existing.source="paste"
+        # so trust ranks tie and the legacy 409 path runs.
         existing = JobPost.objects.create(
             title="Senior Engineer",
             company=self.company,
             description=self.LONG_DESC,
             link=self.DUPLICATE_LINK,
+            source="paste",
             created_by=self.user,
         )
         resp = self.client.post(
@@ -190,6 +195,37 @@ class TestScrapeFromTextDuplicateLink(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        mock_parse.assert_called_once()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_extension_push_bypasses_409_on_email_post(self, mock_parse):
+        """The whole point of the extension-as-source-of-truth feature:
+        when the extension push has a higher source trust than the
+        existing post, /scrapes/from-text/ does NOT 409. Instead it
+        passes through and lets parse_scrape do the trust-aware
+        overwrite. Without this, the 409 short-circuit would block the
+        cc_auto self-heal path before it ever ran."""
+        JobPost.objects.create(
+            title="Wrong Email-Sourced Title",
+            company=self.company,
+            description=self.LONG_DESC,
+            link=self.DUPLICATE_LINK,
+            source="email",
+            created_by=self.user,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Toptal",
+                "link": self.DUPLICATE_LINK,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(Scrape.objects.count(), 1)
+        scrape = Scrape.objects.first()
+        self.assertEqual(scrape.source, "extension")
         mock_parse.assert_called_once()
 
 
