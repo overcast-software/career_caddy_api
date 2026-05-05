@@ -44,8 +44,12 @@ _TRACKING_PARAMS = {
     "gh_src", "gh_jid",
     "lever-source", "lever-origin",
     "trk", "refid", "trackingid",
-    "source", "src",
 }
+# Note: bare =source= and =src= were here previously but stripping them
+# overreaches — many job boards use =?source=...= as a *functional*
+# query param (worksourcewa.com encodes part of the job identifier
+# there). Without them in the strip list, /jobview/?source=A and
+# /jobview/?source=B canonicalize to distinct URLs as intended.
 
 _WS = re.compile(r"\s+")
 
