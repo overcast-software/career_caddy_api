@@ -425,6 +425,9 @@ class JobPostViewSet(BaseViewSet):
         )
         if not has_access:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        # Scope top_score to request.user — cross-user scores must not leak via
+        # shared JobPosts (extension popup-open lookup is the canonical leak path).
+        obj._top_score = obj.scores.filter(user_id=request.user.id).order_by("-score").first()
         _attach_active_application_status([obj], request.user.id)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}

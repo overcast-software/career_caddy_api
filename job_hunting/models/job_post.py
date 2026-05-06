@@ -147,14 +147,25 @@ class JobPost(GetMixin, models.Model):
 
     @property
     def top_score(self):
-        """Highest integer score value for this job post, or None."""
-        best = getattr(self, "_top_score", None) or self.scores.order_by("-score").first()
+        """Highest integer score value for this job post, or None.
+
+        Request-scoped: views MUST attach `_top_score` filtered by
+        `request.user` (Score where user=request.user) so cross-user
+        scores don't leak via shared JobPosts. The unscoped fallback
+        below runs only in non-request contexts (shell, fixtures).
+        """
+        if hasattr(self, "_top_score"):
+            best = self._top_score
+        else:
+            best = self.scores.order_by("-score").first()
         return best.score if best is not None else None
 
     @property
     def top_score_record(self):
-        """Score object with the highest score value."""
-        return getattr(self, "_top_score", None) or self.scores.order_by("-score").first()
+        """Score object with the highest score value. Request-scoped — see top_score."""
+        if hasattr(self, "_top_score"):
+            return self._top_score
+        return self.scores.order_by("-score").first()
 
     @classmethod
     def from_json(cls, job_dict, **kwargs):

@@ -114,3 +114,43 @@ class TestJobPostAPI(TestCase):
         anon = APIClient()
         response = anon.get(f"/api/v1/job-posts/{self.job_post.id}/")
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_top_score_does_not_leak_across_users(self):
+        """Regression: extension popup-open lookup (filter[link]) returns a
+        JobPost any user can see (UX7). top_score MUST be the requesting
+        user's score, never another user's. Previously the model property
+        fell through `getattr(_top_score, None) or self.scores.first()`,
+        leaking whoever-scored-first to whoever-loaded-second."""
+        from job_hunting.models import Score
+        other = User.objects.create_user(username="other", password="pass")
+        shared = JobPost.objects.create(
+            title="Shared", company=self.company, link="https://x.test/job/1",
+            created_by=other,
+        )
+        # Other user has a score; self.user does not.
+        Score.objects.create(job_post=shared, user=other, score=87)
+
+        # filter[link] lookup (the extension's popup-open path)
+        response = self.client.get(
+            "/api/v1/job-posts/?filter[link]=https://x.test/job/1"
+        )
+        self.assertEqual(response.status_code, 200)
+        items = response.json()["data"]
+        self.assertEqual(len(items), 1)
+        # Current user has no score on this post → must be None, NOT 87.
+        self.assertIsNone(items[0]["attributes"]["top_score"])
+
+        # Once the requesting user scores it, top_score reflects THEIR score
+        # — not the other user's higher 87.
+        Score.objects.create(job_post=shared, user=self.user, score=55)
+        response = self.client.get(
+            "/api/v1/job-posts/?filter[link]=https://x.test/job/1"
+        )
+        items = response.json()["data"]
+        self.assertEqual(items[0]["attributes"]["top_score"], 55)
+
+        # Same guarantee on the retrieve endpoint (now reachable because the
+        # user has a Score, which grants per-user access).
+        retrieve = self.client.get(f"/api/v1/job-posts/{shared.id}/")
+        self.assertEqual(retrieve.status_code, 200)
+        self.assertEqual(retrieve.json()["data"]["attributes"]["top_score"], 55)
