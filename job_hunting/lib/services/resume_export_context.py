@@ -13,13 +13,17 @@ from typing import Optional
 from job_hunting.models import Resume
 
 
-SKILL_TYPE_LABELS = [
-    ("Language", "Languages"),
-    ("Database", "Databases"),
-    ("Framework", "Frameworks"),
-    ("Tool/Platform", "Platforms"),
-    ("Security", "Security"),
-]
+def _pluralize_label(skill_type: str) -> str:
+    """Render a skill_type as a section label. Free-form input means we
+    can't ship a closed lookup table; fall back to a small set of common
+    pluralizations and otherwise return the input verbatim."""
+    plurals = {
+        "Language": "Languages",
+        "Database": "Databases",
+        "Framework": "Frameworks",
+        "Tool/Platform": "Platforms",
+    }
+    return plurals.get(skill_type, skill_type)
 
 
 def _join_nonempty(parts, sep=" — "):
@@ -67,20 +71,31 @@ def _summary(resume: Resume) -> dict:
 
 
 def _skills(resume: Resume) -> dict:
-    # Bucket skills by canonical skill_type strings (matches SkillTag enum).
-    buckets: dict[str, list[str]] = {key: [] for key, _ in SKILL_TYPE_LABELS}
+    """Bucket skills by skill_type in first-seen order.
+
+    The category set is whatever the resume itself uses — no closed enum.
+    Skills with no skill_type fall into 'Other' and are emitted last so
+    they don't disrupt explicit category ordering."""
+    from collections import OrderedDict
+
+    buckets: "OrderedDict[str, list[str]]" = OrderedDict()
+    other: list[str] = []
     for s in resume.skills:
         text = (s.text or "").strip()
         if not text:
             continue
-        if s.skill_type in buckets:
-            buckets[s.skill_type].append(text)
+        skill_type = (s.skill_type or "").strip()
+        if not skill_type:
+            other.append(text)
+            continue
+        buckets.setdefault(skill_type, []).append(text)
 
-    lines = []
-    for key, label in SKILL_TYPE_LABELS:
-        values = buckets[key]
-        if values:
-            lines.append(f"{label}: {', '.join(values)}")
+    lines = [
+        f"{_pluralize_label(key)}: {', '.join(values)}"
+        for key, values in buckets.items()
+    ]
+    if other:
+        lines.append(f"Other: {', '.join(other)}")
 
     return {
         "skills_lines": lines,

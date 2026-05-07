@@ -3,7 +3,6 @@ from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional
 from pydantic import Field
 from pydantic_ai import Agent
-from enum import Enum
 
 import calendar
 import json
@@ -34,7 +33,7 @@ from job_hunting.models import Description, Summary, Company
 logger = logging.getLogger(__name__)
 
 
-RESUME_EXTRACTION_PROMPT = """You extract structured data from a resume.
+_BASE_EXTRACTION_PROMPT = """You extract structured data from a resume.
 
 Strict rules — violations degrade user trust:
 
@@ -67,7 +66,73 @@ Strict rules — violations degrade user trust:
    before the break.
 
 7. OMIT UNKNOWNS. When a field is not on the resume, leave it unset. Do
-   not invent summaries, titles, or dates."""
+   not invent summaries, titles, or dates.
+
+8. SKILL CATEGORIES. Each skill carries a free-form `tag` describing the
+   category it belongs to (e.g. "Languages", "Frameworks", "Stakeholder
+   Management", "Analytics", "Media Relations"). Use whatever category the
+   resume itself groups skills under. If a skill is listed without a clear
+   category, leave its `tag` unset. Do not force unrelated skills into
+   the same category to make the list tidier."""
+
+
+# Archetype-specific category hints. The list is suggestive, not closed —
+# the LLM may emit any string for `tag`. Each entry is the canonical
+# `Resume.profession` value the frontend writes.
+_PROFESSION_CATEGORY_HINTS = {
+    "Software Engineering": [
+        "Languages", "Frameworks", "Databases", "Tools/Platforms", "Security",
+    ],
+    "Product Management": [
+        "Discovery", "Strategy", "Stakeholder Management", "Analytics", "Tools",
+    ],
+    "Data / BI": [
+        "Analytics", "Statistics", "Data Modeling", "BI Tools", "Languages",
+    ],
+    "PR / Communications": [
+        "Strategic Communication", "Media Relations", "Writing", "Tools",
+    ],
+    "Marketing": [
+        "Strategy", "Channels", "Analytics", "Tools", "Writing",
+    ],
+    "Sales": [
+        "Pipeline Management", "Negotiation", "Tools", "Industry Knowledge",
+    ],
+    "Operations": [
+        "Process", "Tools", "Analytics", "Vendor Management",
+    ],
+    "Design": [
+        "Disciplines", "Tools", "Methodologies", "Soft Skills",
+    ],
+    "Finance": [
+        "Analysis", "Modeling", "Tools", "Regulatory",
+    ],
+}
+
+
+def build_extraction_prompt(profession: Optional[str] = None) -> str:
+    """Return the extraction prompt, optionally biased toward an archetype.
+
+    When `profession` matches a known archetype, append a paragraph that
+    lists typical skill categories for that field. The prompt's free-form
+    rule still applies: hints suggest, they do not constrain.
+    """
+    if not profession:
+        return _BASE_EXTRACTION_PROMPT
+    hints = _PROFESSION_CATEGORY_HINTS.get(profession.strip())
+    if not hints:
+        return _BASE_EXTRACTION_PROMPT
+    suffix = (
+        f"\n\nPROFESSION HINT: this resume is for a {profession} role. "
+        f"Skill categories typical for this field include: "
+        f"{', '.join(hints)}. Use these when they fit the resume's own "
+        f"organization; do not invent categories the resume does not use."
+    )
+    return _BASE_EXTRACTION_PROMPT + suffix
+
+
+# Back-compat alias — kept so existing imports continue to resolve.
+RESUME_EXTRACTION_PROMPT = _BASE_EXTRACTION_PROMPT
 
 
 # Accepts: "Jan", "January" → 1 ; etc. Case-insensitive.
@@ -172,58 +237,31 @@ def _split_date_range(value: Optional[str]) -> tuple[Optional[str], Optional[str
     return (_canonicalize_date_string(v), None)
 
 
-class SkillTag(Enum):
-    FRAMEWORK = "Framework"
-    DATABASE = "Database"
-    TOOL_PLATFORM = "Tool/Platform"
-    SECURITY = "Security"
-    LANGUAGE = "Language"
-
-
 class CompanyOut(BaseModel):
     name: str
     display_name: Optional[str] = None
 
 
 class SkillOut(BaseModel):
+    """Free-form skill category — whatever the resume itself uses.
+
+    Earlier this was an Enum gate (Language/Framework/Database/Tool/Platform/
+    Security) that raised on anything else, which destroyed PM, BI, and PR
+    resumes on ingest. The category is now whatever the LLM extracts from
+    the source document; downstream renderers iterate observed values
+    rather than assuming a fixed taxonomy.
+    """
+
     text: str
-    tag: Optional[SkillTag]
+    tag: Optional[str] = None
 
     @field_validator("tag", mode="before")
     @classmethod
     def normalize_tag(cls, value):
         if value is None:
             return None
-
-        s = str(value).strip().lower()
-
-        # Map variants to canonical enum values
-        if s in {"framework", "frameworks"}:
-            return SkillTag.FRAMEWORK
-        elif s in {"database", "databases"}:
-            return SkillTag.DATABASE
-        elif s in {
-            "tool/platform",
-            "tool platform",
-            "tools/platforms",
-            "tools",
-            "platform",
-            "platforms",
-        }:
-            return SkillTag.TOOL_PLATFORM
-        elif s in {"security"}:
-            return SkillTag.SECURITY
-        elif s in {"language", "languages"}:
-            return SkillTag.LANGUAGE
-        else:
-            # Try to match enum values directly
-            for tag in SkillTag:
-                if s == tag.value.lower():
-                    return tag
-
-            raise ValueError(
-                f"Invalid skill tag: {value}. Must be one of: {[tag.value for tag in SkillTag]}"
-            )
+        s = str(value).strip()
+        return s or None
 
 
 def _normalize_date_field(cls, value):  # noqa: ARG001
@@ -633,9 +671,7 @@ class IngestResume:
         for skill_out in (parsed_resume.skills or []):
             skill_model, _ = Skill.objects.get_or_create(
                 text=skill_out.text,
-                defaults={
-                    "skill_type": (skill_out.tag.value if skill_out.tag else None)
-                },
+                defaults={"skill_type": skill_out.tag},
             )
             try:
                 ResumeSkill.objects.get_or_create(
@@ -655,17 +691,18 @@ class IngestResume:
             return self.agent
 
         model_spec = os.getenv("RESUME_INGEST_MODEL", "").strip()
+        system_prompt = build_extraction_prompt(self._resolve_profession())
 
         # Explicit model override: "provider:model_name"
         if model_spec:
-            return self._agent_from_spec(model_spec)
+            return self._agent_from_spec(model_spec, system_prompt=system_prompt)
 
         # Default: Anthropic > OpenAI > Ollama
         if os.getenv("ANTHROPIC_API_KEY"):
             from pydantic_ai.models.anthropic import AnthropicModel
             model = AnthropicModel("claude-sonnet-4-6")
             return Agent(
-                model, output_type=ParsedResume, system_prompt=RESUME_EXTRACTION_PROMPT
+                model, output_type=ParsedResume, system_prompt=system_prompt
             )
 
         if os.getenv("OPENAI_API_KEY"):
@@ -678,7 +715,7 @@ class IngestResume:
                 return Agent(
                     model,
                     output_type=ParsedResume,
-                    system_prompt=RESUME_EXTRACTION_PROMPT,
+                    system_prompt=system_prompt,
                 )
             except Exception:
                 pass
@@ -691,8 +728,19 @@ class IngestResume:
         return Agent(
             ollama_model,
             output_type=ParsedResume,
-            system_prompt=RESUME_EXTRACTION_PROMPT,
+            system_prompt=system_prompt,
         )
+
+    def _resolve_profession(self) -> Optional[str]:
+        """The frontend writes the user-picked archetype to
+        Resume.profession before calling ingest. Read it off the pre-created
+        record so build_extraction_prompt can bias category extraction."""
+        if self.db_resume is not None:
+            value = getattr(self.db_resume, "profession", None)
+            if value:
+                stripped = str(value).strip()
+                return stripped or None
+        return None
 
     def _get_model_name(self) -> str:
         """Return a 'provider:model' label for the Agent's active model.
@@ -766,7 +814,7 @@ class IngestResume:
         except Exception:
             logger.exception("Failed to record resume_importer usage")
 
-    def _agent_from_spec(self, spec: str):
+    def _agent_from_spec(self, spec: str, system_prompt: Optional[str] = None):
         """Parse 'provider:model_name' and return an Agent.
 
         Bare names (no ':') raise ValueError — RESUME_INGEST_MODEL must
@@ -780,19 +828,20 @@ class IngestResume:
                 "form (e.g. 'openai:gpt-4o', 'anthropic:claude-sonnet-4-6')."
             )
         provider, model_name = spec.split(":", 1)
+        prompt = system_prompt or _BASE_EXTRACTION_PROMPT
 
         if provider == "anthropic":
             from pydantic_ai.models.anthropic import AnthropicModel
             return Agent(
                 AnthropicModel(model_name),
                 output_type=ParsedResume,
-                system_prompt=RESUME_EXTRACTION_PROMPT,
+                system_prompt=prompt,
             )
         elif provider == "openai":
             return Agent(
                 OpenAIModel(model_name),
                 output_type=ParsedResume,
-                system_prompt=RESUME_EXTRACTION_PROMPT,
+                system_prompt=prompt,
             )
         elif provider == "ollama":
             ollama_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1")
@@ -803,7 +852,7 @@ class IngestResume:
             return Agent(
                 model,
                 output_type=ParsedResume,
-                system_prompt=RESUME_EXTRACTION_PROMPT,
+                system_prompt=prompt,
             )
         else:
             raise ValueError(f"Unknown provider: {provider}")
