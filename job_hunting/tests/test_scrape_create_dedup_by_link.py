@@ -22,7 +22,10 @@ User = get_user_model()
 
 class ScrapeCreateDedupByLinkTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username="u1", password="p")
+        # Scrape creation is staff-only as of the staff-gate ship.
+        self.user = User.objects.create_user(
+            username="u1", password="p", is_staff=True
+        )
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
         self.company = Company.objects.create(name="Acme")
