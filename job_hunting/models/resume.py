@@ -17,6 +17,12 @@ class Resume(GetMixin, models.Model):
     notes = models.TextField(null=True, blank=True)
     favorite = models.BooleanField(default=False)
     status = models.CharField(max_length=20, null=True, blank=True)
+    # Free-form career archetype — drives the audience-aware extraction
+    # prompt and (M4) section ordering. Frontend suggests canonical values
+    # (Software Engineering / Product Management / Data BI / PR
+    # Communications / Marketing / Sales / Operations / Design / Finance /
+    # Other) but the column accepts any string the user picks.
+    profession = models.CharField(max_length=64, null=True, blank=True)
 
     class Meta:
         db_table = "resume"
@@ -30,6 +36,20 @@ class Resume(GetMixin, models.Model):
 
         skill_ids = list(ResumeSkill.objects.filter(resume_id=self.id).values_list("skill_id", flat=True))
         return list(Skill.objects.filter(pk__in=skill_ids))
+
+    @property
+    def skills_grouped(self):
+        """Skills bucketed by skill_type in first-seen order. Skills with
+        a falsy skill_type land in 'Other'. Templates that need to render
+        every category — without baking in a fixed taxonomy — iterate this.
+        """
+        from collections import OrderedDict
+
+        groups: "OrderedDict[str, list]" = OrderedDict()
+        for skill in self._get_django_skills():
+            key = skill.skill_type if (skill.skill_type and skill.skill_type.strip()) else "Other"
+            groups.setdefault(key, []).append(skill)
+        return groups
 
     @property
     def language_skills(self):

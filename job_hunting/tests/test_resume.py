@@ -444,3 +444,375 @@ class TestResumeSlimMeta(TestCase):
         self.assertEqual(meta["score_count"], 0)
         self.assertEqual(meta["experience_count"], 0)
         self.assertEqual(meta["skill_count"], 0)
+
+
+class TestResumeSkillsGroupedNonDev(TestCase):
+    """M1: skill_type is now free-form. Verify the model + export pipeline
+    preserve PM / BI / PR skill categories that the legacy SkillTag enum
+    would have rejected on ingest."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="pmuser", password="pass", first_name="Pat", last_name="Manager"
+        )
+        self.resume = Resume.objects.create(user=self.user, title="Senior PM")
+        # Mix of dev + non-dev categories + one uncategorized to exercise
+        # every code path.
+        self.skills = [
+            ("Stakeholder Management", "Discovery"),
+            ("Roadmapping", "Strategy"),
+            ("SQL", "Analytics"),
+            ("Cross-functional Comms", "Communication"),
+            ("Jira", None),
+            ("Python", "Language"),
+        ]
+        for text, skill_type in self.skills:
+            s = Skill.objects.create(text=text, skill_type=skill_type)
+            ResumeSkill.objects.create(resume=self.resume, skill=s)
+
+    def test_skills_grouped_preserves_non_dev_categories(self):
+        groups = self.resume.skills_grouped
+        self.assertIn("Discovery", groups)
+        self.assertIn("Strategy", groups)
+        self.assertIn("Analytics", groups)
+        self.assertIn("Communication", groups)
+        self.assertIn("Language", groups)
+
+    def test_skills_grouped_buckets_uncategorized_as_other(self):
+        groups = self.resume.skills_grouped
+        self.assertIn("Other", groups)
+        self.assertEqual([s.text for s in groups["Other"]], ["Jira"])
+
+    def test_skills_grouped_first_seen_order(self):
+        # Insertion order should drive output order so the resume's own
+        # taxonomy survives.
+        keys = list(self.resume.skills_grouped.keys())
+        self.assertEqual(
+            keys,
+            ["Discovery", "Strategy", "Analytics", "Communication", "Other", "Language"],
+        )
+
+    def test_skills_grouped_contains_skill_models(self):
+        groups = self.resume.skills_grouped
+        analytics = groups["Analytics"]
+        self.assertEqual(len(analytics), 1)
+        self.assertEqual(analytics[0].text, "SQL")
+        self.assertEqual(analytics[0].skill_type, "Analytics")
+
+    def test_skills_grouped_empty_when_resume_has_no_skills(self):
+        empty = Resume.objects.create(user=self.user, title="Empty")
+        self.assertEqual(dict(empty.skills_grouped), {})
+
+    def test_export_context_skills_lines_emit_non_dev_categories(self):
+        from job_hunting.lib.services.resume_export_context import build_context
+
+        ctx = build_context(self.resume)
+        lines = ctx["skills_lines"]
+        joined = "\n".join(lines)
+        # Every category appears as its own line — none silently dropped.
+        self.assertIn("Discovery: Stakeholder Management", joined)
+        self.assertIn("Strategy: Roadmapping", joined)
+        self.assertIn("Analytics: SQL", joined)
+        self.assertIn("Communication: Cross-functional Comms", joined)
+        self.assertIn("Languages: Python", joined)  # legacy plural alias still works
+        self.assertTrue(ctx["has_skills"])
+
+    def test_export_context_other_bucket_emitted_last(self):
+        from job_hunting.lib.services.resume_export_context import build_context
+
+        lines = build_context(self.resume)["skills_lines"]
+        other_idx = next(i for i, line in enumerate(lines) if line.startswith("Other:"))
+        # Anything explicitly tagged appears before the catch-all bucket.
+        self.assertEqual(other_idx, len(lines) - 1)
+        self.assertIn("Jira", lines[other_idx])
+
+    def test_legacy_dev_only_resume_still_renders(self):
+        """Regression guard: SE resumes that use only the historical five
+        categories must still produce the same export shape."""
+        from job_hunting.lib.services.resume_export_context import build_context
+
+        se_user = User.objects.create_user(username="seuser", password="pass")
+        se_resume = Resume.objects.create(user=se_user, title="SE")
+        for text, st in [
+            ("Python", "Language"), ("Django", "Framework"),
+            ("Postgres", "Database"), ("AWS", "Tool/Platform"),
+        ]:
+            sk = Skill.objects.create(text=text, skill_type=st)
+            ResumeSkill.objects.create(resume=se_resume, skill=sk)
+        lines = build_context(se_resume)["skills_lines"]
+        joined = "\n".join(lines)
+        self.assertIn("Languages: Python", joined)
+        self.assertIn("Frameworks: Django", joined)
+        self.assertIn("Databases: Postgres", joined)
+        self.assertIn("Platforms: AWS", joined)
+
+
+class TestLegacySkillKeyHelper(TestCase):
+    """The DOCX template references hardcoded snake_case context keys.
+    `_legacy_skill_key` must keep the historical aliases stable while
+    handling new free-form categories without crashing the renderer."""
+
+    def test_historical_aliases_preserved(self):
+        from job_hunting.lib.services.resume_export_service import _legacy_skill_key
+
+        self.assertEqual(_legacy_skill_key("Language"), "language_skills")
+        self.assertEqual(_legacy_skill_key("Framework"), "framework_skills")
+        self.assertEqual(_legacy_skill_key("Database"), "database_skills")
+        # Tool/Platform → tool_skills (NOT tool_platform_skills) — the
+        # legacy template has the abbreviated key baked in.
+        self.assertEqual(_legacy_skill_key("Tool/Platform"), "tool_skills")
+        self.assertEqual(_legacy_skill_key("Security"), "security_skills")
+
+    def test_new_categories_are_slugified(self):
+        from job_hunting.lib.services.resume_export_service import _legacy_skill_key
+
+        self.assertEqual(_legacy_skill_key("Project Management"), "project_management_skills")
+        self.assertEqual(_legacy_skill_key("Communication"), "communication_skills")
+        self.assertEqual(_legacy_skill_key("BI Tools"), "bi_tools_skills")
+        # Punctuation and double spaces collapse to a single underscore.
+        self.assertEqual(_legacy_skill_key("Cross-Functional / Soft"), "cross_functional_soft_skills")
+
+    def test_empty_or_whitespace_falls_back_to_other(self):
+        from job_hunting.lib.services.resume_export_service import _legacy_skill_key
+
+        self.assertEqual(_legacy_skill_key(""), "other_skills")
+        self.assertEqual(_legacy_skill_key("   "), "other_skills")
+        # An input that slugifies to nothing (only punctuation) also lands
+        # in the catch-all bucket.
+        self.assertEqual(_legacy_skill_key("///"), "other_skills")
+
+
+class TestSkillOutFreeFormTag(TestCase):
+    """SkillOut Pydantic model: tag is a free-form Optional[str]. The
+    legacy enum would raise on anything outside five dev categories,
+    which destroyed non-dev resumes on ingest."""
+
+    def test_accepts_dev_categories(self):
+        from job_hunting.lib.services.ingest_resume import SkillOut
+
+        for tag in ["Language", "Framework", "Database", "Tool/Platform", "Security"]:
+            s = SkillOut(text="x", tag=tag)
+            self.assertEqual(s.tag, tag)
+
+    def test_accepts_non_dev_categories(self):
+        from job_hunting.lib.services.ingest_resume import SkillOut
+
+        # The categories real PM, BI, and PR resumes use. None of these
+        # would have survived the old SkillTag enum validator.
+        for tag in [
+            "Stakeholder Management", "Discovery", "Strategy",
+            "Analytics", "Statistics", "Data Modeling", "BI Tools",
+            "Strategic Communication", "Media Relations", "Writing",
+            "Project Management",
+        ]:
+            s = SkillOut(text="x", tag=tag)
+            self.assertEqual(s.tag, tag)
+
+    def test_none_tag_passes_through(self):
+        from job_hunting.lib.services.ingest_resume import SkillOut
+
+        s = SkillOut(text="Jira", tag=None)
+        self.assertIsNone(s.tag)
+
+    def test_blank_tag_normalizes_to_none(self):
+        from job_hunting.lib.services.ingest_resume import SkillOut
+
+        for blank in ["", "   ", "\t\n"]:
+            s = SkillOut(text="x", tag=blank)
+            self.assertIsNone(s.tag)
+
+    def test_whitespace_around_tag_is_trimmed(self):
+        from job_hunting.lib.services.ingest_resume import SkillOut
+
+        s = SkillOut(text="x", tag="  Communication  ")
+        self.assertEqual(s.tag, "Communication")
+
+
+class TestResumeProfessionField(TestCase):
+    """M2: Resume.profession is a free-form CharField that drives both the
+    audience-aware ingest prompt (M3) and section ordering (M4)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="profuser", password="pass")
+
+    def test_profession_defaults_to_null(self):
+        r = Resume.objects.create(user=self.user, title="Resume")
+        # Round-trip through the DB so we read what was actually persisted.
+        r.refresh_from_db()
+        self.assertIsNone(r.profession)
+
+    def test_profession_accepts_canonical_values(self):
+        for value in [
+            "Software Engineering", "Product Management", "Data / BI",
+            "PR / Communications", "Marketing", "Sales", "Operations",
+            "Design", "Finance", "Other",
+        ]:
+            r = Resume.objects.create(user=self.user, title="Resume", profession=value)
+            r.refresh_from_db()
+            self.assertEqual(r.profession, value)
+
+    def test_profession_accepts_arbitrary_strings(self):
+        # The column is free-form; non-canonical values must round-trip.
+        r = Resume.objects.create(user=self.user, title="Resume", profession="Academic Research")
+        r.refresh_from_db()
+        self.assertEqual(r.profession, "Academic Research")
+
+
+class TestResumeProfessionSerializer(TestCase):
+    """M2: profession appears in both full and slim serializer output so
+    the Ember model can read/write it through JSON:API."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="serializeruser", password="pass")
+        self.client.force_authenticate(user=self.user)
+
+    def test_full_resume_response_includes_profession(self):
+        r = Resume.objects.create(
+            user=self.user, title="PM Resume", profession="Product Management"
+        )
+        response = self.client.get(f"/api/v1/resumes/{r.id}/")
+        self.assertEqual(response.status_code, 200)
+        attrs = response.json()["data"]["attributes"]
+        self.assertEqual(attrs["profession"], "Product Management")
+
+    def test_slim_resume_response_includes_profession(self):
+        Resume.objects.create(
+            user=self.user, title="BI Resume", profession="Data / BI"
+        )
+        response = self.client.get("/api/v1/resumes/", {"slim": "true"})
+        attrs = response.json()["data"][0]["attributes"]
+        self.assertIn("profession", attrs)
+        self.assertEqual(attrs["profession"], "Data / BI")
+
+    def test_create_resume_with_profession(self):
+        payload = {
+            "data": {
+                "type": "resume",
+                "attributes": {"title": "PR Resume", "profession": "PR / Communications"},
+            }
+        }
+        response = self.client.post("/api/v1/resumes/", data=payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.json()["data"]["attributes"]["profession"],
+            "PR / Communications",
+        )
+
+
+class TestAudienceAwareExtractionPrompt(TestCase):
+    """M3: build_extraction_prompt(profession) appends an archetype hint
+    when the profession matches a known archetype, and falls back to the
+    base prompt otherwise. The free-form rule still applies — hints
+    suggest, they do not enforce."""
+
+    def test_no_profession_returns_base_prompt(self):
+        from job_hunting.lib.services.ingest_resume import (
+            build_extraction_prompt, _BASE_EXTRACTION_PROMPT,
+        )
+
+        self.assertEqual(build_extraction_prompt(None), _BASE_EXTRACTION_PROMPT)
+        self.assertEqual(build_extraction_prompt(""), _BASE_EXTRACTION_PROMPT)
+        self.assertEqual(build_extraction_prompt("   "), _BASE_EXTRACTION_PROMPT)
+
+    def test_unknown_profession_falls_back_to_base(self):
+        from job_hunting.lib.services.ingest_resume import (
+            build_extraction_prompt, _BASE_EXTRACTION_PROMPT,
+        )
+
+        # Free-form input — anything outside the canonical list still
+        # works; we just don't have category hints for it.
+        self.assertEqual(
+            build_extraction_prompt("Astrologer"), _BASE_EXTRACTION_PROMPT
+        )
+
+    def test_pm_profession_appends_pm_hints(self):
+        from job_hunting.lib.services.ingest_resume import build_extraction_prompt
+
+        prompt = build_extraction_prompt("Product Management")
+        self.assertIn("Product Management", prompt)
+        self.assertIn("Discovery", prompt)
+        self.assertIn("Strategy", prompt)
+        self.assertIn("Stakeholder Management", prompt)
+        # The base rules still appear so the LLM doesn't lose its date /
+        # bullet contracts.
+        self.assertIn("ORDER", prompt)
+        self.assertIn("VERBATIM BULLETS", prompt)
+
+    def test_bi_profession_appends_bi_hints(self):
+        from job_hunting.lib.services.ingest_resume import build_extraction_prompt
+
+        prompt = build_extraction_prompt("Data / BI")
+        self.assertIn("Analytics", prompt)
+        self.assertIn("Statistics", prompt)
+        self.assertIn("Data Modeling", prompt)
+        self.assertIn("BI Tools", prompt)
+
+    def test_pr_profession_appends_pr_hints(self):
+        from job_hunting.lib.services.ingest_resume import build_extraction_prompt
+
+        prompt = build_extraction_prompt("PR / Communications")
+        self.assertIn("Strategic Communication", prompt)
+        self.assertIn("Media Relations", prompt)
+        self.assertIn("Writing", prompt)
+
+    def test_se_profession_keeps_legacy_categories(self):
+        """Regression guard: SE resumes still see the historical five
+        categories the existing ingest pipeline learned to produce."""
+        from job_hunting.lib.services.ingest_resume import build_extraction_prompt
+
+        prompt = build_extraction_prompt("Software Engineering")
+        for cat in ["Languages", "Frameworks", "Databases", "Tools/Platforms", "Security"]:
+            self.assertIn(cat, prompt)
+
+    def test_hint_does_not_enforce_closed_set(self):
+        """The prompt must remind the LLM that emitting other categories
+        is allowed — we don't want to recreate the SkillTag enum gate via
+        prompt rigidity."""
+        from job_hunting.lib.services.ingest_resume import build_extraction_prompt
+
+        prompt = build_extraction_prompt("Product Management")
+        # The base prompt's free-form rule survives.
+        self.assertIn("free-form", prompt)
+        # And the hint paragraph explicitly defers to the resume itself.
+        self.assertIn("do not invent categories the resume does not use", prompt)
+
+
+class TestIngestResumeProfessionWiring(TestCase):
+    """M3: IngestResume reads Resume.profession off the pre-created record
+    and feeds it to build_extraction_prompt. Verifies the wiring without
+    actually calling an LLM."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="wireuser", password="pass")
+
+    def test_resolve_profession_reads_db_resume(self):
+        from job_hunting.lib.services.ingest_resume import IngestResume
+
+        r = Resume.objects.create(
+            user=self.user, title="x", profession="Product Management"
+        )
+        ingester = IngestResume(user=self.user, db_resume=r)
+        self.assertEqual(ingester._resolve_profession(), "Product Management")
+
+    def test_resolve_profession_returns_none_when_unset(self):
+        from job_hunting.lib.services.ingest_resume import IngestResume
+
+        r = Resume.objects.create(user=self.user, title="x")
+        ingester = IngestResume(user=self.user, db_resume=r)
+        self.assertIsNone(ingester._resolve_profession())
+
+    def test_resolve_profession_returns_none_without_db_resume(self):
+        from job_hunting.lib.services.ingest_resume import IngestResume
+
+        ingester = IngestResume(user=self.user)
+        self.assertIsNone(ingester._resolve_profession())
+
+    def test_resolve_profession_strips_whitespace(self):
+        from job_hunting.lib.services.ingest_resume import IngestResume
+
+        r = Resume.objects.create(
+            user=self.user, title="x", profession="  Marketing  "
+        )
+        ingester = IngestResume(user=self.user, db_resume=r)
+        self.assertEqual(ingester._resolve_profession(), "Marketing")

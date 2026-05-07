@@ -1,7 +1,36 @@
 import os
+import re
 from io import BytesIO
 from typing import Optional
 from job_hunting.models import Resume
+
+
+# Historical aliases the legacy DOCX template references. The naming is
+# inconsistent (Tool/Platform → tool_skills, not tool_platform_skills) so
+# we can't compute these — they have to match the binary template verbatim.
+_LEGACY_SKILL_KEY_ALIASES = {
+    "Language": "language_skills",
+    "Framework": "framework_skills",
+    "Database": "database_skills",
+    "Tool/Platform": "tool_skills",
+    "Security": "security_skills",
+}
+
+
+def _legacy_skill_key(skill_type: str) -> str:
+    """Derive a snake_case context key from a free-form skill_type.
+
+    Returns the historical alias when one exists (so the legacy DOCX
+    template's {{ language_skills }} etc. placeholders still resolve),
+    otherwise slugifies the input. Empty input falls back to
+    'other_skills'.
+    """
+    if not skill_type or not skill_type.strip():
+        return "other_skills"
+    if skill_type in _LEGACY_SKILL_KEY_ALIASES:
+        return _LEGACY_SKILL_KEY_ALIASES[skill_type]
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", skill_type.strip().lower()).strip("_")
+    return f"{slug}_skills" if slug else "other_skills"
 
 
 class ResumeExportService:
@@ -51,18 +80,18 @@ class ResumeExportService:
         if not path:
             raise ValueError("No template path provided")
 
-        key_mapping = {
-            "Language": "language_skills",
-            "Framework": "framework_skills",
-            "Database": "database_skills",
-            "Tool/Platform": "tool_skills",
-            "Security": "security_skills",
-        }
         # Load template and render
         template = DocxTemplate(path)
         context = self.build_context(resume)
+        # Surface every observed skill_type on the context under a derived
+        # key — `Language` → `language_skills`, `Tool/Platform` →
+        # `tool_platform_skills`, `Project Management` →
+        # `project_management_skills`. The legacy DOCX template references
+        # the dev-era keys (language_skills, framework_skills, …) so they
+        # still resolve; non-dev categories are present on the context but
+        # the binary template won't render them until M4 reorganizes it.
         context["skills"] = {
-            key_mapping.get(k): ", ".join(v) for k, v in context["skills"].items()
+            _legacy_skill_key(k): ", ".join(v) for k, v in context["skills"].items()
         }
         for new_key, skills in context["skills"].items():
             context[new_key] = skills
