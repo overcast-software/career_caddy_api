@@ -302,6 +302,15 @@ class ScrapeViewSet(BaseViewSet):
         },
     )
     def create(self, request):
+        # Staff-only during alpha. Non-staff users should not be initiating
+        # scrapes — JobPosts get created from the inbox / extension capture
+        # flows. This gate is the temporary alpha crutch; the real fix is
+        # multi-tenant resource isolation (see notes.org Pending Approval).
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Scraping is staff-only during alpha."}]},
+                status=403,
+            )
 
         # Detect a "url" key in either a plain JSON body or JSON:API attributes
         data = request.data if isinstance(request.data, dict) else {}

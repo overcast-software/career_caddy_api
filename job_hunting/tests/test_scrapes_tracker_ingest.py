@@ -19,7 +19,10 @@ User = get_user_model()
 
 class ScrapeIngestTrackerResolutionTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username="u1", password="p")
+        # Scrape creation is staff-only as of the staff-gate ship.
+        self.user = User.objects.create_user(
+            username="u1", password="p", is_staff=True
+        )
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
 
