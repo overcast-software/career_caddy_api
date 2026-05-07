@@ -360,6 +360,7 @@ class DjangoUserSerializer:
         links = []
         onboarding = None
         auto_score = False
+        prof = None
         try:
             from job_hunting.models import Profile
             prof = Profile.objects.filter(user_id=obj.id).first()
@@ -377,12 +378,18 @@ class DjangoUserSerializer:
         if onboarding is None:
             from job_hunting.models import Profile
             onboarding = Profile.default_onboarding()
-        # Derive `profile_basics` from User fields so fresh users aren't told
-        # to fill in their name when they already did at signup. Kept as a
-        # read-time derivation; reconcile remains authoritative for the rest.
-        onboarding["profile_basics"] = bool(
-            obj.first_name and obj.last_name and (obj.email or "")
-        )
+        # Derive `profile_basics` at read time so fresh signups aren't told
+        # to fill in their name when they already did at signup. The other
+        # derived flags wait for reconcile (read-time queries against
+        # Resume/JobPost/Score would be too expensive on every user
+        # serialize). When a Profile row exists we use the model helper so
+        # the rule stays in sync with reconcile; otherwise we synthesize it.
+        if prof is not None:
+            onboarding["profile_basics"] = prof.profile_basics_complete()
+        else:
+            onboarding["profile_basics"] = bool(
+                obj.first_name and obj.last_name and (obj.email or "")
+            )
 
         res = {
             "type": self.type,

@@ -47,7 +47,7 @@ from .markdown import (
     cover_letter_markdown,
     resume_markdown,
 )
-from .onboarding import reconcile_onboarding
+from .onboarding import onboarding_endpoint, reconcile_onboarding
 from .reports import (
     activity_report,
     application_flow_report,
@@ -102,6 +102,7 @@ __all__ = [
     "generate_prompt",
     "resume_markdown",
     "cover_letter_markdown",
+    "onboarding_endpoint",
     "reconcile_onboarding",
     "activity_report",
     "application_flow_report",
