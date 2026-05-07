@@ -484,7 +484,10 @@ class DjangoUserSerializer:
 class ResumeSerializer(BaseSerializer):
     type = "resume"
     model = Resume
-    attributes = ["file_path", "title", "name", "notes", "user_id", "favorite", "status", "profession"]
+    attributes = [
+        "file_path", "title", "name", "notes", "user_id", "favorite", "status",
+        "profession", "section_order", "effective_section_order",
+    ]
     slim_attributes = ["name", "title", "notes", "favorite", "profession"]
     user_fk = "user_id"
     relationships = {

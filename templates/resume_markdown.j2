@@ -1,26 +1,28 @@
 {# Keep every block flush-left: leading spaces in markdown turn text into
    code blocks ("### Summary" indented 4 spaces renders as <pre>, not <h3>).
    Previously every {% if %} branch re-indented the content four spaces and
-   the career-data page rendered the entire resume as monospace. #}
+   the career-data page rendered the entire resume as monospace.
+
+   Section order is dispatched off resume.effective_section_order — an
+   archetype-aware list (PM resumes lead with experience, SE resumes lead
+   with skills). Adding a new section type means a new {% if section ==
+   ... %} branch here AND a default in SECTION_ORDER_DEFAULTS. #}
 ## {{ resume.user.get_full_name() or resume.user.username }}
 
 *{{ resume.title }}*{% if resume.user.email %} · {{ resume.user.email }}{% endif %}{% if resume.user_phone %} · {{ resume.user_phone }}{% endif %}
 
-{% if resume.active_summary %}
+{% for section in resume.effective_section_order %}
+{% if section == "summary" and resume.active_summary %}
 ### Summary
 
 {{ resume.active_summary.content }}
-{% endif %}
-
-{% if resume.skills %}
+{% elif section == "skills" and resume.skills %}
 ### Skills
 
 {% for group, items in resume.skills_grouped.items() %}
 - **{{ group }}:** {{ items | map(attribute='text') | join(", ") }}
 {% endfor %}
-{% endif %}
-
-{% if resume.experiences %}
+{% elif section == "experience" and resume.experiences %}
 ### Experience
 
 {% for experience in resume.experiences %}
@@ -35,9 +37,7 @@
 {% endfor %}
 
 {% endfor %}
-{% endif %}
-
-{% if resume.projects %}
+{% elif section == "projects" and resume.projects %}
 ### Projects
 
 {% for proj in resume.projects %}
@@ -47,20 +47,17 @@
 {% endfor %}
 
 {% endfor %}
-{% endif %}
-
-{% if resume.certifications %}
+{% elif section == "certifications" and resume.certifications %}
 ### Certifications
 
 {% for cert in resume.certifications %}
 - **{{ cert.title }}**{% if cert.issuer %} — {{ cert.issuer }}{% endif %}{% if cert.issue_date %} — {{ cert.issue_date }}{% endif %}{% if cert.content %} — {{ cert.content }}{% endif %}
 {% endfor %}
-{% endif %}
-
-{% if resume.educations %}
+{% elif section == "education" and resume.educations %}
 ### Education
 
 {% for edu in resume.educations %}
 - **{{ edu.institution }}**{% if edu.degree %} — {{ edu.degree }}{% endif %}{% if edu.major %} — {{ edu.major }}{% endif %}{% if edu.minor %} — Minor: {{ edu.minor }}{% endif %}{% if edu.issue_date %} — {{ edu.issue_date }}{% endif %}
 {% endfor %}
 {% endif %}
+{% endfor %}

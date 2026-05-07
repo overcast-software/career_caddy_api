@@ -816,3 +816,237 @@ class TestIngestResumeProfessionWiring(TestCase):
         )
         ingester = IngestResume(user=self.user, db_resume=r)
         self.assertEqual(ingester._resolve_profession(), "Marketing")
+
+
+class TestEffectiveSectionOrder(TestCase):
+    """M4: Resume.effective_section_order resolves in three steps —
+    explicit per-resume section_order → archetype default for profession
+    → CANONICAL_SECTION_ORDER. Templates iterate this so non-dev resumes
+    lead with the section that matters most for their field."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="orderuser", password="pass")
+
+    def test_canonical_default_when_profession_unset(self):
+        from job_hunting.models.resume import CANONICAL_SECTION_ORDER
+
+        r = Resume.objects.create(user=self.user, title="x")
+        self.assertEqual(r.effective_section_order, CANONICAL_SECTION_ORDER)
+
+    def test_canonical_default_when_profession_unmapped(self):
+        from job_hunting.models.resume import CANONICAL_SECTION_ORDER
+
+        # Sales / Operations / Design / Finance / Other don't have
+        # specific overrides yet — they fall back to the canonical order.
+        # Free-form professions also fall through.
+        for prof in ("Sales", "Operations", "Other", "Astrologer"):
+            r = Resume.objects.create(user=self.user, title="x", profession=prof)
+            self.assertEqual(
+                r.effective_section_order, CANONICAL_SECTION_ORDER, msg=prof
+            )
+
+    def test_software_engineering_uses_canonical_order(self):
+        from job_hunting.models.resume import CANONICAL_SECTION_ORDER
+
+        r = Resume.objects.create(
+            user=self.user, title="x", profession="Software Engineering"
+        )
+        self.assertEqual(r.effective_section_order, CANONICAL_SECTION_ORDER)
+
+    def test_product_management_leads_with_experience(self):
+        r = Resume.objects.create(
+            user=self.user, title="x", profession="Product Management"
+        )
+        order = r.effective_section_order
+        # Experience must precede skills for PM resumes — that's the
+        # whole point of the archetype override.
+        self.assertLess(order.index("experience"), order.index("skills"))
+        self.assertEqual(order[0], "summary")
+        self.assertEqual(order[1], "experience")
+
+    def test_pr_communications_leads_with_experience(self):
+        r = Resume.objects.create(
+            user=self.user, title="x", profession="PR / Communications"
+        )
+        order = r.effective_section_order
+        self.assertLess(order.index("experience"), order.index("skills"))
+
+    def test_explicit_section_order_overrides_archetype_default(self):
+        r = Resume.objects.create(
+            user=self.user, title="x",
+            profession="Product Management",
+            section_order=["skills", "summary", "experience"],
+        )
+        # User picked PM (which would normally lead with experience) but
+        # also typed an explicit override — explicit always wins.
+        self.assertEqual(
+            r.effective_section_order, ["skills", "summary", "experience"]
+        )
+
+    def test_empty_section_order_falls_through_to_archetype_default(self):
+        # JSONField default is None, but a serializer bug or stale write
+        # could land an empty list. Treat [] as "no override".
+        r = Resume.objects.create(
+            user=self.user, title="x",
+            profession="Product Management",
+            section_order=[],
+        )
+        order = r.effective_section_order
+        self.assertEqual(order[0], "summary")
+        self.assertEqual(order[1], "experience")
+
+    def test_returned_list_is_a_copy_not_the_default(self):
+        """Mutating the returned list must not corrupt SECTION_ORDER_DEFAULTS
+        for the next caller."""
+        from job_hunting.models.resume import (
+            SECTION_ORDER_DEFAULTS, CANONICAL_SECTION_ORDER,
+        )
+
+        r1 = Resume.objects.create(
+            user=self.user, title="x", profession="Product Management"
+        )
+        order1 = r1.effective_section_order
+        order1.clear()
+
+        r2 = Resume.objects.create(
+            user=self.user, title="y", profession="Product Management"
+        )
+        # Second resume must still see the full archetype order.
+        self.assertEqual(len(r2.effective_section_order), 6)
+        self.assertEqual(
+            len(SECTION_ORDER_DEFAULTS["Product Management"]), 6
+        )
+
+        # Same protection for the canonical fallback.
+        r3 = Resume.objects.create(user=self.user, title="z")
+        order3 = r3.effective_section_order
+        order3.clear()
+        r4 = Resume.objects.create(user=self.user, title="zz")
+        self.assertEqual(r4.effective_section_order, CANONICAL_SECTION_ORDER)
+
+
+class TestSectionOrderSerializer(TestCase):
+    """section_order + effective_section_order are exposed in the JSON:API
+    payload so the frontend can read the archetype default and persist
+    explicit overrides."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="sectionserialuser", password="pass")
+        self.client.force_authenticate(user=self.user)
+
+    def test_response_includes_effective_section_order(self):
+        r = Resume.objects.create(
+            user=self.user, title="PM", profession="Product Management"
+        )
+        response = self.client.get(f"/api/v1/resumes/{r.id}/")
+        attrs = response.json()["data"]["attributes"]
+        self.assertEqual(attrs["effective_section_order"][0], "summary")
+        self.assertEqual(attrs["effective_section_order"][1], "experience")
+
+    def test_response_includes_explicit_section_order(self):
+        r = Resume.objects.create(
+            user=self.user, title="x",
+            section_order=["summary", "skills"],
+        )
+        response = self.client.get(f"/api/v1/resumes/{r.id}/")
+        attrs = response.json()["data"]["attributes"]
+        self.assertEqual(attrs["section_order"], ["summary", "skills"])
+        # And the effective list reflects the override (not the canonical).
+        self.assertEqual(attrs["effective_section_order"], ["summary", "skills"])
+
+
+class TestMarkdownTemplateSectionDispatch(TestCase):
+    """The Jinja markdown template iterates effective_section_order so a
+    PM resume's markdown export leads with experience and a SE resume's
+    leads with skills — without two separate templates."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="mduser", password="pass",
+            first_name="Pat", last_name="Manager",
+        )
+
+    def _build_full_resume(self, profession=None):
+        resume = Resume.objects.create(
+            user=self.user, title="Resume", profession=profession,
+        )
+        # Skills
+        skill = Skill.objects.create(text="Stakeholder Mgmt", skill_type="Discovery")
+        ResumeSkill.objects.create(resume=resume, skill=skill)
+        # Experience
+        exp = Experience.objects.create(title="Senior PM", location="Remote")
+        ResumeExperience.objects.create(resume=resume, experience=exp, order=0)
+        ExperienceDescription.objects.create(
+            experience=exp,
+            description=Description.objects.create(content="Shipped initiative"),
+            order=0,
+        )
+        # Summary
+        summary = Summary.objects.create(content="Decade of product work", user=self.user)
+        ResumeSummary.objects.create(resume=resume, summary=summary, active=True)
+        return resume
+
+    def _render(self, resume):
+        # Production uses Jinja2 (DbExportService) — Django's template
+        # loader doesn't understand the syntax in this template. Mirror
+        # the prod path instead of the Django default.
+        from job_hunting.lib.services.db_export_service import DbExportService
+        return DbExportService().resume_markdown_export(resume)
+
+    def test_pm_resume_renders_experience_before_skills(self):
+        resume = self._build_full_resume(profession="Product Management")
+        md = self._render(resume)
+        exp_idx = md.index("### Experience")
+        skills_idx = md.index("### Skills")
+        self.assertLess(exp_idx, skills_idx)
+
+    def test_se_resume_renders_skills_before_experience(self):
+        resume = self._build_full_resume(profession="Software Engineering")
+        md = self._render(resume)
+        skills_idx = md.index("### Skills")
+        exp_idx = md.index("### Experience")
+        self.assertLess(skills_idx, exp_idx)
+
+    def test_unset_profession_uses_canonical_order(self):
+        # No profession → canonical (skills before experience).
+        resume = self._build_full_resume(profession=None)
+        md = self._render(resume)
+        self.assertLess(md.index("### Skills"), md.index("### Experience"))
+
+    def test_explicit_section_order_drives_render(self):
+        resume = self._build_full_resume(profession="Software Engineering")
+        # Override: experience first even though SE archetype would want skills first.
+        resume.section_order = ["summary", "experience", "skills"]
+        resume.save()
+        md = self._render(resume)
+        self.assertLess(md.index("### Experience"), md.index("### Skills"))
+
+    def test_empty_sections_render_nothing(self):
+        # A resume with only a title shouldn't emit any section headings.
+        resume = Resume.objects.create(user=self.user, title="Empty")
+        md = self._render(resume)
+        for header in ("### Summary", "### Skills", "### Experience",
+                       "### Projects", "### Certifications", "### Education"):
+            self.assertNotIn(header, md)
+
+
+class TestDeprecatedSkillAccessorsRemoved(TestCase):
+    """M1 documented these as one-line aliases pending M4 removal. Once M4
+    drops them, nothing should still attempt to call them — guard the
+    contract by exercising the model directly."""
+
+    def test_no_named_skill_accessors_on_resume(self):
+        r = Resume.objects.create(
+            user=User.objects.create_user(username="depuser", password="pass"),
+            title="x",
+        )
+        for attr in (
+            "language_skills", "framework_skills", "database_skills",
+            "tool_skills", "security_skills",
+        ):
+            self.assertFalse(
+                hasattr(r, attr),
+                msg=f"Resume.{attr} should have been dropped in M4 — "
+                f"templates iterate skills_grouped instead",
+            )
