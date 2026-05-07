@@ -30,7 +30,7 @@ class ReconcileOnboardingTests(TestCase):
 
     def _post(self):
         return self.client.post(
-            "/api/v1/onboarding/reconcile/",
+            "/api/v1/users/me/onboarding/reconcile/",
             data=json.dumps({}),
             content_type="application/vnd.api+json",
         )
@@ -39,19 +39,23 @@ class ReconcileOnboardingTests(TestCase):
         resp = self._post()
         self.assertEqual(resp.status_code, 200, resp.content)
         body = resp.json()["data"]
-        self.assertTrue(body["profile_basics"])  # name+email set in setUp
-        self.assertFalse(body["resume_imported"])
-        self.assertFalse(body["first_job_post"])
-        self.assertFalse(body["first_score"])
-        self.assertFalse(body["first_cover_letter"])
-        self.assertTrue(body["wizard_enabled"])
-        self.assertFalse(body["resume_reviewed"])
+        # JSON:API resource shape: {type, id, attributes}
+        self.assertEqual(body["type"], "onboarding")
+        attrs = body["attributes"]
+        self.assertIn("derived", attrs)
+        self.assertIn("subjective", attrs)
+        self.assertTrue(attrs["derived"]["profile_basics"])  # name+email set in setUp
+        self.assertFalse(attrs["derived"]["resume_imported"])
+        self.assertFalse(attrs["derived"]["first_job_post"])
+        self.assertFalse(attrs["derived"]["first_score"])
+        self.assertFalse(attrs["derived"]["first_cover_letter"])
+        self.assertTrue(attrs["subjective"]["wizard_enabled"])
+        self.assertFalse(attrs["subjective"]["resume_reviewed"])
 
     def test_existing_resume_flips_resume_imported(self):
         Resume.objects.create(user=self.user, title="SRE")
         resp = self._post()
-        body = resp.json()["data"]
-        self.assertTrue(body["resume_imported"])
+        self.assertTrue(resp.json()["data"]["attributes"]["derived"]["resume_imported"])
 
     def test_existing_job_post_flips_first_job_post(self):
         company = Company.objects.create(name="Acme")
@@ -61,8 +65,7 @@ class ReconcileOnboardingTests(TestCase):
             created_by=self.user,
         )
         resp = self._post()
-        body = resp.json()["data"]
-        self.assertTrue(body["first_job_post"])
+        self.assertTrue(resp.json()["data"]["attributes"]["derived"]["first_job_post"])
 
     def test_reconcile_preserves_resume_reviewed_and_wizard_enabled(self):
         """Subjective fields stay as stored — reconcile never blanks them."""
@@ -71,11 +74,10 @@ class ReconcileOnboardingTests(TestCase):
             onboarding={"resume_reviewed": True, "wizard_enabled": False},
         )
         Resume.objects.create(user=self.user, title="SRE")
-        resp = self._post()
-        body = resp.json()["data"]
-        self.assertTrue(body["resume_imported"])  # derived — now true
-        self.assertTrue(body["resume_reviewed"])  # preserved
-        self.assertFalse(body["wizard_enabled"])  # preserved
+        attrs = self._post().json()["data"]["attributes"]
+        self.assertTrue(attrs["derived"]["resume_imported"])
+        self.assertTrue(attrs["subjective"]["resume_reviewed"])
+        self.assertFalse(attrs["subjective"]["wizard_enabled"])
 
     def test_reconcile_flips_from_stale_false_to_true(self):
         """The motivating case: long-time user whose blob defaults to false."""
@@ -96,12 +98,11 @@ class ReconcileOnboardingTests(TestCase):
         Score.objects.create(user=self.user, job_post=post)
         CoverLetter.objects.create(user=self.user, content="Dear hiring...")
 
-        resp = self._post()
-        body = resp.json()["data"]
-        self.assertTrue(body["resume_imported"])
-        self.assertTrue(body["first_job_post"])
-        self.assertTrue(body["first_score"])
-        self.assertTrue(body["first_cover_letter"])
+        derived = resp_derived(self._post())
+        self.assertTrue(derived["resume_imported"])
+        self.assertTrue(derived["first_job_post"])
+        self.assertTrue(derived["first_score"])
+        self.assertTrue(derived["first_cover_letter"])
 
     def test_reconcile_persists_to_profile(self):
         Resume.objects.create(user=self.user, title="SRE")
@@ -119,6 +120,9 @@ class ReconcileOnboardingTests(TestCase):
         other = User.objects.create_user(username="other", password="pass")
         Resume.objects.create(user=other, title="Other Resume")
         resp = self._post()
-        body = resp.json()["data"]
         # My reconcile sees MY data (none), not other's.
-        self.assertFalse(body["resume_imported"])
+        self.assertFalse(resp.json()["data"]["attributes"]["derived"]["resume_imported"])
+
+
+def resp_derived(resp):
+    return resp.json()["data"]["attributes"]["derived"]
