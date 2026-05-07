@@ -3,6 +3,33 @@ from django.db import models
 from .base import GetMixin
 
 
+# Canonical section order — the historical SE-flavored sequence. Used as
+# the fallback whenever a resume has neither an explicit section_order nor
+# a profession we have an archetype default for.
+CANONICAL_SECTION_ORDER = [
+    "summary", "skills", "experience", "projects", "education", "certifications",
+]
+
+# Per-archetype defaults. Maps Resume.profession → ordered section list.
+# Archetypes not listed here fall back to CANONICAL_SECTION_ORDER. The
+# split is mostly skills-first (SE/BI: technical credentials matter more
+# than narrative) vs experience-first (PM/PR/Marketing: track record and
+# storytelling lead).
+SECTION_ORDER_DEFAULTS = {
+    "Software Engineering": list(CANONICAL_SECTION_ORDER),
+    "Data / BI": list(CANONICAL_SECTION_ORDER),
+    "Product Management": [
+        "summary", "experience", "projects", "skills", "education", "certifications",
+    ],
+    "PR / Communications": [
+        "summary", "experience", "projects", "skills", "education", "certifications",
+    ],
+    "Marketing": [
+        "summary", "experience", "projects", "skills", "education", "certifications",
+    ],
+}
+
+
 class Resume(GetMixin, models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -18,11 +45,16 @@ class Resume(GetMixin, models.Model):
     favorite = models.BooleanField(default=False)
     status = models.CharField(max_length=20, null=True, blank=True)
     # Free-form career archetype — drives the audience-aware extraction
-    # prompt and (M4) section ordering. Frontend suggests canonical values
+    # prompt and section ordering. Frontend suggests canonical values
     # (Software Engineering / Product Management / Data BI / PR
     # Communications / Marketing / Sales / Operations / Design / Finance /
     # Other) but the column accepts any string the user picks.
     profession = models.CharField(max_length=64, null=True, blank=True)
+    # Explicit per-resume override for section ordering. JSON list of
+    # section keys (e.g. ["summary", "experience", "skills", ...]).
+    # NULL means "use the archetype default for self.profession, or fall
+    # back to CANONICAL_SECTION_ORDER".
+    section_order = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "resume"
@@ -52,28 +84,23 @@ class Resume(GetMixin, models.Model):
         return groups
 
     @property
-    def language_skills(self):
-        return self.skills_by_type("Language")
-
-    @property
-    def database_skills(self):
-        return self.skills_by_type("Database")
-
-    @property
-    def framework_skills(self):
-        return self.skills_by_type("Framework")
-
-    @property
-    def tool_skills(self):
-        return self.skills_by_type("Tool/Platform")
-
-    @property
-    def security_skills(self):
-        return self.skills_by_type("Security")
-
-    @property
     def skills(self):
         return self._get_django_skills()
+
+    @property
+    def effective_section_order(self) -> list[str]:
+        """Return the section sequence templates should iterate.
+
+        Resolution order: explicit per-resume section_order → archetype
+        default for self.profession → CANONICAL_SECTION_ORDER. Always
+        returns a fresh list so callers can mutate without affecting the
+        defaults.
+        """
+        if isinstance(self.section_order, list) and self.section_order:
+            return list(self.section_order)
+        if self.profession and self.profession in SECTION_ORDER_DEFAULTS:
+            return list(SECTION_ORDER_DEFAULTS[self.profession])
+        return list(CANONICAL_SECTION_ORDER)
 
     @property
     def experiences(self):
