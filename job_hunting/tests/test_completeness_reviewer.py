@@ -109,15 +109,24 @@ class TestMaybeReviewAndPersist(TestCase):
         mock_review.assert_not_called()
 
     @patch.object(CompletenessReviewer, "review")
-    def test_near_empty_description_short_circuits(self, mock_review):
+    def test_short_description_falls_through_to_llm(self, mock_review):
+        # Pre-gate fires only on truly empty descriptions. Anything with
+        # content — even 9 chars — falls through to the LLM. The cost
+        # of a false-reject (annoying) is worse than paying for the
+        # call. CI failure 25583150427 caught this: a 19-char fixture
+        # was getting auto-flipped without a fair read.
+        mock_review.return_value = ReviewDecision(
+            looks_like_job_description=True,
+            confidence="low",
+            reasoning="Short but plausible.",
+        )
         jp = self._make_jp(description="Apply now")
         decision = maybe_review_and_persist(jp, last_outcome="created")
 
-        self.assertIsNotNone(decision)
-        self.assertFalse(decision.looks_like_job_description)
+        self.assertTrue(decision.looks_like_job_description)
         jp.refresh_from_db()
-        self.assertFalse(jp.complete)
-        mock_review.assert_not_called()
+        self.assertTrue(jp.complete)
+        mock_review.assert_called_once()
 
     @patch.object(CompletenessReviewer, "review")
     @override_settings()  # placeholder; using monkeypatch on env below
