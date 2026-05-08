@@ -668,6 +668,7 @@ class JobPostSerializer(BaseSerializer):
         "apply_url_status",
         "apply_url_resolved_at",
         "posting_status",
+        "complete",
         "duplicate_of_id",
     ]
     relationships = {

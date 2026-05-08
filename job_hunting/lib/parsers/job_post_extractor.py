@@ -15,10 +15,7 @@ from urllib.parse import urlparse
 
 from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
-from job_hunting.lib.services.application_flow import (
-    _is_thin_description,
-    STUB_MIN_WORDS,
-)
+from job_hunting.lib.services.application_flow import STUB_MIN_WORDS
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 from job_hunting.models import (
     Company,
@@ -388,11 +385,14 @@ class JobPostExtractor:
                     # otherwise a "wasted parse" looks identical to a
                     # successful one (job-posts/1490 inbox bug).
                     self.last_outcome = "force_noop"
+                if not job.complete:
+                    job.complete = True
+                    job.save(update_fields=["complete"])
 
         # Prefer link-based lookup since link is unique. Branch on
-        # stub-vs-full: a thin-description hit is safe to overwrite
-        # ("upgrade the stub"); a full-description hit is a duplicate
-        # and should keep its existing data intact.
+        # complete-vs-not: an incomplete hit is safe to overwrite
+        # ("upgrade the stub"); a complete hit is a duplicate and
+        # should keep its existing data intact.
         link_hit = None
         if job is None and link:
             link_hit = JobPost.objects.filter(link=link).first()
@@ -411,7 +411,7 @@ class JobPostExtractor:
                 link=link, user=user,
             ):
                 pass  # _trust_aware_overwrite set last_outcome and saved
-            elif _is_thin_description(link_hit):
+            elif not link_hit.complete:
                 self.last_outcome = "updated_stub"
                 update_fields = []
                 if validated_data.title and job.title != validated_data.title:
@@ -426,8 +426,13 @@ class JobPostExtractor:
                     if getattr(job, field) != value:
                         setattr(job, field, value)
                         update_fields.append(field)
-                if update_fields:
-                    job.save(update_fields=update_fields)
+                # The graph's ReviewCompleteness gate is the authoritative
+                # signal; flip eagerly here and let the gate flip back to
+                # False if the scraped output still doesn't read like a
+                # job description.
+                job.complete = True
+                update_fields.append("complete")
+                job.save(update_fields=update_fields)
             else:
                 self.last_outcome = "duplicate"
                 # Even on a full-description duplicate, fill any NULL/empty
@@ -479,7 +484,7 @@ class JobPostExtractor:
                 ):
                     pass
                 elif (
-                    _is_thin_description(job)
+                    not job.complete
                     and effective_description
                     and len(effective_description.split()) >= STUB_MIN_WORDS
                 ):
@@ -491,8 +496,9 @@ class JobPostExtractor:
                         if getattr(job, field) != value:
                             setattr(job, field, value)
                             update_fields.append(field)
-                    if update_fields:
-                        job.save(update_fields=update_fields)
+                    job.complete = True
+                    update_fields.append("complete")
+                    job.save(update_fields=update_fields)
                 else:
                     self.last_outcome = "duplicate_via_fingerprint"
                     merge_attrs = {
@@ -643,13 +649,13 @@ class JobPostExtractor:
     ) -> None:
         """Run the DescriptionArbiter and apply the winning description.
 
-        Only fires when the existing description is non-thin and the
-        incoming description is also non-thin. A keep_existing result is
-        a no-op on the job row but always produces an audit record.
+        Only fires when the existing post is flagged complete — an
+        incomplete post should land in the upgrade branch upstream
+        rather than ask the arbiter which description is better. A
+        keep_existing result is a no-op on the job row but always
+        produces an audit record.
         """
-        from job_hunting.lib.services.application_flow import _is_thin_description
-
-        if _is_thin_description(job):
+        if not job.complete:
             return
 
         from job_hunting.lib.parsers.description_arbiter import maybe_arbitrate_and_persist

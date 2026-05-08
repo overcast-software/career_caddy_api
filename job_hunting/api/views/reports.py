@@ -3,7 +3,6 @@ from datetime import date, timedelta
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db.models import Q
-from django.db.models.functions import Length
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -119,12 +118,11 @@ def _apply_report_filters(qs, request):
         # Make the right bound inclusive of the whole day.
         qs = qs.filter(created_at__lt=date_to + timedelta(days=1))
 
-    # Char-length approximation of STUB_MIN_WORDS=60 word threshold. Same
-    # shape as filter[stub] on JobPostViewSet.list.
+    # Filter on JobPost.complete — the explicit boolean replaces the
+    # old word-count approximation. Param name stays `exclude_stubs`
+    # for caller compat; semantically it means "drop incomplete posts".
     if str(params.get("exclude_stubs", "")).lower() in ("1", "true", "yes"):
-        qs = qs.annotate(_desc_len=Length("description")).exclude(
-            Q(description__isnull=True) | Q(description="") | Q(_desc_len__lt=450)
-        )
+        qs = qs.filter(complete=True)
 
     return qs, None
 

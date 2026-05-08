@@ -246,13 +246,15 @@ class TestProcessEvaluation(TestCase):
         self.assertEqual(self.scrape.job_post_id, existing.id)
 
     def test_stub_link_hit_is_upgraded(self):
-        """Stub JobPost at the same link: overwrite its fields in place."""
+        """Incomplete JobPost at the same link: overwrite its fields in place
+        and flip complete=True after the upgrade."""
         company = Company.objects.create(name="Acme Corp")
         existing = JobPost.objects.create(
             title="Stub Title",
             company=company,
             link="https://example.com/job/1",
-            description="short",  # < 60 words → stub
+            description="short",
+            complete=False,
             created_by=self.user,
         )
 
@@ -271,6 +273,7 @@ class TestProcessEvaluation(TestCase):
         self.assertEqual(existing.title, "Real Title")
         self.assertIn("Full description", existing.description)
         self.assertEqual(existing.location, "Remote")
+        self.assertTrue(existing.complete, "upgrade flips complete=True")
         self.scrape.refresh_from_db()
         self.assertEqual(self.scrape.job_post_id, existing.id)
 
@@ -332,8 +335,9 @@ class TestProcessEvaluation(TestCase):
             title="Senior Engineer",
             company=company,
             link="https://email-sourced.example.com/job/old",
-            description="Apply Save Sign in About",  # 5 words → thin
+            description="Apply Save Sign in About",
             location="Stale Location",
+            complete=False,
             created_by=self.user,
         )
 
@@ -409,7 +413,8 @@ class TestProcessEvaluation(TestCase):
             title="Senior Engineer",
             company=company,
             link="https://email-sourced.example.com/job/old",
-            description="five word stub description here",  # 5 words → thin
+            description="five word stub description here",
+            complete=False,
             created_by=self.user,
         )
 
@@ -783,6 +788,7 @@ class TestSourcePreservation(TestCase):
             link="https://example.com/job/1",
             description="stub",
             source="email",
+            complete=False,
             created_by=self.user,
         )
         scrape = Scrape.objects.create(
@@ -1018,7 +1024,7 @@ class TestTrustAwareOverwrite(TestCase):
             remote=True,
         )
 
-    def _make_existing_email_post(self, *, link, description):
+    def _make_existing_email_post(self, *, link, description, complete=True):
         return JobPost.objects.create(
             title="Hallucinated Email Title",
             company=self.email_company,
@@ -1026,6 +1032,7 @@ class TestTrustAwareOverwrite(TestCase):
             description=description,
             location="Wrong Location",
             source="email",
+            complete=complete,
             created_by=self.user,
         )
 
@@ -1098,7 +1105,9 @@ class TestTrustAwareOverwrite(TestCase):
         # $85K..."); other rows might have richer hallucinated bodies.
         mock_analyze.return_value = self.parsed_real
         link = "https://example.com/stub-job/123"
-        existing = self._make_existing_email_post(link=link, description="")
+        existing = self._make_existing_email_post(
+            link=link, description="", complete=False,
+        )
         scrape = Scrape.objects.create(
             url=link,
             status="completed",

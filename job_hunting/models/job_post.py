@@ -80,6 +80,16 @@ class JobPost(GetMixin, models.Model):
         db_index=True,
     )
 
+    # Whether the post is fully fleshed-out and usable. False means
+    # "needs (re-)scraping" — used to gate the from-text dedup bypass
+    # and the extension popup's Send/Open branching. Replaces the
+    # word-count heuristic (_is_thin_description). Three sources flip
+    # to False: cc_auto email pipeline creating thin stubs, user
+    # clicking "Mark incomplete" on the JP detail page, scrape-graph's
+    # ReviewCompleteness rejecting the output. One source flips back
+    # to True: a successful scrape attach via parse_scrape.
+    complete = models.BooleanField(default=True, db_index=True)
+
     # Dedupe fields. Populated in save(); never read or written by the
     # apply-resolver. See models/job_post_dedupe.py.
     canonical_link = models.CharField(
