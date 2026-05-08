@@ -191,17 +191,20 @@ def maybe_review_and_persist(
         return None
 
     desc = (job_post.description or "").strip()
-    if not desc or len(desc) < 50:
-        # Empty/near-empty descriptions don't need an LLM judgement.
-        # The user / agent / extension caller will see complete=False
-        # and re-trigger a scrape.
+    if not desc:
+        # Empty descriptions don't need an LLM judgement — there's
+        # literally nothing to evaluate. The user / agent / extension
+        # caller will see complete=False and re-trigger a scrape.
+        # Short-but-non-empty descriptions fall through to the LLM
+        # so a plausible 30-word stub gets a fair read; the cost of
+        # a false-reject (annoying) outweighs paying for the call.
         if job_post.complete:
             job_post.complete = False
             job_post.save(update_fields=["complete"])
         return ReviewDecision(
             looks_like_job_description=False,
             confidence="high",
-            reasoning="Description is empty or shorter than 50 chars; skipped LLM.",
+            reasoning="Description is empty; skipped LLM.",
         )
 
     decision = (reviewer or CompletenessReviewer()).review(
