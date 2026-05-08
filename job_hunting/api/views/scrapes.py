@@ -833,6 +833,24 @@ class ScrapeViewSet(BaseViewSet):
         user = scrape.created_by
         ok = extractor.process_evaluation(scrape, validated, user=user, force=force)
         scrape.refresh_from_db()
+        # Same final completeness gate parse_scrape runs. Fires for the
+        # agents/ scrape-graph's PersistJobPost path so the ReviewCompleteness
+        # node sees the same JobPost.complete flip as the legacy callers.
+        if ok and scrape.job_post_id:
+            try:
+                from job_hunting.lib.parsers.completeness_reviewer import (
+                    maybe_review_and_persist,
+                )
+                jp = JobPost.objects.filter(pk=scrape.job_post_id).first()
+                if jp is not None:
+                    maybe_review_and_persist(
+                        jp, last_outcome=getattr(extractor, "last_outcome", None),
+                    )
+            except Exception:
+                logger.exception(
+                    "CompletenessReviewer failed for JP %s in persist-extraction; "
+                    "leaving complete flag untouched", scrape.job_post_id,
+                )
         ser = self.get_serializer()
         return Response(
             {
