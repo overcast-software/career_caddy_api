@@ -962,7 +962,39 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
                 note = f"force_updated: refreshed JobPost #{jp_id}"
             else:
                 note = "Parsed successfully"
-            _log_scrape_status(scrape_id, "completed", note=note)
+            # Final gate: does the persisted output actually look like a
+            # job description? Only fires for outcomes that actually
+            # touched the description; pure dedup hits skip the LLM.
+            # On rejection: flip JobPost.complete=False AND mark this
+            # scrape failed (the JP still exists so the URL lookup
+            # works; the user / extension can re-scrape it).
+            review_rejected = False
+            review_reason = None
+            if jp_id:
+                try:
+                    from job_hunting.lib.parsers.completeness_reviewer import (
+                        maybe_review_and_persist,
+                    )
+                    from job_hunting.models import JobPost
+                    jp = JobPost.objects.filter(pk=jp_id).first()
+                    if jp is not None:
+                        decision = maybe_review_and_persist(jp, last_outcome=outcome)
+                        if decision is not None and not decision.looks_like_job_description:
+                            review_rejected = True
+                            review_reason = decision.reasoning
+                except Exception:
+                    logger.exception(
+                        "CompletenessReviewer failed for JP %s; "
+                        "leaving complete flag untouched",
+                        jp_id,
+                    )
+            if review_rejected:
+                _log_scrape_status(
+                    scrape_id, "failed",
+                    note=f"incomplete_output: {review_reason or 'review rejected output'}",
+                )
+            else:
+                _log_scrape_status(scrape_id, "completed", note=note)
         else:
             try:
                 _log_scrape_status(scrape_id, "failed", note="Extraction failed")
