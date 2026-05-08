@@ -5,7 +5,6 @@ from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Q, F, OuterRef, Subquery
-from django.db.models.functions import Length
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -285,25 +284,21 @@ class JobPostViewSet(BaseViewSet):
                 else:
                     qs = qs.none()
 
-        # Stub = thin/empty description. Sankey's stub bucket uses a
-        # word-count threshold (STUB_MIN_WORDS=60); SQL-side we approximate
-        # via char length (~450 chars ≈ 60 words at ~7.5 chars/word incl.
-        # whitespace). Good enough for a list filter; canonical definition
-        # still lives in application_flow._is_thin_description.
+        # filter[complete]=true|false is the canonical signal — backed
+        # by the explicit `JobPost.complete` boolean. filter[stub] stays
+        # as a compatibility alias (frontend list view's "stub" toggle):
+        # filter[stub]=true ⇔ filter[complete]=false. Three sources flip
+        # complete=False: cc_auto email-stub creation, the user clicking
+        # "Mark incomplete", and the scrape-graph's ReviewCompleteness
+        # rejecting the output.
+        complete_filter = request.query_params.get("filter[complete]")
         stub_filter = request.query_params.get("filter[stub]")
-        if stub_filter is not None:
+        if complete_filter is not None:
+            wants_complete = str(complete_filter).lower() in ("1", "true", "yes")
+            qs = qs.filter(complete=wants_complete)
+        elif stub_filter is not None:
             wants_stub = str(stub_filter).lower() in ("1", "true", "yes")
-            annotated = qs.annotate(_desc_len=Length("description"))
-            if wants_stub:
-                qs = annotated.filter(
-                    Q(description__isnull=True)
-                    | Q(description="")
-                    | Q(_desc_len__lt=450)
-                )
-            else:
-                qs = annotated.filter(
-                    description__isnull=False, _desc_len__gte=450
-                ).exclude(description="")
+            qs = qs.filter(complete=not wants_stub)
 
         # Posting status: default-hide closed posts. Pass
         # ?include_closed=true to opt back in (list-view toggle), or

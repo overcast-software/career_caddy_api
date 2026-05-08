@@ -135,14 +135,6 @@ def _app_bucket_sequence(application, now) -> list[str]:
     return sequence
 
 
-def _is_thin_description(post) -> bool:
-    """True when description is empty or has fewer than STUB_MIN_WORDS
-    whitespace tokens. Used inside the unvetted branch to split 'thin
-    junk' (→ stub) from 'full-description but never triaged' (→ rest)."""
-    desc = (post.description or "").strip()
-    return not desc or len(desc.split()) < STUB_MIN_WORDS
-
-
 def _has_score(post, user_id: int | None) -> bool:
     scores = post.scores
     if user_id is not None:
@@ -226,13 +218,13 @@ def build_flow(job_posts_qs, user_id: int | None = None, now=None) -> dict:
         real_apps = [(app, seq) for app, seq in real_apps if seq]
 
         if not real_apps:
-            # Stub terminal = thin-description post that's never been
+            # Stub terminal = post flagged !complete that's never been
             # scored AND never been triaged. Hangs off the scoring hub
             # since that's the downstream side of the chain.
             is_raw_junk = (
                 vet_hub == NODE_UNVETTED
                 and score_hub == NODE_UNSCORED
-                and _is_thin_description(post)
+                and not post.complete
             )
             if is_raw_junk:
                 edge_counts[(hub, BUCKET_STUB)] += 1

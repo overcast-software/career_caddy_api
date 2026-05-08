@@ -144,14 +144,17 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         mock_parse.assert_not_called()
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_stub_duplicate_passes_through_for_upgrade(self, mock_parse):
-        """Thin/empty description = stub. parse_scrape's existing
-        updated_stub branch should still get a chance to fill it in."""
+    def test_incomplete_duplicate_passes_through_for_upgrade(self, mock_parse):
+        """JP flagged complete=False bypasses the 409 — same trust rank
+        and a long description don't matter, only the explicit flag.
+        Replaces the old word-count-based stub bypass."""
         JobPost.objects.create(
             title="Senior Engineer",
             company=self.company,
-            description="",  # stub
+            description=self.LONG_DESC,
             link=self.DUPLICATE_LINK,
+            source="paste",
+            complete=False,
             created_by=self.user,
         )
         resp = self.client.post(

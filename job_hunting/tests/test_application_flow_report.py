@@ -75,10 +75,12 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(self._edge(attrs, "unscored", "no_application"), 1)
 
     def test_thin_unscored_post_is_stub(self):
-        # Thin description + untriaged + no application: job_posts →
-        # unvetted → unscored → stub.
+        # Incomplete + untriaged + no application: job_posts →
+        # unvetted → unscored → stub. Bucket label kept ("stub") for
+        # frontend Sankey continuity; gate is now JobPost.complete.
         JobPost.objects.create(
-            title="Stub", company=self.company, created_by=self.user
+            title="Stub", company=self.company, complete=False,
+            created_by=self.user,
         )
         attrs = self._attrs(self.client.get(URL))
         self.assertEqual(self._edge(attrs, "unvetted", "unscored"), 1)

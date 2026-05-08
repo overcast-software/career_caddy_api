@@ -28,7 +28,6 @@ from job_hunting.models import (
     Scrape,
     ScrapeProfile,
 )
-from job_hunting.lib.services.application_flow import _is_thin_description
 from job_hunting.lib.url_policy import UrlPolicyError, validate_submission_url
 from job_hunting.models.job_post_dedupe import canonicalize_link
 
@@ -604,11 +603,14 @@ class ScrapeViewSet(BaseViewSet):
         status='pending' transitions through 'extracting' → terminal inside
         the daemon thread parse_scrape spawns.
 
-        Short-circuits with 409 when `link` already maps to a non-stub
-        JobPost — re-parsing a fully-extracted post wastes an LLM call
-        and loses the user's existing data. Stubs (thin/empty
-        description) still pass through so parse_scrape can upgrade
-        them in place. Set `force=true` in the body to override.
+        Short-circuits with 409 when `link` already maps to a JobPost
+        with `complete=True` — re-parsing a fully-extracted post wastes
+        an LLM call and loses the user's existing data. Posts flagged
+        `complete=False` (by cc_auto email-stub creation, the user
+        clicking "Mark incomplete", or the scrape-graph's
+        ReviewCompleteness rejecting the previous output) pass through
+        so parse_scrape can upgrade them in place. Set `force=true` in
+        the body to override the 409 unconditionally.
         """
         data = request.data if isinstance(request.data, dict) else {}
         text = (data.get("text") or "").strip()
@@ -680,11 +682,12 @@ class ScrapeViewSet(BaseViewSet):
             # the existing post's source (e.g. extension overwriting an
             # email-pipeline hallucination), let it through — parse_scrape
             # will overwrite fields in place and write an audit row. The
-            # 409 only fires when the new push is same-or-lower trust.
+            # 409 only fires when the new push is same-or-lower trust
+            # AND the existing post is flagged complete.
             from job_hunting.models.job_post_dedupe import source_trust
             if (
                 existing
-                and not _is_thin_description(existing)
+                and existing.complete
                 and source_trust(source) <= source_trust(existing.source)
             ):
                 return Response(
