@@ -266,6 +266,10 @@
     },
     {
       "from": "PersistScrape",
+      "to": "ResolveApplyUrl"
+    },
+    {
+      "from": "PersistScrape",
       "to": "StartExtract"
     },
     {

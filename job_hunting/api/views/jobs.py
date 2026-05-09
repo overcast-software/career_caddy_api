@@ -755,6 +755,64 @@ class JobPostViewSet(BaseViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    @action(detail=True, methods=["post"], url_path="resolve-and-dedupe")
+    def resolve_and_dedupe(self, request, pk=None):
+        """Staff-only: kick off a browser-driven scrape that resolves
+        redirects + captures the apply URL, but skips LLM extraction.
+
+        Creates a Scrape with ``skip_extract=True, status="hold"`` linked
+        to this JobPost and pointing at ``self.link``. The hold-poller
+        picks it up and the scrape-graph runs Navigate → ResolveFinalUrl
+        → CheckLinkDedup → (page-load) → ResolveApplyUrl → End. If the
+        resolved URL canonical-matches an existing JobPost, the
+        DuplicateShortCircuit branch fires (existing graph behavior) and
+        the new scrape attaches there. Otherwise the scrape ends with
+        ``apply_url`` set on the Scrape and no extraction performed —
+        the originating JobPost's fields are intentionally untouched.
+
+        Use case: a tracker-URL stub like ZipRecruiter ``/km/<token>``
+        whose canonical_link can't be derived without a browser fetch
+        that follows the JS / meta-refresh redirect. Combined with
+        parse_scrape's canonical_link OR-leg dedup, the resulting child
+        scrape collapses onto the canonical JobPost row automatically.
+
+        Returns the new Scrape so the client can poll for terminal."""
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Staff only"}]}, status=403
+            )
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not obj.link:
+            return Response(
+                {"errors": [{
+                    "detail": "JobPost has no link to resolve",
+                    "code": "no_link",
+                }]},
+                status=400,
+            )
+
+        scrape = Scrape.objects.create(
+            url=obj.link,
+            status="hold",
+            created_by=request.user,
+            job_post=obj,
+            company=obj.company if obj.company_id else None,
+            source="manual",
+            skip_extract=True,
+        )
+        from job_hunting.lib.scraper import _log_scrape_status
+        _log_scrape_status(
+            scrape.id, "hold", note="resolve-and-dedupe (staff)"
+        )
+
+        scr_ser = ScrapeSerializer()
+        return Response(
+            {"data": scr_ser.to_resource(scrape)},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
     @extend_schema(
         tags=["Job Posts"],
         summary="Nuclear delete — remove job post and ALL child records",
