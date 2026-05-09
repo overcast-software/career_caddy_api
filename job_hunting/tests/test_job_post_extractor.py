@@ -283,6 +283,54 @@ class TestProcessEvaluation(TestCase):
         extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
         self.assertEqual(extractor.last_outcome, "created")
 
+    def test_canonical_link_hit_upgrades_email_stub_at_redirected_url(self):
+        """jp 1918 / jp 1922 incident regression: an extension push at the
+        canonical /jobs/view/<id>/ URL must dedup against an email-stub
+        whose raw link is /comm/jobs/view/<id>/ (the form LinkedIn email
+        delivers and then redirects). Pre-fix link_hit lookup only
+        compared `link` for equality, missing the canonical_link match,
+        so the upgrade-the-stub branch was bypassed and parse_scrape
+        forked a new JobPost via the (title, company) get_or_create
+        cold path. With the canonical_link OR-leg in place the existing
+        stub gets upgraded in place — no fork."""
+        stub = JobPost.objects.create(
+            title="Senior Software Engineer, Security",
+            company=None,  # email stub: title only, no company yet
+            link="https://www.linkedin.com/comm/jobs/view/4370923838/",
+            canonical_link="https://www.linkedin.com/jobs/view/4370923838/",
+            source="email",
+            complete=False,
+            created_by=self.user,
+        )
+
+        # Extension's resent scrape lands at the redirected canonical URL.
+        self.scrape.url = "https://www.linkedin.com/jobs/view/4370923838/"
+        self.scrape.source = "extension"
+        self.scrape.save()
+        self.parsed_data.title = "Senior Software Engineer, Security"
+        self.parsed_data.company_name = "Teleport"
+        self.parsed_data.company_display_name = "Teleport"
+        self.parsed_data.description = (
+            "Unified Identity Securing Classic and AI Infrastructure. " * 20
+        )
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(
+            self.scrape, self.parsed_data, user=self.user,
+        )
+
+        self.assertEqual(
+            JobPost.objects.count(), 1,
+            "must upgrade the email stub in place, not fork a new JP",
+        )
+        stub.refresh_from_db()
+        self.assertTrue(stub.complete, "upgrade flips complete=True")
+        self.assertIn("Unified Identity", stub.description or "")
+        self.assertIsNotNone(stub.company_id, "company linked on upgrade")
+        self.assertEqual(stub.company.name, "Teleport")
+        self.scrape.refresh_from_db()
+        self.assertEqual(self.scrape.job_post_id, stub.id)
+
     def test_duplicate_full_description_merges_empty_company(self):
         """Hold-poller scrape lands on existing full-description post with
         NULL company. Pre-merge code dropped the freshly-extracted company

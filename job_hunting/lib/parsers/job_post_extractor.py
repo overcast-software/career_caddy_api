@@ -13,6 +13,8 @@ from pydantic_ai.providers.ollama import OllamaProvider
 
 from urllib.parse import urlparse
 
+from django.db.models import Q
+
 from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 from job_hunting.lib.services.application_flow import STUB_MIN_WORDS
@@ -24,7 +26,7 @@ from job_hunting.models import (
     JobPostOverwriteDecision,
     Scrape,
 )
-from job_hunting.models.job_post_dedupe import source_trust
+from job_hunting.models.job_post_dedupe import canonicalize_link, source_trust
 
 logger = logging.getLogger(__name__)
 
@@ -393,9 +395,24 @@ class JobPostExtractor:
         # complete-vs-not: an incomplete hit is safe to overwrite
         # ("upgrade the stub"); a complete hit is a duplicate and
         # should keep its existing data intact.
+        #
+        # Match on raw link OR canonical_link, mirroring the from-text
+        # endpoint's dedup query (scrapes.py). Without the canonical
+        # leg, a /comm/jobs/view/ email-stub is invisible to a
+        # /jobs/view/ extension push (LinkedIn redirects the email
+        # form to the canonical), and the upgrade-the-stub branch
+        # is bypassed — extractor falls through to get_or_create on
+        # (title, company), which forks a new JobPost when the
+        # extractor finds the company but the existing stub had
+        # company=NULL. jp 1918 / jp 1922 incident (2026-05-08).
         link_hit = None
         if job is None and link:
-            link_hit = JobPost.objects.filter(link=link).first()
+            canonical = canonicalize_link(link)
+            link_hit = (
+                JobPost.objects
+                .filter(Q(link=link) | Q(canonical_link=canonical))
+                .first()
+            )
         if link_hit is not None:
             job = link_hit
             # Trust-rank overwrite first: extension > paste > scrape >
@@ -624,6 +641,15 @@ class JobPostExtractor:
         # next ranking comparison reads the new (higher) trust level.
         diff["source"] = {"before": existing_source, "after": new_source}
         job.source = new_source
+
+        # Mirror the updated_stub branch's eager flip: a higher-trust
+        # source overwriting an email/scrape stub fills the fields, so
+        # the post is no longer "incomplete" by definition. ReviewCompleteness
+        # remains authoritative and will flip back to False if the
+        # parsed output still doesn't read like a job description.
+        if not job.complete:
+            diff["complete"] = {"before": False, "after": True}
+            job.complete = True
 
         job.save()
 
