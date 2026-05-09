@@ -63,6 +63,17 @@ class Scrape(GetMixin, models.Model):
     #     "tag": "a", "score": 0.8, "reason": "href contains 'apply'"}]
     # Capture-only — promotion is a separate manual/automated step.
     apply_candidates = models.JSONField(null=True, blank=True)
+    # When True, the scrape-graph runs Navigate → ResolveFinalUrl →
+    # CheckLinkDedup → (page-load) → ResolveApplyUrl → End and SKIPS
+    # the StartExtract → Tier* → PersistJobPost → ReviewCompleteness →
+    # UpdateProfile chain. Used by the staff "Resolve & dedupe" action
+    # on jp.edit: kicks off a real browser fetch to settle JS / meta-
+    # refresh redirects (e.g. ZipRecruiter /km/<token>) and capture the
+    # apply destination, but does not LLM-extract or overwrite the
+    # originating JobPost. CheckLinkDedup → DuplicateShortCircuit still
+    # fires on canonical-link match, which is the load-bearing dedupe
+    # mechanic for tracker-URL stubs.
+    skip_extract = models.BooleanField(default=False)
 
     class Meta:
         db_table = "scrape"
