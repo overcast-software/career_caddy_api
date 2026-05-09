@@ -482,6 +482,24 @@ class JobPostViewSet(BaseViewSet):
                     status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
 
+        # Inbound `complete` gating (Posture E). cc_auto's email pipeline
+        # creates thin stubs (title + company + link, no description) and
+        # declares complete=False up front so the post enters the existing
+        # incomplete-recovery path. Honor only when the source is at or
+        # below the email trust tier — extension/scrape data is meant to be
+        # authoritative and an inbound False from them is a bug or attack.
+        # Inbound True is never honored: that flip is the api's job
+        # (parse_scrape / ReviewCompleteness), not an external client's.
+        if "complete" in attrs:
+            from job_hunting.models.job_post_dedupe import (
+                SOURCE_TRUST,
+                source_trust,
+            )
+            inbound = attrs["complete"]
+            src = attrs.get("source") or "manual"
+            if not (inbound is False and source_trust(src) <= SOURCE_TRUST["email"]):
+                attrs.pop("complete", None)
+
         from job_hunting.models import JobPostDiscovery
 
         def _record_discovery(post):
