@@ -1103,7 +1103,28 @@ class ScrapeViewSet(BaseViewSet):
         from job_hunting.lib.screenshot_store import ScreenshotStore
         store = ScreenshotStore(settings.SCREENSHOT_DIR)
         files = store.list_for_scrape(int(pk))
-        resp = Response({"data": files})
+        # JSON:API resource objects. There is no DB row backing a
+        # screenshot — the filename is unique within a scrape's dir,
+        # so we use a composite "<scrape_id>/<filename>" id to keep
+        # store identity stable across multiple scrapes.
+        data = [
+            {
+                "type": "screenshot",
+                "id": f"{pk}/{f['filename']}",
+                "attributes": {
+                    "filename": f["filename"],
+                    "size": f.get("size"),
+                    "taken_at": f.get("taken_at"),
+                },
+                "relationships": {
+                    "scrape": {
+                        "data": {"type": "scrape", "id": str(pk)}
+                    },
+                },
+            }
+            for f in files
+        ]
+        resp = Response({"data": data})
         # The poller writes screenshots mid-lifecycle; any cached empty list
         # would persist until the user hard-refreshes. Force revalidation
         # by telling browsers/proxies not to store this response.

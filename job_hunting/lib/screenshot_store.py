@@ -1,5 +1,6 @@
 """Screenshot storage abstraction. Local disk now, S3 later."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -17,14 +18,26 @@ class ScreenshotStore:
         self.base_dir = Path(base_dir)
 
     def list_for_scrape(self, scrape_id: int) -> list[dict]:
-        """Return [{filename}] for a scrape's screenshots."""
+        """Return [{filename, size, taken_at}] for a scrape's screenshots.
+
+        ``size`` is the file size in bytes; ``taken_at`` is the file's
+        modification time as an ISO-8601 UTC string. Both fields are
+        cheap stat() reads — no PNG parsing.
+        """
         scrape_dir = self.base_dir / str(scrape_id)
         if not scrape_dir.is_dir():
             return []
-        return [
-            {"filename": f.name}
-            for f in sorted(scrape_dir.glob("*.png"))
-        ]
+        out = []
+        for f in sorted(scrape_dir.glob("*.png")):
+            try:
+                st = f.stat()
+                taken_at = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+                size = st.st_size
+            except OSError:
+                taken_at = None
+                size = None
+            out.append({"filename": f.name, "size": size, "taken_at": taken_at})
+        return out
 
     def read(self, scrape_id: int, filename: str) -> Path | None:
         """Return full path if file exists, None otherwise."""
