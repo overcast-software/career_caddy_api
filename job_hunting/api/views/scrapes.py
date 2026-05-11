@@ -1001,7 +1001,14 @@ class ScrapeViewSet(BaseViewSet):
     def graph_trace(self, request, pk=None):
         """Ordered ScrapeStatus rows with graph fields for the force-
         layout UI. Includes the source_scrape chain so a tracker URL
-        and its canonical child render as one path."""
+        and its canonical child render as one path.
+
+        Returns JSON:API ``scrape-status`` resources (same shape as
+        ``/scrape-statuses/``) so Ember Data can ingest the rows via
+        ``store.query('scrape-status', {scrape_id})``. ``meta.chain``
+        carries the parent-scrape lineage the UI needs to render the
+        redirect story; it can't be modelled as resource attributes
+        because each chain entry is a Scrape, not a ScrapeStatus."""
         scrape = Scrape.objects.filter(pk=pk).first()
         if not scrape:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -1020,24 +1027,58 @@ class ScrapeViewSet(BaseViewSet):
         rows = list(
             ScrapeStatus.objects
             .filter(scrape_id__in=ids, graph_node__isnull=False)
+            .select_related("status")
             .order_by("scrape_id", "created_at", "id")
         )
         data = [
             {
-                "scrape_id": r.scrape_id,
-                "graph_node": r.graph_node,
-                "graph_payload": r.graph_payload,
-                "note": r.note,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "type": "scrape-status",
+                "id": str(r.id),
+                "attributes": {
+                    "logged_at": r.logged_at.isoformat() if r.logged_at else None,
+                    "note": r.note,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "graph_node": r.graph_node,
+                    "graph_payload": r.graph_payload,
+                },
+                "relationships": {
+                    "scrape": {"data": {"type": "scrape", "id": str(r.scrape_id)}},
+                    "status": {
+                        "data": {"type": "status", "id": str(r.status_id)}
+                        if r.status_id
+                        else None
+                    },
+                },
             }
             for r in rows
         ]
-        return Response({
+        # Side-load referenced `status` resources so Ember Data can
+        # resolve the relationship without a follow-up request — same
+        # `included` pattern /scrape-statuses/ uses.
+        included = []
+        seen_status_ids = set()
+        for r in rows:
+            if r.status_id and r.status_id not in seen_status_ids:
+                seen_status_ids.add(r.status_id)
+                included.append({
+                    "type": "status",
+                    "id": str(r.status_id),
+                    "attributes": {
+                        "status": r.status.status,
+                        "status_type": r.status.status_type,
+                    },
+                })
+        payload = {
             "data": data,
             "meta": {
-                "chain": [{"id": s.id, "url": s.url, "source": s.source} for s in chain],
+                "chain": [
+                    {"id": s.id, "url": s.url, "source": s.source} for s in chain
+                ],
             },
-        })
+        }
+        if included:
+            payload["included"] = included
+        return Response(payload)
 
     @action(detail=True, methods=["get", "post"], url_path="screenshots")
     def screenshots(self, request, pk=None):
