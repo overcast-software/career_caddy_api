@@ -218,7 +218,11 @@ class GraphTransitionTests(TestCase):
         body = resp.json()
         chain_ids = [c["id"] for c in body["meta"]["chain"]]
         self.assertEqual(chain_ids, [self.scrape.id, child.id])
-        nodes = [row["graph_node"] for row in body["data"]]
+        for row in body["data"]:
+            self.assertEqual(row["type"], "scrape-status")
+            self.assertIn("graph_node", row["attributes"])
+            self.assertIn("scrape", row["relationships"])
+        nodes = [row["attributes"]["graph_node"] for row in body["data"]]
         self.assertIn("ResolveFinalUrl", nodes)
         self.assertIn("CheckLinkDedup", nodes)
 
