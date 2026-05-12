@@ -212,7 +212,19 @@ class ApplicationPromptBuilder:
 
         # --- Front matter: what is being asked ---
 
-        # 1. Instructions (preamble)
+        # 1. User Override (caller-supplied instructions, take priority).
+        # Put this BEFORE the default preamble so the model treats it as
+        # the controlling directive — a trailing "Additional Instructions"
+        # block loses to a strong leading system message that says e.g.
+        # "OUTPUT FORMAT — strictly plain text".
+        if injected_prompt:
+            sections.append(
+                "## User Instructions (PRIORITY — these override the default "
+                "behavior and output format guidance below)\n"
+                f"{injected_prompt}"
+            )
+
+        # 2. Instructions (default preamble)
         if instructions is None:
             instructions = (
                 "Answer ONLY the question in the '## Question to Answer' section below. "
@@ -220,7 +232,7 @@ class ApplicationPromptBuilder:
                 "your answer, but do NOT answer any questions from the Q&A History section. "
                 "Be concise, truthful, and specific to the job.\n"
                 "\n"
-                "OUTPUT FORMAT — strictly plain text:\n"
+                "OUTPUT FORMAT — strictly plain text (unless the User Instructions above say otherwise):\n"
                 "- No markdown, no headings (do NOT prefix with '## Answer' or any header).\n"
                 "- No bullet lists, numbered lists, bold, italic, code fences, or block quotes.\n"
                 "- Use plain sentences and paragraphs separated by a single blank line.\n"
@@ -228,10 +240,6 @@ class ApplicationPromptBuilder:
                 "  anything that isn't plain prose becomes literal punctuation there."
             )
         sections.append(instructions)
-
-        # 2. Injected prompt (caller-supplied additional instructions)
-        if injected_prompt:
-            sections.append(f"## Additional Instructions\n{injected_prompt}")
 
         # 3. Question to Answer
         question_content = self._safe_str(getattr(context["question"], "content", ""))
