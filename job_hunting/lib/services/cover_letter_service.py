@@ -1,5 +1,4 @@
 from jinja2 import Environment, FileSystemLoader
-from job_hunting.models import CoverLetter
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -12,7 +11,16 @@ class CoverLetterService:
         self._resume_markdown = resume_markdown
         self._user_id = user_id
 
-    def generate_cover_letter(self, injected_prompt=None):
+    def generate_cover_letter(self, injected_prompt=None) -> str:
+        """Generate cover-letter text from the configured job_post + resume.
+
+        Returns the content string only. Persistence is the caller's
+        responsibility — the POST view pre-creates a pending CoverLetter
+        row and updates it with this content on completion. An earlier
+        version of this method did its own get_or_create() here, which
+        created a second row alongside the view's pending one whenever
+        the generated content didn't match an existing empty row.
+        """
         env = Environment(loader=FileSystemLoader("templates"), autoescape=False)  # nosec B701 - text/LLM prompt templates, not HTML
         tmpl = env.get_template("cover_letter_prompt.j2")
 
@@ -54,12 +62,4 @@ class CoverLetterService:
             ],
             temperature=0.7,
         )
-        cover_letter_content = completion.choices[0].message.content.strip()
-
-        cover_letter, created = CoverLetter.objects.get_or_create(
-            content=cover_letter_content,
-            user_id=user_id,
-            resume_id=resume_id,
-            job_post_id=self.job_post.id,
-        )
-        return cover_letter
+        return completion.choices[0].message.content.strip()

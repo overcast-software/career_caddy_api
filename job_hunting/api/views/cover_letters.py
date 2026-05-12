@@ -355,9 +355,11 @@ class CoverLetterViewSet(BaseViewSet):
                 cl_service = CoverLetterService(
                     client, job_post, resume=resume, resume_markdown=career_markdown, user_id=user_id
                 )
-                result = cl_service.generate_cover_letter(injected_prompt=captured_injected_prompt)
+                generated_content = cl_service.generate_cover_letter(
+                    injected_prompt=captured_injected_prompt
+                )
                 CoverLetter.objects.filter(pk=cl_id).update(
-                    content=result.content, status="completed"
+                    content=generated_content, status="completed"
                 )
             except Exception:
                 CoverLetter.objects.filter(pk=cl_id).update(status="failed")
