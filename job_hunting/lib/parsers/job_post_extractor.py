@@ -315,17 +315,38 @@ class JobPostExtractor:
             and getattr(validated_data, "closed_evidence", None)
         ):
             evidence = (validated_data.closed_evidence or "").strip()
-            if evidence and evidence in raw_source:
+            # Two-gate validation: the quote must (a) appear verbatim in
+            # job_content (anti-hallucination) AND (b) itself match a
+            # curated closed-state phrase from text_signals._CLOSED_PHRASES
+            # (semantic gate). Without (b), the LLM could quote any short
+            # snippet of UI chrome — "Promoted by hirer", "Save", etc. —
+            # and silently flip the post to closed. jp 1532 incident
+            # (2026-05-01): a degraded LinkedIn capture (756 chars,
+            # mostly nav chrome, no closed banner) flipped to closed
+            # because the substring guard alone accepted whatever the
+            # LLM emitted as a "quote". The curated phrase list is the
+            # same one that path #1 uses, so the two channels are now
+            # symmetric: a quote that wouldn't trip path #1 mustn't
+            # trip path #2 either.
+            if evidence and evidence in raw_source and detect_posting_status(evidence) == "closed":
                 detected_status = "closed"
                 logger.info(
                     "JobPostExtractor: closed_evidence substantiated for "
                     "scrape=%s (quote=%r)", scrape.id, evidence[:80],
                 )
-            elif evidence:
+            elif evidence and evidence not in raw_source:
                 logger.warning(
                     "JobPostExtractor: discarding unsubstantiated "
                     "closed_evidence for scrape=%s — quote not present in "
                     "job_content (quote=%r)",
+                    scrape.id, evidence[:80],
+                )
+            elif evidence:
+                logger.warning(
+                    "JobPostExtractor: discarding closed_evidence for "
+                    "scrape=%s — quote present in job_content but does "
+                    "not match any curated closed-state phrase "
+                    "(quote=%r)",
                     scrape.id, evidence[:80],
                 )
         if detected_status is not None:
@@ -408,9 +429,16 @@ class JobPostExtractor:
         link_hit = None
         if job is None and link:
             canonical = canonicalize_link(link)
+            # Order complete=True first when multiple JPs share the
+            # canonical_link (link is unique, but canonical_link isn't):
+            # the complete row is the post the user cares about, and an
+            # unordered .first() picking the stub would route through
+            # the "updated_stub" path and silently smear into the wrong
+            # JP. Mirrors the same defensive ordering in from-text.
             link_hit = (
                 JobPost.objects
                 .filter(Q(link=link) | Q(canonical_link=canonical))
+                .order_by("-complete", "id")
                 .first()
             )
         if link_hit is not None:

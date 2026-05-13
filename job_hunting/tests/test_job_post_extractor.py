@@ -1003,6 +1003,48 @@ class TestClosedBannerHallucinationGuard(TestCase):
         self.assertEqual(job.posting_status, "closed")
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_verbatim_quote_must_match_curated_closed_phrase(self, mock_analyze):
+        """jp 1532 incident (2026-05-01): a degraded LinkedIn capture
+        (756 chars of mostly nav chrome — "Promoted by hirer · Responses
+        managed off LinkedIn", "Save", "Apply", footer links) flipped
+        the post to closed because the substring guard alone accepted
+        whatever short snippet the LLM emitted as the "closed quote".
+        Two-gate fix: the quote must (a) appear verbatim AND (b) match
+        a curated closed-state phrase.
+        """
+        # Realistic LinkedIn-chrome page text — no closed phrase anywhere.
+        thin_chrome_page = (
+            "0 notifications\nSkip to main content\nHome\nMy Network\n"
+            "Jobs\nGitHub\n\nSoftware Engineer II, Security\n\n"
+            "United States · Reposted 1 day ago · Over 100 people clicked apply\n\n"
+            "Promoted by hirer · Responses managed off LinkedIn\n\n"
+            "Remote\nFull-time\nApply\nSave\n"
+        )
+        # An LLM-emitted "quote" that IS verbatim in the page but does
+        # NOT semantically express closed state. Pre-fix this would have
+        # passed the substring check and silently flipped the post.
+        bogus_evidence = "Promoted by hirer · Responses managed off LinkedIn"
+        mock_analyze.return_value = ParsedJobData(
+            title="Software Engineer II, Security",
+            company_name="GitHub",
+            description="Software Engineer II, Security at GitHub.",
+            closed_evidence=bogus_evidence,
+        )
+        scrape = Scrape.objects.create(
+            url="https://www.linkedin.com/jobs/view/4386478229/",
+            status="completed",
+            job_content=thin_chrome_page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        # Quote was verbatim but not a curated closed phrase → must
+        # remain None (post stays open).
+        self.assertIsNone(job.posting_status)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
     def test_strip_closed_banner_prefix_idempotent(self, mock_analyze):
         # No evidence, no source phrase — but the LLM still injected the
         # prefix. _strip_closed_banner_prefix must remove it.

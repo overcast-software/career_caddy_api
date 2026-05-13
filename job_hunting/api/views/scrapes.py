@@ -672,10 +672,20 @@ class ScrapeViewSet(BaseViewSet):
             # legacy /jobs/view/ row (and vice versa). The canonical
             # leg uses the host's ScrapeProfile.url_rewrites; the raw
             # leg covers rows whose canonical_link wasn't backfilled.
+            #
+            # Order matters: link is unique, but canonical_link is not.
+            # If a stub /comm/ row and a complete /jobs/view/ row both
+            # canonicalize to the same URL, an unordered .first() can
+            # pick the stub (whose `complete=False` short-circuits the
+            # 409 below) and silently let a duplicate scrape through.
+            # Order complete=True first so the 409 gate sees the post
+            # the user actually cares about. JP 1532 / scrape 414
+            # incident (2026-05-13).
             canonical = canonicalize_link(link)
             existing = (
                 JobPost.objects
                 .filter(Q(link=link) | Q(canonical_link=canonical))
+                .order_by("-complete", "id")
                 .first()
             )
             # Trust-aware short-circuit: if the incoming push outranks
