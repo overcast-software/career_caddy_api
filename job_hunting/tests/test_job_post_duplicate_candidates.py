@@ -170,3 +170,48 @@ class TestDuplicateCandidates(TestCase):
         self.assertEqual(attrs["frontend_url"], f"/job-posts/{b.id}")
         self.assertIn(attrs["confidence"], ("high", "medium", "low"))
         self.assertIsInstance(attrs["match_signals"], list)
+
+    def test_jp_payload_always_emits_duplicate_candidates_links_related(self):
+        # Without this block, jp.show's `await jp.hasMany('duplicateCandidates')
+        # .reload()` silently no-ops in Ember Data — no link to follow, so
+        # findHasMany is never invoked. Banner stays empty even when the
+        # /duplicate-candidates/ endpoint would have returned candidates.
+        jp = JobPost.objects.create(
+            title="Engineer", company=self.snbl, created_by=self.user
+        )
+        resp = self.client.get(f"/api/v1/job-posts/{jp.id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        rels = resp.json()["data"]["relationships"]
+        self.assertIn("duplicate-candidates", rels)
+        self.assertEqual(
+            rels["duplicate-candidates"]["links"]["related"],
+            f"/api/v1/job-posts/{jp.id}/duplicate-candidates",
+        )
+
+    def test_include_duplicate_candidates_sideloads_resources(self):
+        # The cleaner one-roundtrip path: jp.show route uses
+        # `?include=duplicate-candidates`. Framework emits both data linkage
+        # and top-level `included[]` in the same payload so Ember Data can
+        # populate the hasMany without a second request.
+        a = JobPost.objects.create(
+            title="Engineer", company=self.snbl, created_by=self.user
+        )
+        b = JobPost.objects.create(
+            title="Engineer", company=self.snbl, created_by=self.user
+        )
+        resp = self.client.get(
+            f"/api/v1/job-posts/{a.id}/?include=duplicate-candidates"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        rels = body["data"]["relationships"]["duplicate-candidates"]
+        self.assertEqual(
+            rels["data"], [{"type": "job-post-duplicate-candidate", "id": str(b.id)}]
+        )
+        included = body.get("included", [])
+        cand_resources = [
+            r for r in included if r["type"] == "job-post-duplicate-candidate"
+        ]
+        self.assertEqual(len(cand_resources), 1)
+        self.assertEqual(cand_resources[0]["id"], str(b.id))
+        self.assertEqual(cand_resources[0]["attributes"]["title"], "Engineer")

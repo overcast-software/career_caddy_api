@@ -32,6 +32,7 @@ from ._schema import (
 )
 from ..serializers import (
     JobPostSerializer,
+    JobPostDuplicateCandidateSerializer,
     ScoreSerializer,
     ScrapeSerializer,
     CoverLetterSerializer,
@@ -40,6 +41,7 @@ from ..serializers import (
     QuestionSerializer,
     StatusSerializer,
     JobApplicationStatusSerializer,
+    compute_duplicate_candidates,
 )
 from job_hunting.api.permissions import IsGuestReadOnly
 from job_hunting.lib.ai_client import get_client
@@ -891,102 +893,12 @@ class JobPostViewSet(BaseViewSet):
         if not post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        # Visibility scope: mirror list() so non-staff don't learn about
-        # posts they otherwise wouldn't see.
-        if request.user.is_staff:
-            visible = JobPost.objects.all()
-        else:
-            visible = JobPost.objects.filter(
-                Q(created_by_id=request.user.id) |
-                Q(applications__user_id=request.user.id) |
-                Q(scores__user_id=request.user.id) |
-                Q(scrapes__created_by_id=request.user.id) |
-                Q(discoveries__user_id=request.user.id)
-            ).distinct()
-
-        # Walk the duplicate chain so we never recommend a post this one
-        # already points at (or vice-versa) — that's a settled relationship.
-        excluded_ids = {post.id}
-        if post.duplicate_of_id:
-            excluded_ids.add(post.duplicate_of_id)
-        excluded_ids.update(
-            JobPost.objects.filter(duplicate_of_id=post.id).values_list("id", flat=True)
-        )
-        visible = visible.exclude(id__in=excluded_ids)
-
-        candidates = {}  # id -> {post, signals: set, confidence: str}
-
-        def _add(hit, signal, confidence):
-            if hit.id in excluded_ids:
-                return
-            entry = candidates.setdefault(
-                hit.id,
-                {"post": hit, "signals": set(), "confidence": "low"},
-            )
-            entry["signals"].add(signal)
-            # Keep the strongest confidence we've seen for this candidate.
-            order = {"low": 0, "medium": 1, "high": 2}
-            if order[confidence] > order[entry["confidence"]]:
-                entry["confidence"] = confidence
-
-        # Signal 1: canonical_link match (high confidence — same URL).
-        if post.canonical_link:
-            for hit in visible.filter(canonical_link=post.canonical_link):
-                _add(hit, "canonical_link", "high")
-
-        # Signal 2: content_fingerprint match (high confidence — same
-        # company + normalized title + location). Mirrors find_duplicate
-        # but unbounded by window so older true-dupes still surface.
-        if post.content_fingerprint:
-            for hit in visible.filter(content_fingerprint=post.content_fingerprint):
-                _add(hit, "fingerprint", "high")
-
-        # Signal 3: title-suffix drift within the same company. The case
-        # we keep eating: jp 999 'START UP BUS DEV ... (Bi-Lingual)' vs
-        # jp 1428 'START UP BUS DEV ... (Bi-Lingual) 75-100% FTE' —
-        # different fingerprints because of the suffix, same job. Cheap
-        # SQL: prefix or suffix overlap on (company, title), trim noise
-        # in Python after the DB pull. Skip when no company.
-        if post.company_id and post.title:
-            t = post.title.strip()
-            same_company = visible.filter(company_id=post.company_id).exclude(
-                title__iexact=t
-            )
-            for hit in same_company[:200]:  # cap the prefix scan
-                ht = (hit.title or "").strip()
-                if not ht:
-                    continue
-                a, b = t.lower(), ht.lower()
-                if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
-                    _add(hit, "title_similarity", "medium")
-
-        # Stable order: confidence desc, then created_at desc, capped.
-        order = {"high": 2, "medium": 1, "low": 0}
-        ordered = sorted(
-            candidates.values(),
-            key=lambda c: (
-                -order[c["confidence"]],
-                -(c["post"].created_at.timestamp() if c["post"].created_at else 0),
-            ),
-        )[:10]
-
-        data = [
-            {
-                "type": "job-post-duplicate-candidate",
-                "id": str(c["post"].id),
-                "attributes": {
-                    "title": c["post"].title,
-                    "company_name": (
-                        c["post"].company.name if c["post"].company_id else None
-                    ),
-                    "match_signals": sorted(c["signals"]),
-                    "confidence": c["confidence"],
-                    "frontend_url": f"/job-posts/{c['post'].id}",
-                },
-            }
-            for c in ordered
-        ]
-        return Response({"data": data})
+        # Computation lives in serializers.compute_duplicate_candidates so the
+        # ?include=duplicate-candidates sideload path on jp.show fetches the
+        # exact same set in the same shape — one source of truth.
+        items = compute_duplicate_candidates(post, request)
+        ser = JobPostDuplicateCandidateSerializer()
+        return Response({"data": [ser.to_resource(it) for it in items]})
 
     @extend_schema(
         tags=["Job Posts"],
