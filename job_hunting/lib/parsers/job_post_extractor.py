@@ -981,96 +981,125 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
         from job_hunting.lib.scraper import _log_scrape_status
         from django.contrib.auth import get_user_model
 
-        scrape = ScrapeModel.objects.filter(pk=scrape_id).first()
-        if not scrape:
-            logger.warning("parse_scrape: scrape_id=%s not found", scrape_id)
-            return
-        if scrape.job_post_id and not force:
-            logger.info("parse_scrape: scrape_id=%s already has job_post, skipping", scrape_id)
-            return
-        if not (scrape.job_content or scrape.html):
-            logger.warning("parse_scrape: scrape_id=%s has no content", scrape_id)
-            return
-
-        user = None
-        if user_id:
-            User = get_user_model()
-            user = User.objects.filter(pk=user_id).first()
-        if not user:
-            user = scrape.created_by
-
-        _log_scrape_status(scrape_id, "extracting")
-
-        parser = JobPostExtractor()
-        success = False
+        # Safety net: guarantee the scrape leaves `extracting` /
+        # `updating_profile` no matter what blows up below — uncaught
+        # exception, container restart racing the LLM call, OOM kill of
+        # _update_scrape_profile, etc. The frontend polls scrape.status
+        # to terminal; a stuck row hangs the user's UI forever.
+        # Companion: management command sweep_stuck_extracting cleans up
+        # the rare cases where finally itself can't run (SIGKILL).
+        reached_terminal = False
         try:
-            success = bool(parser.parse(scrape, user=user, force=force))
-        except Exception:
-            logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
+            scrape = ScrapeModel.objects.filter(pk=scrape_id).first()
+            if not scrape:
+                logger.warning("parse_scrape: scrape_id=%s not found", scrape_id)
+                reached_terminal = True
+                return
+            if scrape.job_post_id and not force:
+                logger.info("parse_scrape: scrape_id=%s already has job_post, skipping", scrape_id)
+                reached_terminal = True
+                return
+            if not (scrape.job_content or scrape.html):
+                logger.warning("parse_scrape: scrape_id=%s has no content", scrape_id)
+                reached_terminal = True
+                return
 
-        _log_scrape_status(scrape_id, "updating_profile", note="Updating scrape profile")
+            user = None
+            if user_id:
+                User = get_user_model()
+                user = User.objects.filter(pk=user_id).first()
+            if not user:
+                user = scrape.created_by
 
-        try:
-            _update_scrape_profile(
-                scrape, user,
-                success=success,
-                tier0_hit=parser.last_tier0_hit,
-            )
-        except Exception:
-            logger.debug("Failed to update scrape profile", exc_info=True)
+            _log_scrape_status(scrape_id, "extracting")
 
-        if success:
-            outcome = getattr(parser, "last_outcome", None) or "created"
-            scrape.refresh_from_db(fields=["job_post_id"])
-            jp_id = scrape.job_post_id
-            if outcome == "duplicate" and jp_id:
-                note = f"duplicate: existing JobPost #{jp_id}"
-            elif outcome == "updated_stub" and jp_id:
-                note = f"updated_stub: upgraded JobPost #{jp_id}"
-            elif outcome == "force_noop" and jp_id:
-                note = f"force_noop: re-parse of JobPost #{jp_id} found no new fields"
-            elif outcome == "force_updated" and jp_id:
-                note = f"force_updated: refreshed JobPost #{jp_id}"
-            else:
-                note = "Parsed successfully"
-            # Final gate: does the persisted output actually look like a
-            # job description? Only fires for outcomes that actually
-            # touched the description; pure dedup hits skip the LLM.
-            # On rejection: flip JobPost.complete=False AND mark this
-            # scrape failed (the JP still exists so the URL lookup
-            # works; the user / extension can re-scrape it).
-            review_rejected = False
-            review_reason = None
-            if jp_id:
-                try:
-                    from job_hunting.lib.parsers.completeness_reviewer import (
-                        maybe_review_and_persist,
+            parser = JobPostExtractor()
+            success = False
+            try:
+                success = bool(parser.parse(scrape, user=user, force=force))
+            except Exception:
+                logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
+
+            _log_scrape_status(scrape_id, "updating_profile", note="Updating scrape profile")
+
+            try:
+                _update_scrape_profile(
+                    scrape, user,
+                    success=success,
+                    tier0_hit=parser.last_tier0_hit,
+                )
+            except Exception:
+                logger.debug("Failed to update scrape profile", exc_info=True)
+
+            if success:
+                outcome = getattr(parser, "last_outcome", None) or "created"
+                scrape.refresh_from_db(fields=["job_post_id"])
+                jp_id = scrape.job_post_id
+                if outcome == "duplicate" and jp_id:
+                    note = f"duplicate: existing JobPost #{jp_id}"
+                elif outcome == "updated_stub" and jp_id:
+                    note = f"updated_stub: upgraded JobPost #{jp_id}"
+                elif outcome == "force_noop" and jp_id:
+                    note = f"force_noop: re-parse of JobPost #{jp_id} found no new fields"
+                elif outcome == "force_updated" and jp_id:
+                    note = f"force_updated: refreshed JobPost #{jp_id}"
+                else:
+                    note = "Parsed successfully"
+                # Final gate: does the persisted output actually look like a
+                # job description? Only fires for outcomes that actually
+                # touched the description; pure dedup hits skip the LLM.
+                # On rejection: flip JobPost.complete=False AND mark this
+                # scrape failed (the JP still exists so the URL lookup
+                # works; the user / extension can re-scrape it).
+                review_rejected = False
+                review_reason = None
+                if jp_id:
+                    try:
+                        from job_hunting.lib.parsers.completeness_reviewer import (
+                            maybe_review_and_persist,
+                        )
+                        from job_hunting.models import JobPost
+                        jp = JobPost.objects.filter(pk=jp_id).first()
+                        if jp is not None:
+                            decision = maybe_review_and_persist(jp, last_outcome=outcome)
+                            if decision is not None and not decision.looks_like_job_description:
+                                review_rejected = True
+                                review_reason = decision.reasoning
+                    except Exception:
+                        logger.exception(
+                            "CompletenessReviewer failed for JP %s; "
+                            "leaving complete flag untouched",
+                            jp_id,
+                        )
+                if review_rejected:
+                    _log_scrape_status(
+                        scrape_id, "failed",
+                        note=f"incomplete_output: {review_reason or 'review rejected output'}",
                     )
-                    from job_hunting.models import JobPost
-                    jp = JobPost.objects.filter(pk=jp_id).first()
-                    if jp is not None:
-                        decision = maybe_review_and_persist(jp, last_outcome=outcome)
-                        if decision is not None and not decision.looks_like_job_description:
-                            review_rejected = True
-                            review_reason = decision.reasoning
+                    reached_terminal = True
+                else:
+                    _log_scrape_status(scrape_id, "completed", note=note)
+                    reached_terminal = True
+            else:
+                try:
+                    _log_scrape_status(scrape_id, "failed", note="Extraction failed")
+                except Exception:
+                    pass
+                reached_terminal = True
+        except Exception:
+            logger.exception("parse_scrape: unhandled in _run scrape_id=%s", scrape_id)
+        finally:
+            if not reached_terminal:
+                try:
+                    _log_scrape_status(
+                        scrape_id, "failed",
+                        note="parse_scrape died before terminal — see api logs",
+                    )
                 except Exception:
                     logger.exception(
-                        "CompletenessReviewer failed for JP %s; "
-                        "leaving complete flag untouched",
-                        jp_id,
+                        "parse_scrape: failed to flip stuck scrape_id=%s to failed",
+                        scrape_id,
                     )
-            if review_rejected:
-                _log_scrape_status(
-                    scrape_id, "failed",
-                    note=f"incomplete_output: {review_reason or 'review rejected output'}",
-                )
-            else:
-                _log_scrape_status(scrape_id, "completed", note=note)
-        else:
-            try:
-                _log_scrape_status(scrape_id, "failed", note="Extraction failed")
-            except Exception:
-                pass
 
     if sync:
         _run()
