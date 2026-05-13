@@ -34,6 +34,19 @@ class TestCanonicalizeLink(TestCase):
         url = "https://www.ziprecruiter.com/ekm/AAFu8_x25OYUUjsmCpD2H7FIn"
         self.assertEqual(canonicalize_link(url), url)
 
+    def test_strips_ziprecruiter_clickout_tokens(self):
+        # lk / lvk / tsid are ZipRecruiter clickout referral params.
+        # Same job from list page (lk) vs reposted card (lvk) used to
+        # produce two JobPosts because dedup matched on canonical_link.
+        got = canonicalize_link(
+            "https://www.ziprecruiter.com/jobs/altus-llc/software-developer-c-remote"
+            "?lk=ABC&lvk=XYZ&tsid=12345&keep=1"
+        )
+        self.assertNotIn("lk=", got)
+        self.assertNotIn("lvk=", got)
+        self.assertNotIn("tsid=", got)
+        self.assertIn("keep=1", got)
+
 
 class TestCanonicalizeLinkProfileRewrites(TestCase):
     """Host-scoped path rewrites from ScrapeProfile.url_rewrites should
@@ -79,6 +92,44 @@ class TestCanonicalizeLinkProfileRewrites(TestCase):
         got = canonicalize_link(url)
         self.assertNotIn("utm_source", got)
         self.assertIn("/jobs/1", got)
+
+    def test_ziprecruiter_strips_8hex_slug_tokens(self):
+        """ZipRecruiter listing URLs include a -<8hex> token on both the
+        company-slug and the job-slug. The canonical clean URL drops
+        both. Without this rule, /jobs/altus-llc-2287a4f5/sw-eng-2ffd5d4c
+        and /jobs/altus-llc/sw-eng resolve to distinct canonical_links."""
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="ziprecruiter.com",
+            defaults={"url_rewrites": [{
+                "match": r"/jobs/([^/]+?)-([a-f0-9]{8})/([^/?#]+?)-([a-f0-9]{8})(?=[/?#]|$)",
+                "rewrite": r"/jobs/\1/\3",
+            }]},
+        )
+        tokenized = (
+            "https://www.ziprecruiter.com"
+            "/jobs/altus-llc-2287a4f5/software-developer-c-remote-2ffd5d4c"
+            "?lk=ABC&tsid=XYZ"
+        )
+        clean = (
+            "https://www.ziprecruiter.com"
+            "/jobs/altus-llc/software-developer-c-remote"
+            "?lvk=ABC"
+        )
+        self.assertEqual(canonicalize_link(tokenized), canonicalize_link(clean))
+
+    def test_ziprecruiter_no_token_unchanged(self):
+        """Real path without the -<8hex> suffix must not be rewritten."""
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="ziprecruiter.com",
+            defaults={"url_rewrites": [{
+                "match": r"/jobs/([^/]+?)-([a-f0-9]{8})/([^/?#]+?)-([a-f0-9]{8})(?=[/?#]|$)",
+                "rewrite": r"/jobs/\1/\3",
+            }]},
+        )
+        url = "https://www.ziprecruiter.com/jobs/altus-llc/software-developer-c-remote"
+        self.assertEqual(canonicalize_link(url), url)
 
     def test_reads_legacy_css_selectors_url_rewrites(self):
         """Some profiles authored rewrites inside the css_selectors blob
