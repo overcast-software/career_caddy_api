@@ -647,6 +647,122 @@ class ScoreSerializer(BaseSerializer):
         return res
 
 
+def compute_duplicate_candidates(post, request):
+    """Return up to 10 likely-duplicate JobPost rows for `post`, decorated with
+    `_match_signals` (set of signal strings) and `_confidence` (low/medium/high)
+    so a downstream serializer can render them as job-post-duplicate-candidate
+    resources.
+
+    Single source of truth for both the standalone /duplicate-candidates/
+    action and the `?include=duplicate-candidates` sideload path. Visibility
+    mirrors JobPostViewSet.list — non-staff only see candidates they can
+    otherwise reach via created_by / applications / scores / scrapes /
+    discoveries. Excludes self and the duplicate_of chain in either direction.
+    """
+    user = getattr(request, "user", None) if request else None
+    if user is not None and getattr(user, "is_staff", False):
+        visible = JobPost.objects.all()
+    else:
+        uid = getattr(user, "id", None)
+        if uid is None:
+            return []
+        visible = JobPost.objects.filter(
+            Q(created_by_id=uid)
+            | Q(applications__user_id=uid)
+            | Q(scores__user_id=uid)
+            | Q(scrapes__created_by_id=uid)
+            | Q(discoveries__user_id=uid)
+        ).distinct()
+
+    excluded_ids = {post.id}
+    if post.duplicate_of_id:
+        excluded_ids.add(post.duplicate_of_id)
+    excluded_ids.update(
+        JobPost.objects.filter(duplicate_of_id=post.id).values_list("id", flat=True)
+    )
+    visible = visible.exclude(id__in=excluded_ids)
+
+    candidates: Dict[int, Dict[str, Any]] = {}
+    order = {"low": 0, "medium": 1, "high": 2}
+
+    def _add(hit, signal, confidence):
+        if hit.id in excluded_ids:
+            return
+        entry = candidates.setdefault(
+            hit.id,
+            {"post": hit, "signals": set(), "confidence": "low"},
+        )
+        entry["signals"].add(signal)
+        if order[confidence] > order[entry["confidence"]]:
+            entry["confidence"] = confidence
+
+    if post.canonical_link:
+        for hit in visible.filter(canonical_link=post.canonical_link):
+            _add(hit, "canonical_link", "high")
+
+    if post.content_fingerprint:
+        for hit in visible.filter(content_fingerprint=post.content_fingerprint):
+            _add(hit, "fingerprint", "high")
+
+    if post.company_id and post.title:
+        t = post.title.strip()
+        same_company = visible.filter(company_id=post.company_id).exclude(
+            title__iexact=t
+        )
+        for hit in same_company[:200]:
+            ht = (hit.title or "").strip()
+            if not ht:
+                continue
+            a, b = t.lower(), ht.lower()
+            if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
+                _add(hit, "title_similarity", "medium")
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda c: (
+            -order[c["confidence"]],
+            -(c["post"].created_at.timestamp() if c["post"].created_at else 0),
+        ),
+    )[:10]
+
+    out = []
+    for c in ordered:
+        item = c["post"]
+        item._match_signals = sorted(c["signals"])
+        item._confidence = c["confidence"]
+        out.append(item)
+    return out
+
+
+class JobPostDuplicateCandidateSerializer(BaseSerializer):
+    """Virtual resource that renders a JobPost as a possible-duplicate row.
+
+    Reads `_match_signals` and `_confidence` stashed on the obj by
+    `compute_duplicate_candidates`. `model = JobPost` so the framework's
+    `_build_included` can locate the underlying row when sideloading; the
+    rendered shape is intentionally narrow (title / company_name / signals
+    / confidence / frontend_url) and distinct from the full JobPost.
+    """
+
+    type = "job-post-duplicate-candidate"
+    model = JobPost
+    attributes: List[str] = []
+    relationships: Dict[str, Dict[str, Any]] = {}
+
+    def to_resource(self, obj) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "id": str(obj.id),
+            "attributes": {
+                "title": obj.title,
+                "company_name": obj.company.name if obj.company_id else None,
+                "match_signals": getattr(obj, "_match_signals", []),
+                "confidence": getattr(obj, "_confidence", "low"),
+                "frontend_url": f"/job-posts/{obj.id}",
+            },
+        }
+
+
 class JobPostSerializer(BaseSerializer):
     type = "job-post"
     model = JobPost
@@ -688,6 +804,17 @@ class JobPostSerializer(BaseSerializer):
         "scores": {"attr": "scores", "type": "score", "uselist": True},
         "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
         "top-score": {"attr": "top_score_record", "type": "score", "uselist": False},
+        # Virtual relationship: candidates are computed per-request, not a
+        # Django reverse FK. attr name is intentionally non-existent — the
+        # framework's getattr(obj, attr, None) returns None safely; the real
+        # fetch happens in get_related() below. Kept out of linked_relationships
+        # so the (expensive) candidate query only runs when the client passes
+        # ?include=duplicate-candidates — see jp.show route.
+        "duplicate-candidates": {
+            "attr": "_duplicate_candidates_virtual",
+            "type": "job-post-duplicate-candidate",
+            "uselist": True,
+        },
     }
     relationship_fks = {"company": "company_id"}
     linked_relationships = [
@@ -717,6 +844,12 @@ class JobPostSerializer(BaseSerializer):
             if user_id:
                 qs = qs.filter(user_id=user_id)
             return "summary", list(qs)
+        # Virtual relationship: candidates are synthesized from canonical_link
+        # / fingerprint / title-suffix queries (no reverse FK), so we own the
+        # fetch entirely. compute_duplicate_candidates stashes _match_signals
+        # and _confidence on each row for JobPostDuplicateCandidateSerializer.
+        if rel_name == "duplicate-candidates":
+            return "job-post-duplicate-candidate", compute_duplicate_candidates(obj, request)
         return super().get_related(obj, rel_name)
 
     def to_resource(self, obj):
@@ -1344,4 +1477,5 @@ TYPE_TO_SERIALIZER = {
     "waitlist": WaitlistSerializer,
     "invitation": InvitationSerializer,
     "scrape-profile": ScrapeProfileSerializer,
+    "job-post-duplicate-candidate": JobPostDuplicateCandidateSerializer,
 }
