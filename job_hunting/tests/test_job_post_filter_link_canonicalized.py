@@ -97,3 +97,41 @@ class TestJobPostFilterLinkCanonicalized(TestCase):
         # self.user only authored self.post; the other_user's post must
         # not appear in the default list.
         self.assertEqual(self._ids(resp), {str(self.post.id)})
+
+    def test_link_lookup_finds_closed_post(self):
+        """The popup's "is this URL tracked?" lookup must find a JP even
+        when posting_status=closed. Without this, a closed post is
+        invisible to the popup → no Tracked/Open screen, no incomplete
+        banner → the user clicks Send and a duplicate scrape sneaks
+        through. JP 1532 (linkedin GitHub Software Engineer II, Security)
+        was the reproducer on 2026-05-13: page was open in browser but
+        DB said closed; popup got data: [] and rendered the wrong
+        screen."""
+        closed_post = JobPost.objects.create(
+            title="Stale Closed",
+            company=self.company,
+            link="https://example.com/job/closed-but-tracked",
+            posting_status="closed",
+            created_by=self.user,
+        )
+        resp = self.client.get(
+            "/api/v1/job-posts/",
+            {"filter[link]": "https://example.com/job/closed-but-tracked"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {str(closed_post.id)})
+
+    def test_default_list_still_excludes_closed(self):
+        """Regression: closed-exclusion bypass must be filter[link]-scoped
+        only. Default list view should still hide closed posts."""
+        JobPost.objects.create(
+            title="Bury Me",
+            company=self.company,
+            link="https://example.com/job/buried",
+            posting_status="closed",
+            created_by=self.user,
+        )
+        resp = self.client.get("/api/v1/job-posts/")
+        self.assertEqual(resp.status_code, 200)
+        # self.post (open) is visible; the closed one isn't.
+        self.assertEqual(self._ids(resp), {str(self.post.id)})

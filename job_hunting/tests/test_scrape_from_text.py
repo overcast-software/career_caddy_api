@@ -202,6 +202,99 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         mock_parse.assert_called_once()
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_409_fires_when_complete_and_stub_share_canonical_link(self, mock_parse):
+        """Regression: link is unique, canonical_link is not. If a stub
+        /comm/ row and a complete /jobs/view/ row both canonicalize to
+        the same URL, an unordered .first() can pick the stub (whose
+        complete=False short-circuits the 409) and silently let a
+        duplicate scrape through. The dedup query must order
+        complete=True first so the gate sees the post the user cares
+        about. Mirrors the JP 1532 / scrape 414 incident (2026-05-13)."""
+        # Both rows share canonical_link (linkedin url_rewrite collapses
+        # /comm/jobs/view/ → /jobs/view/), but only one is complete.
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="linkedin.com",
+            defaults={"url_rewrites": [{
+                "match": r"^https?://www\.linkedin\.com/comm/jobs/view/",
+                "rewrite": "https://www.linkedin.com/jobs/view/",
+            }]},
+        )
+        try:
+            stub = JobPost.objects.create(
+                title="Stub Title",
+                company=self.company,
+                description="",
+                link="https://www.linkedin.com/comm/jobs/view/4386478229/",
+                source="email",
+                complete=False,
+                created_by=self.user,
+            )
+            complete_post = JobPost.objects.create(
+                title="Software Engineer II, Security",
+                company=self.company,
+                description=self.LONG_DESC,
+                link="https://www.linkedin.com/jobs/view/4386478229/",
+                source="extension",
+                complete=True,
+                created_by=self.user,
+            )
+            resp = self.client.post(
+                "/api/v1/scrapes/from-text/",
+                data={
+                    "text": "Software Engineer II, Security at GitHub",
+                    "link": "https://www.linkedin.com/jobs/view/4386478229/",
+                    "source": "extension",
+                },
+                format="json",
+            )
+            self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+            err = resp.json()["errors"][0]
+            self.assertEqual(err["meta"]["job_post_id"], complete_post.id)
+            self.assertNotEqual(err["meta"]["job_post_id"], stub.id)
+            self.assertEqual(Scrape.objects.count(), 0)
+            mock_parse.assert_not_called()
+        finally:
+            _profile_url_rewrites_for_host.cache_clear()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_409_fires_when_existing_is_extension_complete_and_closed(self, mock_parse):
+        """Regression: scrape 414 / JP 1532 (linkedin GitHub Software
+        Engineer II, Security, link
+        https://www.linkedin.com/jobs/view/4386478229/) on 2026-05-13.
+        JP was complete=True, source=extension, posting_status=closed —
+        a fresh same-source extension push for the same link slipped
+        through and created scrape 414 instead of 409'ing. The 409 path
+        only checks complete + trust — posting_status should not affect
+        it, since trust ranks tie (extension <= extension) and complete
+        is True. Verify the gate fires."""
+        existing = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            description=self.LONG_DESC,
+            link=self.DUPLICATE_LINK,
+            source="extension",
+            posting_status="closed",
+            created_by=self.user,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Toptal",
+                "link": self.DUPLICATE_LINK,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        body = resp.json()
+        err = body["errors"][0]
+        self.assertEqual(err["code"], "duplicate_job_post")
+        self.assertEqual(err["meta"]["job_post_id"], existing.id)
+        self.assertEqual(Scrape.objects.count(), 0)
+        mock_parse.assert_not_called()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
     def test_extension_push_bypasses_409_on_email_post(self, mock_parse):
         """The whole point of the extension-as-source-of-truth feature:
         when the extension push has a higher source trust than the

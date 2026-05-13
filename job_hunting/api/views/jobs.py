@@ -304,13 +304,18 @@ class JobPostViewSet(BaseViewSet):
         # ?include_closed=true to opt back in (list-view toggle), or
         # ?filter[posting_status]=closed for an exact match. Posts
         # with NULL status (historical / never-scanned) always show.
+        # filter[link] is exempt — it's an identity lookup ("is this
+        # URL already tracked?"), not a list view, so the closed-default
+        # would hide a stored JP from the extension popup's "incomplete"
+        # banner / Tracked screen and silently let a duplicate scrape
+        # through.
         posting_status_filter = request.query_params.get("filter[posting_status]")
         include_closed = str(
             request.query_params.get("include_closed") or ""
         ).lower() in ("1", "true", "yes")
         if posting_status_filter is not None:
             qs = qs.filter(posting_status=posting_status_filter)
-        elif not include_closed:
+        elif not include_closed and link_filter is None:
             qs = qs.exclude(posting_status="closed")
 
         company_id_filter = request.query_params.get("filter[company_id]")
