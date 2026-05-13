@@ -7,7 +7,8 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from job_hunting.models import Company, JobPost, Scrape
+from job_hunting.models import Company, JobPost, Scrape, ScrapeProfile
+from job_hunting.models.job_post_dedupe import _profile_url_rewrites_for_host
 
 User = get_user_model()
 
@@ -230,6 +231,67 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         scrape = Scrape.objects.first()
         self.assertEqual(scrape.source, "extension")
         mock_parse.assert_called_once()
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextZipRecruiterDedupe(TestCase):
+    """ZipRecruiter serves the same job at three URL shapes — list-page card
+    with -<8hex>/-<8hex> tokens, reposted card without tokens, and email
+    redirect /km/<opaque>. Without canonicalization, three submissions of
+    the same role create three JobPost rows. This test covers the first
+    two shapes; the /km/ case needs upstream redirect resolution and is
+    tracked separately."""
+
+    TOKENIZED = (
+        "https://www.ziprecruiter.com"
+        "/jobs/altus-llc-2287a4f5/software-developer-c-remote-2ffd5d4c"
+        "?lk=ABC&tsid=XYZ"
+    )
+    CLEAN = (
+        "https://www.ziprecruiter.com"
+        "/jobs/altus-llc/software-developer-c-remote"
+        "?lvk=ABC"
+    )
+    LONG_DESC = " ".join(["word"] * 200)
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="zr", password="pw")
+        self.client.force_authenticate(user=self.user)
+        self.company = Company.objects.create(name="Altus")
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="ziprecruiter.com",
+            defaults={"url_rewrites": [{
+                "match": r"/jobs/([^/]+?)-([a-f0-9]{8})/([^/?#]+?)-([a-f0-9]{8})(?=[/?#]|$)",
+                "rewrite": r"/jobs/\1/\3",
+            }]},
+        )
+
+    def tearDown(self):
+        _profile_url_rewrites_for_host.cache_clear()
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_clean_variant_409s_against_tokenized_existing(self, mock_parse):
+        existing = JobPost.objects.create(
+            title="Software Developer C++",
+            company=self.company,
+            description=self.LONG_DESC,
+            link=self.TOKENIZED,
+            source="paste",
+            created_by=self.user,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Software Developer C++ at Altus", "link": self.CLEAN},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        err = resp.json()["errors"][0]
+        self.assertEqual(err["code"], "duplicate_job_post")
+        self.assertEqual(err["meta"]["job_post_id"], existing.id)
+        self.assertEqual(Scrape.objects.count(), 0)
+        mock_parse.assert_not_called()
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)

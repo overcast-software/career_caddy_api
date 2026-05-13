@@ -44,6 +44,7 @@ _TRACKING_PARAMS = {
     "gh_src", "gh_jid",
     "lever-source", "lever-origin",
     "trk", "refid", "trackingid",
+    "lk", "lvk", "tsid",
 }
 # Note: bare =source= and =src= were here previously but stripping them
 # overreaches — many job boards use =?source=...= as a *functional*
