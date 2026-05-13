@@ -63,6 +63,19 @@ class Scrape(GetMixin, models.Model):
     #     "tag": "a", "score": 0.8, "reason": "href contains 'apply'"}]
     # Capture-only — promotion is a separate manual/automated step.
     apply_candidates = models.JSONField(null=True, blank=True)
+    # Closed-state detection result from the scrape-graph
+    # DetectClosedState node. Written by the agents-side graph PATCH on
+    # PersistScrape; read by JobPostExtractor as the priority-1 channel
+    # for posting_status flips (priority over the extractor's own raw-
+    # source phrase scan and LLM-emitted closed_evidence). Three-tier
+    # detection inside the node — CSS selector hit / phrase hit / Haiku-
+    # validated quote — collapses into this single column. Method +
+    # which-list-fired live in the graph trace for diagnostics; the
+    # extractor only reads the post-facto verdict.
+    detected_posting_status = models.CharField(
+        max_length=16, null=True, blank=True
+    )
+    detected_closed_evidence = models.TextField(null=True, blank=True)
     # When True, the scrape-graph runs Navigate → ResolveFinalUrl →
     # CheckLinkDedup → (page-load) → ResolveApplyUrl → End and SKIPS
     # the StartExtract → Tier* → PersistJobPost → ReviewCompleteness →

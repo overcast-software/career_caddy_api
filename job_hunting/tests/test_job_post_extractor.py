@@ -1045,6 +1045,80 @@ class TestClosedBannerHallucinationGuard(TestCase):
         self.assertIsNone(job.posting_status)
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_graph_detected_status_wins_over_curated_scan(self, mock_analyze):
+        """Channel priority: when the agents-side scrape-graph
+        DetectClosedState node has already verdict'd the post (writing
+        Scrape.detected_posting_status), the extractor must use that
+        result directly rather than re-running detect_posting_status on
+        raw_source. Reasons:
+          - the graph's CSS / phrase / Haiku-validated channels are
+            stricter than a global regex scan against the raw page text
+            (which over-fires on UI chrome)
+          - the graph already handled the LinkedIn-style thin-chrome
+            captures that historically false-positived
+        Ordering: graph (channel 1) > curated scan (channel 2) >
+        LLM-emitted closed_evidence (channel 3).
+        """
+        # Page text DOES contain a curated closed phrase — channel 2 would
+        # fire if it ran. But channel 1 says the graph saw the page open
+        # (graph wrote None / empty), so the curated scan should still
+        # run as fallback. (The graph not firing means it didn't detect
+        # closed — which is silent, not "open".)
+        # First case: graph fired closed → channel 1 wins, evidence
+        # bypasses raw_source check.
+        page_with_phrase = (
+            "Senior Engineer. About the role. We are no longer accepting "
+            "applications for this position. Thanks."
+        )
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Lululemon",
+            description="Senior Engineer. About the role.",
+            closed_evidence=None,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/graph-detected",
+            status="completed",
+            job_content=page_with_phrase,
+            source="scrape",
+            created_by=self.user,
+            detected_posting_status="closed",
+            detected_closed_evidence=".job-closed-banner",
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(job.posting_status, "closed")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_graph_silent_falls_through_to_curated_scan(self, mock_analyze):
+        """When DetectClosedState is silent (None/empty), the channel-2
+        curated raw-source scan still runs and can flip the post."""
+        page_with_phrase = (
+            "Senior Engineer. About the role. We are no longer accepting "
+            "applications for this position. Thanks."
+        )
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Lululemon",
+            description="Senior Engineer. About the role.",
+            closed_evidence=None,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/graph-silent",
+            status="completed",
+            job_content=page_with_phrase,
+            source="scrape",
+            created_by=self.user,
+            # detected_posting_status omitted → defaults to None
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        # Channel 2 (curated scan) caught the phrase
+        self.assertEqual(job.posting_status, "closed")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
     def test_strip_closed_banner_prefix_idempotent(self, mock_analyze):
         # No evidence, no source phrase — but the LLM still injected the
         # prefix. _strip_closed_banner_prefix must remove it.

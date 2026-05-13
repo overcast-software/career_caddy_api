@@ -308,7 +308,24 @@ class JobPostExtractor:
 
         raw_source = (scrape.job_content or "").strip()
         detected_status = None
-        if raw_source:
+        # Channel 1 (highest precedence): result from the scrape-graph
+        # DetectClosedState node, written into Scrape.detected_posting_status
+        # on PersistScrape. The graph already validated CSS / phrase / LLM
+        # quote against the live DOM + captured text, so this is the
+        # most-trusted signal. Bypasses the curated regex scan and the
+        # LLM-emitted closed_evidence path below. Only the agents-side
+        # scrape sub-graph populates this — paste/email/chat ingest
+        # routes that skip the sub-graph leave it None and fall through
+        # to the legacy channels.
+        graph_status = (getattr(scrape, "detected_posting_status", None) or "").strip() or None
+        if graph_status == "closed":
+            detected_status = "closed"
+            graph_evidence = (getattr(scrape, "detected_closed_evidence", None) or "").strip()
+            logger.info(
+                "JobPostExtractor: graph DetectClosedState verdict for "
+                "scrape=%s (evidence=%r)", scrape.id, graph_evidence[:80],
+            )
+        if detected_status is None and raw_source:
             detected_status = detect_posting_status(raw_source)
         if (
             detected_status is None
