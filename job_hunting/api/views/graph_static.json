@@ -97,6 +97,12 @@
       "description": "Reads page.inner_text('body') and page.content() into state.job_content / state.html. This is the moment the browser is 'done'."
     },
     {
+      "id": "DetectClosedState",
+      "group": "scrape",
+      "label": "Detect closed state",
+      "description": "Probes the captured page for closed-posting signal in priority order: per-host CSS selectors against the live DOM, then per-host text phrases (curated + learned regex) against state.job_content, then a Haiku LLM bootstrap when no host config exists and the capture is substantive (>= min_chars_for_llm). LLM hits PROMOTE the matched phrase back into ScrapeProfile.css_selectors.closed_state_config.learned_phrases for next time. Verdict + evidence land on Scrape.detected_posting_status / detected_closed_evidence; downstream JobPostExtractor reads those as the priority-1 channel for posting_status flips. Always routes to PersistScrape \u2014 closed-state is metadata, never terminal."
+    },
+    {
       "id": "PersistScrape",
       "group": "scrape",
       "label": "Persist scrape",
@@ -262,6 +268,10 @@
     },
     {
       "from": "Capture",
+      "to": "DetectClosedState"
+    },
+    {
+      "from": "DetectClosedState",
       "to": "PersistScrape"
     },
     {
