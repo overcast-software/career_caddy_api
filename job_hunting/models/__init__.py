@@ -6,6 +6,7 @@ from .education import Education as Education
 from .summary import Summary as Summary
 from .profile import Profile as Profile
 from .company import Company as Company
+from .company import find_matching_companies as find_matching_companies
 from .api_key import ApiKey as ApiKey
 from .question import Question as Question
 from .job_post import JobPost as JobPost

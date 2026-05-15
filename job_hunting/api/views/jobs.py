@@ -14,7 +14,9 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
     OpenApiResponse,
+    OpenApiParameter,
 )
+from drf_spectacular.types import OpenApiTypes
 
 from .base import BaseViewSet
 from ._schema import (
@@ -886,19 +888,6 @@ class JobPostViewSet(BaseViewSet):
         if not post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        # Visibility scope: mirror list() so non-staff don't learn about
-        # posts they otherwise wouldn't see.
-        if request.user.is_staff:
-            visible = JobPost.objects.all()
-        else:
-            visible = JobPost.objects.filter(
-                Q(created_by_id=request.user.id) |
-                Q(applications__user_id=request.user.id) |
-                Q(scores__user_id=request.user.id) |
-                Q(scrapes__created_by_id=request.user.id) |
-                Q(discoveries__user_id=request.user.id)
-            ).distinct()
-
         # Walk the duplicate chain so we never recommend a post this one
         # already points at (or vice-versa) — that's a settled relationship.
         excluded_ids = {post.id}
@@ -907,80 +896,99 @@ class JobPostViewSet(BaseViewSet):
         excluded_ids.update(
             JobPost.objects.filter(duplicate_of_id=post.id).values_list("id", flat=True)
         )
-        visible = visible.exclude(id__in=excluded_ids)
 
-        candidates = {}  # id -> {post, signals: set, confidence: str}
+        from job_hunting.models.job_post_dedupe import (
+            duplicate_candidates as _dup_candidates,
+        )
 
-        def _add(hit, signal, confidence):
-            if hit.id in excluded_ids:
-                return
-            entry = candidates.setdefault(
-                hit.id,
-                {"post": hit, "signals": set(), "confidence": "low"},
-            )
-            entry["signals"].add(signal)
-            # Keep the strongest confidence we've seen for this candidate.
-            order = {"low": 0, "medium": 1, "high": 2}
-            if order[confidence] > order[entry["confidence"]]:
-                entry["confidence"] = confidence
+        data = _dup_candidates(
+            user=request.user,
+            title=post.title,
+            canonical_link=post.canonical_link,
+            content_fingerprints=[post.content_fingerprint],
+            company_ids=[post.company_id] if post.company_id else [],
+            exclude_ids=frozenset(excluded_ids),
+        )
+        return Response({"data": data})
 
-        # Signal 1: canonical_link match (high confidence — same URL).
-        if post.canonical_link:
-            for hit in visible.filter(canonical_link=post.canonical_link):
-                _add(hit, "canonical_link", "high")
-
-        # Signal 2: content_fingerprint match (high confidence — same
-        # company + normalized title + location). Mirrors find_duplicate
-        # but unbounded by window so older true-dupes still surface.
-        if post.content_fingerprint:
-            for hit in visible.filter(content_fingerprint=post.content_fingerprint):
-                _add(hit, "fingerprint", "high")
-
-        # Signal 3: title-suffix drift within the same company. The case
-        # we keep eating: jp 999 'START UP BUS DEV ... (Bi-Lingual)' vs
-        # jp 1428 'START UP BUS DEV ... (Bi-Lingual) 75-100% FTE' —
-        # different fingerprints because of the suffix, same job. Cheap
-        # SQL: prefix or suffix overlap on (company, title), trim noise
-        # in Python after the DB pull. Skip when no company.
-        if post.company_id and post.title:
-            t = post.title.strip()
-            same_company = visible.filter(company_id=post.company_id).exclude(
-                title__iexact=t
-            )
-            for hit in same_company[:200]:  # cap the prefix scan
-                ht = (hit.title or "").strip()
-                if not ht:
-                    continue
-                a, b = t.lower(), ht.lower()
-                if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
-                    _add(hit, "title_similarity", "medium")
-
-        # Stable order: confidence desc, then created_at desc, capped.
-        order = {"high": 2, "medium": 1, "low": 0}
-        ordered = sorted(
-            candidates.values(),
-            key=lambda c: (
-                -order[c["confidence"]],
-                -(c["post"].created_at.timestamp() if c["post"].created_at else 0),
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="List likely-duplicate JobPosts for raw, not-yet-created fields",
+        description=(
+            "Collection-level sibling of /job-posts/{id}/duplicate-candidates/.\n\n"
+            "Given raw `title` (required), `company`, `link`, `location` query\n"
+            "params, returns peer JobPosts the system suspects represent the\n"
+            "same role — same three signal classes (canonical_link, fingerprint,\n"
+            "title_similarity), same response shape. `company` is fuzzy-matched\n"
+            "(name OR display_name contains), so 'Disney' also matches a post\n"
+            "filed under 'Disney, Inc'. Lets a caller verify a freshly-extracted\n"
+            "posting before POSTing it. Visibility-scoped; empty list when\n"
+            "nothing surfaces."
+        ),
+        parameters=[
+            OpenApiParameter(
+                "title", OpenApiTypes.STR, OpenApiParameter.QUERY, required=True,
+                description="Incoming job post title (required).",
             ),
-        )[:10]
+            OpenApiParameter(
+                "company", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False,
+                description="Incoming company name; fuzzy-matched (name or "
+                "display_name contains).",
+            ),
+            OpenApiParameter(
+                "link", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False,
+                description="Incoming posting URL; canonicalized before matching.",
+            ),
+            OpenApiParameter(
+                "location", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False,
+                description="Incoming location; feeds the content fingerprint.",
+            ),
+        ],
+        responses={200: _JSONAPI_LIST},
+    )
+    @action(detail=False, methods=["get"], url_path="duplicate-candidates")
+    def duplicate_candidates_for_fields(self, request):
+        title = (request.query_params.get("title") or "").strip()
+        if not title:
+            return Response(
+                {"errors": [{"detail": "`title` query param is required."}]},
+                status=400,
+            )
+        company = (request.query_params.get("company") or "").strip()
+        link = (request.query_params.get("link") or "").strip()
+        location = (request.query_params.get("location") or "").strip()
 
-        data = [
-            {
-                "type": "job-post-duplicate-candidate",
-                "id": str(c["post"].id),
-                "attributes": {
-                    "title": c["post"].title,
-                    "company_name": (
-                        c["post"].company.name if c["post"].company_id else None
-                    ),
-                    "match_signals": sorted(c["signals"]),
-                    "confidence": c["confidence"],
-                    "frontend_url": f"/job-posts/{c['post'].id}",
-                },
-            }
-            for c in ordered
+        from job_hunting.models import find_matching_companies
+        from job_hunting.models.job_post_dedupe import (
+            canonicalize_link,
+            fingerprint,
+            duplicate_candidates as _dup_candidates,
+        )
+
+        company_ids = (
+            list(find_matching_companies(company).values_list("id", flat=True))
+            if company
+            else []
+        )
+        # One fingerprint per fuzzy-matched company — a post under
+        # "Disney, Inc" hashes against a different company_id than the
+        # "Disney" the caller passed, so we hash for every candidate id.
+        from types import SimpleNamespace
+
+        fingerprints = [
+            fingerprint(
+                SimpleNamespace(company_id=cid, title=title, location=location or None)
+            )
+            for cid in company_ids
         ]
+        data = _dup_candidates(
+            user=request.user,
+            title=title,
+            canonical_link=canonicalize_link(link or None),
+            content_fingerprints=fingerprints,
+            company_ids=company_ids,
+            exclude_ids=frozenset(),
+        )
         return Response({"data": data})
 
     @extend_schema(

@@ -26,6 +26,7 @@ from job_hunting.models import (
     Score,
     Scrape,
     Question,
+    find_matching_companies,
 )
 
 
@@ -60,13 +61,12 @@ class CompanyViewSet(BaseViewSet):
         return Response({"data": ser.to_resource(obj)}, status=201)
 
     def list(self, request):
-        qs = Company.objects
-
+        # An empty `filter[query]` matched everything before (icontains "")
+        # — same result set as no filter at all — so collapse both to the
+        # unfiltered manager; a real query routes through the shared fuzzy
+        # matcher the duplicate-candidates endpoint also uses.
         query_filter = request.query_params.get("filter[query]")
-        if query_filter is not None:
-            qs = qs.filter(
-                Q(name__icontains=query_filter) | Q(display_name__icontains=query_filter)
-            ).distinct()
+        qs = find_matching_companies(query_filter) if query_filter else Company.objects
 
         sort_param = request.query_params.get("sort", "relevant")
         if sort_param in ("relevant", "-relevant"):

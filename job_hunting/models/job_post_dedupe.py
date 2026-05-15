@@ -152,6 +152,119 @@ def fingerprint(post) -> str | None:
     ).hexdigest()
 
 
+def duplicate_candidates(
+    *,
+    user,
+    title: str | None,
+    canonical_link: str | None,
+    content_fingerprints: list[str] | None,
+    company_ids: list[int] | None,
+    exclude_ids=frozenset(),
+) -> list[dict]:
+    """Shared duplicate-candidate matcher.
+
+    Backs both ``GET /job-posts/{id}/duplicate-candidates/`` (saved post)
+    and ``GET /job-posts/duplicate-candidates/`` (raw, not-yet-created
+    fields). Returns JSON:API ``job-post-duplicate-candidate`` resource
+    dicts, ordered confidence-desc / recent-first, capped at 10.
+
+    Three signal classes:
+      - canonical_link   (high)   — same canonicalized URL
+      - fingerprint      (high)   — same content_fingerprint (any of the
+                                    supplied fingerprints; the raw-fields
+                                    caller passes one per fuzzy-matched
+                                    company so "Disney" still finds a post
+                                    filed under "Disney, Inc")
+      - title_similarity (medium) — same company + one title is a
+                                    prefix/suffix of the other
+
+    Visibility-scoped to ``user`` (staff sees all). ``exclude_ids`` drops
+    the source post and its settled duplicate-chain peers.
+    """
+    from django.db.models import Q
+
+    from .job_post import JobPost
+
+    if user.is_staff:
+        visible = JobPost.objects.all()
+    else:
+        visible = JobPost.objects.filter(
+            Q(created_by_id=user.id)
+            | Q(applications__user_id=user.id)
+            | Q(scores__user_id=user.id)
+            | Q(scrapes__created_by_id=user.id)
+            | Q(discoveries__user_id=user.id)
+        ).distinct()
+    if exclude_ids:
+        visible = visible.exclude(id__in=exclude_ids)
+
+    candidates: dict = {}  # id -> {post, signals: set, confidence: str}
+    order = {"low": 0, "medium": 1, "high": 2}
+
+    def _add(hit, signal, confidence):
+        if hit.id in exclude_ids:
+            return
+        entry = candidates.setdefault(
+            hit.id, {"post": hit, "signals": set(), "confidence": "low"}
+        )
+        entry["signals"].add(signal)
+        if order[confidence] > order[entry["confidence"]]:
+            entry["confidence"] = confidence
+
+    # Signal 1: canonical_link match (high — same URL).
+    if canonical_link:
+        for hit in visible.filter(canonical_link=canonical_link):
+            _add(hit, "canonical_link", "high")
+
+    # Signal 2: content_fingerprint match (high — same company + normalized
+    # title + location). Unbounded by window so older true-dupes surface.
+    fps = [f for f in (content_fingerprints or []) if f]
+    if fps:
+        for hit in visible.filter(content_fingerprint__in=fps):
+            _add(hit, "fingerprint", "high")
+
+    # Signal 3: title-suffix drift within the same company/companies.
+    # The case fingerprint can't catch: jp 999 'START UP BUS DEV (Bi-Lingual)'
+    # vs jp 1428 '... (Bi-Lingual) 75-100% FTE' — same job, suffix-shifted.
+    if company_ids and title:
+        t = title.strip()
+        same_company = visible.filter(company_id__in=company_ids).exclude(
+            title__iexact=t
+        )
+        for hit in same_company[:200]:  # cap the prefix scan
+            ht = (hit.title or "").strip()
+            if not ht:
+                continue
+            a, b = t.lower(), ht.lower()
+            if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
+                _add(hit, "title_similarity", "medium")
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda c: (
+            -order[c["confidence"]],
+            -(c["post"].created_at.timestamp() if c["post"].created_at else 0),
+        ),
+    )[:10]
+
+    return [
+        {
+            "type": "job-post-duplicate-candidate",
+            "id": str(c["post"].id),
+            "attributes": {
+                "title": c["post"].title,
+                "company_name": (
+                    c["post"].company.name if c["post"].company_id else None
+                ),
+                "match_signals": sorted(c["signals"]),
+                "confidence": c["confidence"],
+                "frontend_url": f"/job-posts/{c['post'].id}",
+            },
+        }
+        for c in ordered
+    ]
+
+
 def find_duplicate(post, window_days: int = 30):
     """Return an existing JobPost this one duplicates, or None.
 
