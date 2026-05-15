@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from job_hunting.models import Company, JobPost
+from job_hunting.models import Company, JobPost, Scrape
 
 
 User = get_user_model()
@@ -215,3 +215,110 @@ class TestDuplicateCandidates(TestCase):
         self.assertEqual(len(cand_resources), 1)
         self.assertEqual(cand_resources[0]["id"], str(b.id))
         self.assertEqual(cand_resources[0]["attributes"]["title"], "Engineer")
+
+
+class TestDuplicateCandidatesExtensionHints(TestCase):
+    """Bidirectional cross-platform dedup: a Scrape.apply_url_from_hint
+    pointing at JP-A surfaces the Scrape's parent JP-B as a candidate on
+    JP-A's panel (apply_hint signal); a Scrape.referrer_url pointing at
+    JP-A surfaces the parent JP-B as a referrer_hint candidate."""
+
+    LINKEDIN = "https://www.linkedin.com/jobs/view/4400000001/"
+    ATS = "https://ats.rippling.com/rippling/jobs/abc-001"
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="hintdup", password="pw", is_staff=True
+        )
+        self.client.force_authenticate(user=self.user)
+        self.company = Company.objects.create(name="Rippling")
+
+    def _candidates(self, jp):
+        resp = self.client.get(f"/api/v1/job-posts/{jp.id}/duplicate-candidates/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.json()["data"]
+
+    def test_apply_hint_surfaces_linkedin_jp_on_ats_panel(self):
+        """Setup: user submits the LinkedIn JP with apply_url_hint=ATS.
+        The api creates the LinkedIn JP and persists the hint on its
+        Scrape. The ATS JP exists separately. Opening the ATS JP must
+        surface the LinkedIn JP via the apply_hint signal."""
+        ats_jp = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            link=self.ATS,
+            created_by=self.user,
+        )
+        linkedin_jp = JobPost.objects.create(
+            title="Engineer (LinkedIn)",
+            company=self.company,
+            link=self.LINKEDIN,
+            created_by=self.user,
+        )
+        Scrape.objects.create(
+            url=self.LINKEDIN,
+            job_post=linkedin_jp,
+            apply_url_from_hint=self.ATS,
+            created_by=self.user,
+        )
+        candidates = self._candidates(ats_jp)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["id"], str(linkedin_jp.id))
+        self.assertIn(
+            "apply_hint", candidates[0]["attributes"]["match_signals"]
+        )
+        self.assertEqual(candidates[0]["attributes"]["confidence"], "high")
+
+    def test_referrer_hint_surfaces_ats_jp_on_linkedin_panel(self):
+        """Symmetric case: user submits the ATS JP after clicking through
+        LinkedIn, so Scrape.referrer_url=LINKEDIN. Opening the LinkedIn
+        JP must surface the ATS JP via the referrer_hint signal."""
+        linkedin_jp = JobPost.objects.create(
+            title="Engineer (LinkedIn)",
+            company=self.company,
+            link=self.LINKEDIN,
+            created_by=self.user,
+        )
+        ats_jp = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            link=self.ATS,
+            created_by=self.user,
+        )
+        Scrape.objects.create(
+            url=self.ATS,
+            job_post=ats_jp,
+            referrer_url=self.LINKEDIN,
+            created_by=self.user,
+        )
+        candidates = self._candidates(linkedin_jp)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["id"], str(ats_jp.id))
+        self.assertIn(
+            "referrer_hint", candidates[0]["attributes"]["match_signals"]
+        )
+
+    def test_no_hint_no_candidate(self):
+        """A Scrape without hints contributes no cross-platform signal.
+
+        Uses titles that don't share a prefix/suffix to avoid the
+        existing title_similarity heuristic firing — this test is about
+        the hint signals specifically.
+        """
+        ats_jp = JobPost.objects.create(
+            title="Backend Engineer",
+            company=self.company,
+            link=self.ATS,
+            created_by=self.user,
+        )
+        linkedin_jp = JobPost.objects.create(
+            title="Frontend Architect",
+            company=self.company,
+            link=self.LINKEDIN,
+            created_by=self.user,
+        )
+        Scrape.objects.create(
+            url=self.LINKEDIN, job_post=linkedin_jp, created_by=self.user
+        )
+        self.assertEqual(self._candidates(ats_jp), [])

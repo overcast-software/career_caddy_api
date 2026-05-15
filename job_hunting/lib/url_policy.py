@@ -41,6 +41,62 @@ PRIVATE_HOST_SUFFIXES = (
 
 LOOPBACK_HOSTS = frozenset({"localhost"})
 
+# Host classification for the cross-platform dedup `canonical_redirect`
+# logic. When an extension submit produces a hint URL pointing at one of
+# these ATS hosts and the submitted JP itself is on a job board, we route
+# the user to the ATS JP — the deep listing is the canonical record.
+# Match shape: exact host, or any subdomain (host.endswith("." + suffix)),
+# plus the `ats.<anything>` subdomain pattern that covers per-company ATS
+# instances (ats.rippling.com, ats.lyft.com, …).
+ATS_HOST_SUFFIXES = frozenset({
+    "greenhouse.io",
+    "lever.co",
+    "workday.com",
+    "myworkdayjobs.com",
+    "ashbyhq.com",
+    "bamboohr.com",
+    "breezy.hr",
+    "workable.com",
+    "jobvite.com",
+    "recruitee.com",
+    "icims.com",
+})
+
+JOB_BOARD_HOSTS = frozenset({
+    "linkedin.com",
+    "indeed.com",
+    "glassdoor.com",
+    "ziprecruiter.com",
+})
+
+
+def _normalize_host(url: str) -> str:
+    """Return the lowercased host with leading www. stripped, or '' on parse failure."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def host_in_ats(url: str) -> bool:
+    """True iff the URL's host is a known ATS (greenhouse/lever/workday/…),
+    including ats.<anything> per-company subdomains."""
+    host = _normalize_host(url)
+    if not host:
+        return False
+    if host.startswith("ats."):
+        return True
+    return any(host == s or host.endswith("." + s) for s in ATS_HOST_SUFFIXES)
+
+
+def host_in_jobboard(url: str) -> bool:
+    """True iff the URL's host is a known job-board aggregator."""
+    host = _normalize_host(url)
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in JOB_BOARD_HOSTS)
+
 
 class UrlPolicyError(ValueError):
     """Raised when a submitted URL violates ingest policy.

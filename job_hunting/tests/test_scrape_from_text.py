@@ -671,3 +671,239 @@ class TestScrapeFromTextAutoScore(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextExtensionHints(TestCase):
+    """Cross-platform dedup hints captured by the browser extension at
+    submit time. apply_url_hint and referrer_url are persisted on the
+    Scrape (indexed); each is looked up for an existing JP, with a stub
+    created when none exists. canonical_redirect picks the ATS JP over
+    the jobboard JP when both sides of the pair exist.
+    """
+
+    LINKEDIN = "https://www.linkedin.com/jobs/view/4400000000/"
+    ATS = "https://ats.rippling.com/rippling/jobs/ebc7a777-aa35-4333-ac95-ebc98e375f75"
+    LONG_DESC = " ".join(["word"] * 50)
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="hintuser", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_hints_persisted_on_scrape(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "link": self.LINKEDIN,
+                "apply_url_hint": self.ATS,
+                "referrer_url": "https://www.linkedin.com/jobs/search/",
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.apply_url_from_hint, self.ATS)
+        self.assertEqual(scrape.referrer_url, "https://www.linkedin.com/jobs/search/")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_canonical_link_hint_replaces_submitted_link(self, _mock_parse):
+        """LinkedIn's <meta og:url> is preferred over location.href so
+        the persisted Scrape.url and downstream JobPost.link land on the
+        clean canonical address, not a tracker-laden one."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "link": "https://www.linkedin.com/jobs/view/4400000000/?trk=tracking_param",
+                "canonical_link_hint": self.LINKEDIN,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.url, self.LINKEDIN)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_apply_hint_matches_existing_jp(self, _mock_parse):
+        """When a JobPost already exists at the apply-button destination,
+        the response surfaces its id so the frontend can render the
+        relationship immediately."""
+        company = Company.objects.create(name="Rippling")
+        existing = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            description=self.LONG_DESC,
+            link=self.ATS,
+            source="extension",
+            created_by=self.user,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Rippling",
+                "link": self.LINKEDIN,
+                "apply_url_hint": self.ATS,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        meta = resp.json().get("meta") or {}
+        self.assertEqual(meta.get("apply_match"), existing.id)
+        # ATS is the canonical record — frontend should route there.
+        self.assertEqual(meta.get("canonical_redirect"), existing.id)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_apply_hint_creates_stub_when_no_existing_jp(self, _mock_parse):
+        """No JP at the apply URL → create a stub JP with
+        source='apply_hint_stub' and complete=False so the hold-poller /
+        scrape-graph treats it as upgradeable in place."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Rippling",
+                "link": self.LINKEDIN,
+                "apply_url_hint": self.ATS,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        meta = resp.json().get("meta") or {}
+        stub_id = meta.get("apply_match")
+        self.assertIsNotNone(stub_id)
+        stub = JobPost.objects.get(pk=stub_id)
+        self.assertEqual(stub.link, self.ATS)
+        self.assertEqual(stub.source, "apply_hint_stub")
+        self.assertFalse(stub.complete)
+        # ATS host → frontend routes there.
+        self.assertEqual(meta.get("canonical_redirect"), stub_id)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_referrer_creates_stub_with_referrer_source(self, _mock_parse):
+        """Symmetric case: ccsend FROM an ATS page after clicking through
+        LinkedIn forwards document.referrer. No LinkedIn JP yet → stub
+        with source='referrer_stub'."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Rippling",
+                "link": self.ATS,
+                "referrer_url": self.LINKEDIN,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        meta = resp.json().get("meta") or {}
+        stub_id = meta.get("referrer_match")
+        self.assertIsNotNone(stub_id)
+        stub = JobPost.objects.get(pk=stub_id)
+        self.assertEqual(stub.link, self.LINKEDIN)
+        self.assertEqual(stub.source, "referrer_stub")
+        self.assertFalse(stub.complete)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_canonical_redirect_falls_back_to_submitted_when_no_apply_match(self, _mock_parse):
+        """Without an apply hint or when the apply match isn't an ATS
+        host, canonical_redirect points at whatever JP the submit
+        produced (which may be None when parse_scrape doesn't attach
+        one, but the field is still set explicitly)."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Rippling",
+                "link": self.LINKEDIN,
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        meta = resp.json().get("meta") or {}
+        # parse_scrape is mocked so no JP is attached; canonical_redirect
+        # mirrors that (None) — the key still appears in the response.
+        self.assertIn("canonical_redirect", meta)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_private_hint_silently_dropped(self, _mock_parse):
+        """Adversarial private/localhost hint must not block ingestion
+        nor end up persisted on the Scrape."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "link": self.LINKEDIN,
+                "apply_url_hint": "http://localhost:8000/secrets",
+                "referrer_url": "http://192.168.1.1/admin",
+                "source": "extension",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertIsNone(scrape.apply_url_from_hint)
+        self.assertIsNone(scrape.referrer_url)
+        meta = resp.json().get("meta") or {}
+        self.assertIsNone(meta.get("apply_match"))
+        self.assertIsNone(meta.get("referrer_match"))
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_no_hints_behaves_as_before(self, _mock_parse):
+        """Absence of all three hint fields is the existing-behavior
+        baseline — endpoint stays backward-compatible."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Senior Engineer at Acme", "link": self.LINKEDIN},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertIsNone(scrape.apply_url_from_hint)
+        self.assertIsNone(scrape.referrer_url)
+        meta = resp.json().get("meta") or {}
+        self.assertIsNone(meta.get("apply_match"))
+        self.assertIsNone(meta.get("referrer_match"))
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_apply_hint_match_via_canonical_link(self, _mock_parse):
+        """An existing JP whose canonical_link matches the hint URL (via
+        the host's url_rewrites) still resolves — not just exact link
+        equality. Mirrors the LinkedIn /comm/ → /jobs/view/ rewrite."""
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="linkedin.com",
+            defaults={"url_rewrites": [{
+                "match": r"^https?://www\.linkedin\.com/comm/jobs/view/",
+                "rewrite": "https://www.linkedin.com/jobs/view/",
+            }]},
+        )
+        try:
+            company = Company.objects.create(name="LinkedHQ")
+            existing = JobPost.objects.create(
+                title="Senior Engineer",
+                company=company,
+                description=self.LONG_DESC,
+                link=self.LINKEDIN,
+                source="extension",
+                created_by=self.user,
+            )
+            resp = self.client.post(
+                "/api/v1/scrapes/from-text/",
+                data={
+                    "text": "Senior Engineer at LinkedHQ",
+                    "link": self.ATS,
+                    "referrer_url": "https://www.linkedin.com/comm/jobs/view/4400000000/",
+                    "source": "extension",
+                },
+                format="json",
+            )
+            self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+            meta = resp.json().get("meta") or {}
+            self.assertEqual(meta.get("referrer_match"), existing.id)
+        finally:
+            _profile_url_rewrites_for_host.cache_clear()

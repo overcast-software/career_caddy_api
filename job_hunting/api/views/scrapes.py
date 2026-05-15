@@ -28,7 +28,12 @@ from job_hunting.models import (
     Scrape,
     ScrapeProfile,
 )
-from job_hunting.lib.url_policy import UrlPolicyError, validate_submission_url
+from job_hunting.lib.url_policy import (
+    UrlPolicyError,
+    host_in_ats,
+    host_in_jobboard,
+    validate_submission_url,
+)
 from job_hunting.models.job_post_dedupe import canonicalize_link
 
 
@@ -589,6 +594,35 @@ class ScrapeViewSet(BaseViewSet):
                         "skip scoring — the JobPost is still parsed and saved."
                     ),
                 ),
+                "apply_url_hint": drf_serializers.CharField(
+                    required=False,
+                    allow_blank=True,
+                    help_text=(
+                        "Optional URL the browser extension extracted from the "
+                        "'Apply' button (e.g. LinkedIn's safety/go wrapper "
+                        "decoded to an ATS URL). Persisted on the Scrape and "
+                        "used as a cross-platform dedup signal."
+                    ),
+                ),
+                "canonical_link_hint": drf_serializers.CharField(
+                    required=False,
+                    allow_blank=True,
+                    help_text=(
+                        "Optional clean canonical URL captured by the extension "
+                        "(e.g. LinkedIn `<meta property='og:url'>`). When valid, "
+                        "replaces `link` as the JobPost link so tracker-laden "
+                        "addresses don't end up persisted."
+                    ),
+                ),
+                "referrer_url": drf_serializers.CharField(
+                    required=False,
+                    allow_blank=True,
+                    help_text=(
+                        "Optional `document.referrer` URL, filtered by the "
+                        "extension's known-job-board allowlist. Captures the "
+                        "symmetric LinkedIn→ATS click-through pair."
+                    ),
+                ),
             },
         ),
         responses={
@@ -619,6 +653,9 @@ class ScrapeViewSet(BaseViewSet):
         source = _normalize_source_hint(data.get("source"))
         auto_score_raw = data.get("auto_score")
         auto_score = True if auto_score_raw is None else bool(auto_score_raw)
+        apply_url_hint = (data.get("apply_url_hint") or "").strip() or None
+        canonical_link_hint = (data.get("canonical_link_hint") or "").strip() or None
+        referrer_url = (data.get("referrer_url") or "").strip() or None
 
         if not text:
             return Response(
@@ -665,6 +702,30 @@ class ScrapeViewSet(BaseViewSet):
                     }]},
                     status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
+
+        # Hints are best-effort signals from the extension. Adversarial or
+        # malformed values are dropped silently rather than 4xx'd — a bad
+        # hint should never block ingestion of an otherwise-valid scrape.
+        if canonical_link_hint:
+            try:
+                canonical_link_hint = validate_submission_url(canonical_link_hint)
+            except UrlPolicyError:
+                canonical_link_hint = None
+        if apply_url_hint:
+            try:
+                apply_url_hint = validate_submission_url(apply_url_hint)
+            except UrlPolicyError:
+                apply_url_hint = None
+        if referrer_url:
+            try:
+                referrer_url = validate_submission_url(referrer_url)
+            except UrlPolicyError:
+                referrer_url = None
+
+        # The canonical_link_hint (e.g. LinkedIn og:url) is preferred over the
+        # submitted location.href so tracker-laden URLs don't get persisted.
+        if canonical_link_hint:
+            link = canonical_link_hint
 
         if link and not force:
             # Match either the raw submitted link or the canonicalized
@@ -732,6 +793,8 @@ class ScrapeViewSet(BaseViewSet):
             status="pending",
             created_by=request.user,
             source=source,
+            apply_url_from_hint=apply_url_hint,
+            referrer_url=referrer_url,
         )
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "pending", note=f"{source} ingest")
@@ -747,11 +810,108 @@ class ScrapeViewSet(BaseViewSet):
             except Exception:
                 logger.exception("from_text: auto-score failed for scrape %s", scrape.id)
 
+        # Cross-platform dedup: look up an existing JP at each hint URL,
+        # create a stub JP when none exists, and surface the relationship
+        # in the response so the frontend can route the user to whichever
+        # JP represents the canonical record (ATS over jobboard).
+        apply_match_id = self._resolve_hint_match(
+            apply_url_hint, "apply_hint_stub", request.user
+        ) if apply_url_hint else None
+        referrer_match_id = self._resolve_hint_match(
+            referrer_url, "referrer_stub", request.user
+        ) if referrer_url else None
+
+        canonical_redirect = self._compute_canonical_redirect(
+            submitted_jp_id=scrape.job_post_id,
+            submitted_link=link,
+            apply_match_id=apply_match_id,
+            apply_url_hint=apply_url_hint,
+        )
+
         scr_ser = self.get_serializer()
         return Response(
-            {"data": scr_ser.to_resource(scrape)},
+            {
+                "data": scr_ser.to_resource(scrape),
+                "meta": {
+                    "apply_match": apply_match_id,
+                    "referrer_match": referrer_match_id,
+                    "canonical_redirect": canonical_redirect,
+                },
+            },
             status=status.HTTP_202_ACCEPTED,
         )
+
+    def _resolve_hint_match(self, hint_url, stub_source, user):
+        """Find an existing JobPost for `hint_url`, or create a stub JP.
+
+        Returns the JobPost id (existing or freshly-created stub) so the
+        response carries a stable reference the frontend can link to.
+        Stub JPs use `complete=False` so the hold-poller / scrape-graph
+        treats them as incomplete and merges content in place when the
+        user later submits the hint URL directly.
+        """
+        if not hint_url:
+            return None
+        canonical = canonicalize_link(hint_url)
+        existing = (
+            JobPost.objects
+            .filter(Q(link=hint_url) | Q(canonical_link=canonical))
+            .order_by("-complete", "id")
+            .first()
+        )
+        if existing:
+            return existing.id
+        try:
+            stub = JobPost.objects.create(
+                link=hint_url,
+                source=stub_source,
+                complete=False,
+                created_by=user,
+            )
+        except Exception:
+            # link is UNIQUE; a concurrent submit may have created the
+            # stub between the filter and the create. Re-query so the
+            # caller still gets a JP id.
+            logger.exception(
+                "from_text: stub JP creation race for hint=%r source=%s",
+                hint_url, stub_source,
+            )
+            existing = (
+                JobPost.objects
+                .filter(Q(link=hint_url) | Q(canonical_link=canonical))
+                .order_by("-complete", "id")
+                .first()
+            )
+            return existing.id if existing else None
+        return stub.id
+
+    def _compute_canonical_redirect(
+        self,
+        *,
+        submitted_jp_id,
+        submitted_link,
+        apply_match_id,
+        apply_url_hint,
+    ):
+        """Decide where the frontend should route the user.
+
+        Prefer the ATS JP (greenhouse/lever/ats.*) over the jobboard JP
+        (linkedin/indeed/glassdoor) — the ATS listing is the canonical
+        record of the role. The host pair drives the choice; the
+        submitted JP may or may not exist (e.g. parse_scrape failed to
+        attach one), and the apply-match may be a freshly-created stub.
+        Falls through to the submitted JP id when the host pair doesn't
+        fit the (ATS, jobboard) shape.
+        """
+        if (
+            apply_match_id
+            and apply_url_hint
+            and host_in_ats(apply_url_hint)
+            and submitted_link
+            and host_in_jobboard(submitted_link)
+        ):
+            return apply_match_id
+        return submitted_jp_id
 
     @action(detail=True, methods=["post"], url_path="llm-extract")
     def llm_extract(self, request, pk=None):
