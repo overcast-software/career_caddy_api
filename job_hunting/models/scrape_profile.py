@@ -30,6 +30,23 @@ class ScrapeProfile(GetMixin, models.Model):
     # then link selectors (read href, no nav), then button selectors
     # (click + capture page.url). Missing/empty → resolver no-ops.
     apply_resolver_config = models.JSONField(null=True, blank=True)
+    # Per-host directions for the browser extension (ccsender) at submit
+    # time. Distinct from apply_resolver_config above: that one drives
+    # the server-side ResolveApplyUrl node inside the scrape-graph after
+    # the hold-poller has fetched the page; this one tells the in-page
+    # extension which selectors to query in the active tab and which
+    # named decoder to run on the captured href. Shape:
+    #   {
+    #     "apply_button_selectors":   ["a.jobs-apply-button[href]", ...],
+    #     "canonical_link_selectors": ["meta[property=\"og:url\"]"],
+    #     "apply_url_decoder":        "linkedin_safety_go" | "passthrough" | null
+    #   }
+    # The decoder is a named protocol — the extension carries its own
+    # registry mapping names to JS functions; the api just ships the
+    # name. Missing field / null = the extension falls through to its
+    # baked LinkedIn defaults so a fresh install or api outage doesn't
+    # break submits.
+    extension_selectors = models.JSONField(null=True, blank=True)
     extraction_hints = models.TextField(blank=True, default="")
     page_structure = models.TextField(blank=True, default="")
     last_success_at = models.DateTimeField(null=True, blank=True)

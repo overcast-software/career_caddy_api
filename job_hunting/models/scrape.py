@@ -55,6 +55,18 @@ class Scrape(GetMixin, models.Model):
     # resolver outcome it produced so multi-scrape histories stay truthful.
     apply_url = models.CharField(max_length=2000, null=True, blank=True)
     apply_url_status = models.CharField(max_length=16, default="unknown")
+    # Hints captured at submit time by the browser extension (ccsender) —
+    # URLs the user discovered through their own browsing trail. Distinct
+    # from Scrape.apply_url above which ResolveApplyUrl writes server-side
+    # later. Both fields are indexed so compute_duplicate_candidates can
+    # join on them to surface cross-platform dedup relationships (LinkedIn
+    # JP ↔ ATS JP) bidirectionally on the candidate panel.
+    apply_url_from_hint = models.CharField(
+        max_length=2000, null=True, blank=True, db_index=True
+    )
+    referrer_url = models.CharField(
+        max_length=2000, null=True, blank=True, db_index=True
+    )
     # Phase 3 learning loop: when the resolver ends in unknown/failed,
     # the ai-side heuristic scan stores candidate "Apply" elements
     # here for later aggregation + promotion into
