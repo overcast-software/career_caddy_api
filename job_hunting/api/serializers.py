@@ -1460,6 +1460,7 @@ class ScrapeProfileSerializer(BaseSerializer):
     attributes = [
         "hostname", "requires_auth", "avg_content_length", "success_rate",
         "css_selectors", "url_rewrites", "apply_resolver_config",
+        "extension_selectors",
         "extraction_hints", "page_structure",
         "last_success_at", "scrape_count", "failure_count", "tier0_miss_count",
         "preferred_tier", "enabled", "created_at", "updated_at",
