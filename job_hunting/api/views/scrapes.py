@@ -1425,6 +1425,79 @@ class ScrapeProfileViewSet(BaseViewSet):
 
     @action(
         detail=False,
+        methods=["get"],
+        url_path="extension-selectors",
+        permission_classes=[IsAuthenticated],
+    )
+    def extension_selectors(self, request):
+        """Return the per-host extension selector bundle for `hostname`.
+
+        Authenticated-but-not-admin endpoint — the browser extension
+        calls this on every send via the user's `jh_*` API key to pick
+        up the right `apply_button_selectors` / `canonical_link_selectors`
+        / `apply_url_decoder` for the active tab's host. The full
+        ScrapeProfile resource is staff-only (the rest of this viewset
+        keeps IsAdminUser) so we expose just the narrow selector
+        subset here.
+
+        Query: ?hostname=linkedin.com
+
+        Lookup matches the host exactly OR any subdomain (e.g.
+        `jobs.linkedin.com` finds the `linkedin.com` profile) so a
+        single profile covers a host family. Returns 404 when no
+        profile exists for the host — the extension falls back to its
+        baked defaults.
+        """
+        raw = (request.query_params.get("hostname") or "").strip().lower()
+        if not raw:
+            return Response(
+                {"errors": [{"detail": "hostname is required"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        host = raw[4:] if raw.startswith("www.") else raw
+        # Exact match wins, then walk parent-domain suffixes so
+        # subdomains (jobs.example.com, careers.example.com) inherit
+        # the parent profile without separate rows.
+        candidates = [host]
+        parts = host.split(".")
+        for i in range(1, len(parts) - 1):
+            candidates.append(".".join(parts[i:]))
+        profile = None
+        for candidate in candidates:
+            profile = (
+                ScrapeProfile.objects
+                .filter(hostname=candidate, enabled=True)
+                .first()
+            )
+            if profile:
+                break
+        if not profile or not profile.extension_selectors:
+            return Response(
+                {"errors": [{"detail": "No extension selectors for host"}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        cfg = profile.extension_selectors or {}
+        return Response(
+            {
+                "data": {
+                    "type": "scrape-profile-extension-selectors",
+                    "id": str(profile.id),
+                    "attributes": {
+                        "hostname": profile.hostname,
+                        "apply_button_selectors": cfg.get(
+                            "apply_button_selectors", []
+                        ),
+                        "canonical_link_selectors": cfg.get(
+                            "canonical_link_selectors", []
+                        ),
+                        "apply_url_decoder": cfg.get("apply_url_decoder"),
+                    },
+                }
+            }
+        )
+
+    @action(
+        detail=False,
         methods=["post"],
         url_path=r"(?P<hostname>[^/]+)/update-from-outcome",
     )
