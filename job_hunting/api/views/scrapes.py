@@ -1409,9 +1409,15 @@ class ScrapeProfileViewSet(BaseViewSet):
         data = request.data if isinstance(request.data, dict) else {}
         node = data.get("data") or {}
         attrs = node.get("attributes") or {}
+        # ScrapeProfile carries multiple JSONB blobs by design (css_selectors,
+        # apply_resolver_config, extension_selectors, url_rewrites) so per-host
+        # tuning can land at runtime without a Django migration. Keep this list
+        # in sync with the JSONFields on the model — otherwise we end up writing
+        # data migrations to mutate JSON, which defeats the nimble design.
         editable = [
             "extraction_hints", "page_structure", "css_selectors",
             "preferred_tier", "enabled",
+            "apply_resolver_config", "extension_selectors", "url_rewrites",
         ]
         for field in editable:
             json_key = field.replace("_", "-")
