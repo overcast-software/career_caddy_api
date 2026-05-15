@@ -26,14 +26,19 @@ class TestScrapeProfileExtensionSelectors(TestCase):
         self.client.force_authenticate(user=self.user)
 
     def test_returns_linkedin_seeded_selectors(self):
-        """0076 data migration seeds linkedin.com — verify the shape the
-        extension's DECODERS registry expects."""
+        """0076 data migration seeds linkedin.com, 0077 refreshes the
+        apply-button selectors to track LinkedIn's current DOM. Verify
+        the shape the extension's DECODERS registry expects."""
         resp = self.client.get(self.URL + "?hostname=linkedin.com")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         attrs = resp.json()["data"]["attributes"]
         self.assertEqual(attrs["hostname"], "linkedin.com")
+        # aria-label is durable across LinkedIn's atomic-CSS rotations;
+        # the legacy `a.jobs-apply-button` class no longer appears on
+        # the rendered apply button.
         self.assertIn(
-            "a.jobs-apply-button[href]", attrs["apply_button_selectors"]
+            'a[aria-label="Apply on company website"][href]',
+            attrs["apply_button_selectors"],
         )
         self.assertIn(
             'meta[property="og:url"]', attrs["canonical_link_selectors"]
