@@ -594,14 +594,14 @@ class ScrapeViewSet(BaseViewSet):
                         "skip scoring — the JobPost is still parsed and saved."
                     ),
                 ),
-                "apply_url_hint": drf_serializers.CharField(
+                "apply_url": drf_serializers.CharField(
                     required=False,
                     allow_blank=True,
                     help_text=(
                         "Optional URL the browser extension extracted from the "
                         "'Apply' button (e.g. LinkedIn's safety/go wrapper "
-                        "decoded to an ATS URL). Persisted on the Scrape and "
-                        "used as a cross-platform dedup signal."
+                        "decoded to an ATS URL). Written to JobPost.apply_url "
+                        "and used as the cross-platform dedup signal."
                     ),
                 ),
                 "canonical_link_hint": drf_serializers.CharField(
@@ -653,7 +653,7 @@ class ScrapeViewSet(BaseViewSet):
         source = _normalize_source_hint(data.get("source"))
         auto_score_raw = data.get("auto_score")
         auto_score = True if auto_score_raw is None else bool(auto_score_raw)
-        apply_url_hint = (data.get("apply_url_hint") or "").strip() or None
+        apply_url = (data.get("apply_url") or "").strip() or None
         canonical_link_hint = (data.get("canonical_link_hint") or "").strip() or None
         referrer_url = (data.get("referrer_url") or "").strip() or None
 
@@ -711,11 +711,11 @@ class ScrapeViewSet(BaseViewSet):
                 canonical_link_hint = validate_submission_url(canonical_link_hint)
             except UrlPolicyError:
                 canonical_link_hint = None
-        if apply_url_hint:
+        if apply_url:
             try:
-                apply_url_hint = validate_submission_url(apply_url_hint)
+                apply_url = validate_submission_url(apply_url)
             except UrlPolicyError:
-                apply_url_hint = None
+                apply_url = None
         if referrer_url:
             try:
                 referrer_url = validate_submission_url(referrer_url)
@@ -793,7 +793,6 @@ class ScrapeViewSet(BaseViewSet):
             status="pending",
             created_by=request.user,
             source=source,
-            apply_url_from_hint=apply_url_hint,
             referrer_url=referrer_url,
         )
         from job_hunting.lib.scraper import _log_scrape_status
@@ -803,6 +802,14 @@ class ScrapeViewSet(BaseViewSet):
         parse_scrape(scrape.id, user_id=request.user.id, sync=True)
 
         scrape.refresh_from_db()
+        # The extension is the authoritative writer for JobPost.apply_url
+        # (camoufox-based ResolveApplyUrl is being phased out). Stamp it on
+        # the JP whenever the extension supplied a value; later writers
+        # may no-op if it's already set.
+        if apply_url and scrape.job_post_id:
+            JobPost.objects.filter(pk=scrape.job_post_id).update(
+                apply_url=apply_url, apply_url_status="resolved"
+            )
         if scrape.job_post_id and auto_score:
             try:
                 from job_hunting.api.views.scores import _auto_score_job_post
@@ -810,13 +817,21 @@ class ScrapeViewSet(BaseViewSet):
             except Exception:
                 logger.exception("from_text: auto-score failed for scrape %s", scrape.id)
 
-        # Cross-platform dedup: look up an existing JP at each hint URL,
-        # create a stub JP when none exists, and surface the relationship
-        # in the response so the frontend can route the user to whichever
-        # JP represents the canonical record (ATS over jobboard).
-        apply_match_id = self._resolve_hint_match(
-            apply_url_hint, "apply_hint_stub", request.user
-        ) if apply_url_hint else None
+        # Cross-platform dedup: look up an existing JP at the apply_url
+        # (read-only — no stub creation; the relationship is fully captured
+        # by JobPost.apply_url itself). Referrer leg still creates stubs
+        # because referrer is a per-submit signal that doesn't have a
+        # symmetric storage on JP.
+        apply_match_id = None
+        if apply_url:
+            canonical = canonicalize_link(apply_url)
+            existing_apply = (
+                JobPost.objects
+                .filter(Q(link=apply_url) | Q(canonical_link=canonical))
+                .order_by("-complete", "id")
+                .first()
+            )
+            apply_match_id = existing_apply.id if existing_apply else None
         referrer_match_id = self._resolve_hint_match(
             referrer_url, "referrer_stub", request.user
         ) if referrer_url else None
@@ -825,7 +840,7 @@ class ScrapeViewSet(BaseViewSet):
             submitted_jp_id=scrape.job_post_id,
             submitted_link=link,
             apply_match_id=apply_match_id,
-            apply_url_hint=apply_url_hint,
+            apply_url=apply_url,
         )
 
         scr_ser = self.get_serializer()
@@ -842,10 +857,13 @@ class ScrapeViewSet(BaseViewSet):
         )
 
     def _resolve_hint_match(self, hint_url, stub_source, user):
-        """Find an existing JobPost for `hint_url`, or create a stub JP.
+        """Find an existing JobPost for `hint_url`, or create a referrer
+        stub JP.
 
-        Returns the JobPost id (existing or freshly-created stub) so the
-        response carries a stable reference the frontend can link to.
+        Used for the referrer leg of cross-platform dedup. The apply leg
+        no longer needs this: JobPost.apply_url stores the signal directly
+        on the JP (collapse plan, notes.org). Returns the JobPost id so
+        the response carries a stable reference the frontend can link to.
         Stub JPs use `complete=False` so the hold-poller / scrape-graph
         treats them as incomplete and merges content in place when the
         user later submits the hint URL directly.
@@ -891,22 +909,20 @@ class ScrapeViewSet(BaseViewSet):
         submitted_jp_id,
         submitted_link,
         apply_match_id,
-        apply_url_hint,
+        apply_url,
     ):
         """Decide where the frontend should route the user.
 
         Prefer the ATS JP (greenhouse/lever/ats.*) over the jobboard JP
         (linkedin/indeed/glassdoor) — the ATS listing is the canonical
-        record of the role. The host pair drives the choice; the
-        submitted JP may or may not exist (e.g. parse_scrape failed to
-        attach one), and the apply-match may be a freshly-created stub.
-        Falls through to the submitted JP id when the host pair doesn't
-        fit the (ATS, jobboard) shape.
+        record of the role. Falls through to the submitted JP id when the
+        host pair doesn't fit the (ATS, jobboard) shape or no apply-match
+        exists.
         """
         if (
             apply_match_id
-            and apply_url_hint
-            and host_in_ats(apply_url_hint)
+            and apply_url
+            and host_in_ats(apply_url)
             and submitted_link
             and host_in_jobboard(submitted_link)
         ):
