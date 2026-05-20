@@ -218,10 +218,10 @@ class TestDuplicateCandidates(TestCase):
 
 
 class TestDuplicateCandidatesExtensionHints(TestCase):
-    """Bidirectional cross-platform dedup: a Scrape.apply_url_from_hint
-    pointing at JP-A surfaces the Scrape's parent JP-B as a candidate on
-    JP-A's panel (apply_hint signal); a Scrape.referrer_url pointing at
-    JP-A surfaces the parent JP-B as a referrer_hint candidate."""
+    """Bidirectional cross-platform dedup: JobPost.apply_url pointing at
+    JP-A surfaces the source JP-B as a candidate on JP-A's panel
+    (apply_hint signal); a Scrape.referrer_url pointing at JP-A surfaces
+    the parent JP-B as a referrer_hint candidate."""
 
     LINKEDIN = "https://www.linkedin.com/jobs/view/4400000001/"
     ATS = "https://ats.rippling.com/rippling/jobs/abc-001"
@@ -239,11 +239,11 @@ class TestDuplicateCandidatesExtensionHints(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         return resp.json()["data"]
 
-    def test_apply_hint_surfaces_linkedin_jp_on_ats_panel(self):
-        """Setup: user submits the LinkedIn JP with apply_url_hint=ATS.
-        The api creates the LinkedIn JP and persists the hint on its
-        Scrape. The ATS JP exists separately. Opening the ATS JP must
-        surface the LinkedIn JP via the apply_hint signal."""
+    def test_apply_url_surfaces_linkedin_jp_on_ats_panel(self):
+        """Setup: user submits the LinkedIn JP with apply_url=ATS.
+        JobPost.apply_url stores the cross-platform link directly. The
+        ATS JP exists separately. Opening the ATS JP must surface the
+        LinkedIn JP via the apply_hint signal."""
         ats_jp = JobPost.objects.create(
             title="Engineer",
             company=self.company,
@@ -254,12 +254,7 @@ class TestDuplicateCandidatesExtensionHints(TestCase):
             title="Engineer (LinkedIn)",
             company=self.company,
             link=self.LINKEDIN,
-            created_by=self.user,
-        )
-        Scrape.objects.create(
-            url=self.LINKEDIN,
-            job_post=linkedin_jp,
-            apply_url_from_hint=self.ATS,
+            apply_url=self.ATS,
             created_by=self.user,
         )
         candidates = self._candidates(ats_jp)
@@ -269,6 +264,30 @@ class TestDuplicateCandidatesExtensionHints(TestCase):
             "apply_hint", candidates[0]["attributes"]["match_signals"]
         )
         self.assertEqual(candidates[0]["attributes"]["confidence"], "high")
+
+    def test_apply_url_surfaces_ats_jp_on_linkedin_panel(self):
+        """Reverse leg of the same relationship: opening the LinkedIn JP
+        (whose apply_url points at the ATS JP) must also surface the ATS
+        JP as a candidate. JobPost-direct join works both ways."""
+        ats_jp = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            link=self.ATS,
+            created_by=self.user,
+        )
+        linkedin_jp = JobPost.objects.create(
+            title="Engineer (LinkedIn)",
+            company=self.company,
+            link=self.LINKEDIN,
+            apply_url=self.ATS,
+            created_by=self.user,
+        )
+        candidates = self._candidates(linkedin_jp)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["id"], str(ats_jp.id))
+        self.assertIn(
+            "apply_hint", candidates[0]["attributes"]["match_signals"]
+        )
 
     def test_referrer_hint_surfaces_ats_jp_on_linkedin_panel(self):
         """Symmetric case: user submits the ATS JP after clicking through

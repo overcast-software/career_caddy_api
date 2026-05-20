@@ -704,19 +704,21 @@ def compute_duplicate_candidates(post, request):
         for hit in visible.filter(content_fingerprint=post.content_fingerprint):
             _add(hit, "fingerprint", "high")
 
-    # Cross-platform dedup signals captured by the browser extension at
-    # submit time. Bidirectional: a JP at the apply-button destination
-    # surfaces the LinkedIn JP as a candidate (apply_hint join), and a
-    # JP at the referrer URL surfaces the ATS JP it was reached from
-    # (referrer_hint join). Both indexed columns on Scrape (migration
-    # 0074). post.link / canonical_link cover both raw and tracker-stripped
-    # forms of the hint URL.
+    # Cross-platform dedup signals. apply_url is the canonical
+    # cross-platform link: a JP whose apply_url points at this JP's link
+    # is the jobboard-side surface for the same role (LinkedIn → ATS, or
+    # any analogue). The relationship is reciprocal — joining either
+    # direction surfaces the partner JP. The referrer leg still lives on
+    # Scrape (per-submit signal, not a destination).
     link_targets = [v for v in {post.link, post.canonical_link} if v]
     if link_targets:
-        for hit in visible.filter(
-            scrapes__apply_url_from_hint__in=link_targets
-        ).distinct():
+        for hit in visible.filter(apply_url__in=link_targets).distinct():
             _add(hit, "apply_hint", "high")
+        if post.apply_url:
+            for hit in visible.filter(
+                Q(link=post.apply_url) | Q(canonical_link=post.apply_url)
+            ).distinct():
+                _add(hit, "apply_hint", "high")
         for hit in visible.filter(
             scrapes__referrer_url__in=link_targets
         ).distinct():

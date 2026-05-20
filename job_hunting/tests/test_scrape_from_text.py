@@ -675,11 +675,12 @@ class TestScrapeFromTextAutoScore(TestCase):
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
 class TestScrapeFromTextExtensionHints(TestCase):
-    """Cross-platform dedup hints captured by the browser extension at
-    submit time. apply_url_hint and referrer_url are persisted on the
-    Scrape (indexed); each is looked up for an existing JP, with a stub
-    created when none exists. canonical_redirect picks the ATS JP over
-    the jobboard JP when both sides of the pair exist.
+    """Cross-platform dedup signals captured by the browser extension at
+    submit time. apply_url is the canonical cross-platform link — written
+    directly to JobPost.apply_url. referrer_url is a per-submit signal
+    persisted on the Scrape (referrer leg keeps stub creation).
+    canonical_redirect picks the ATS JP over the jobboard JP when both
+    sides of the pair exist.
     """
 
     LINKEDIN = "https://www.linkedin.com/jobs/view/4400000000/"
@@ -691,22 +692,46 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.user = User.objects.create_user(username="hintuser", password="pw")
         self.client.force_authenticate(user=self.user)
 
+    def _attach_jp_side_effect(self, jp):
+        """Side effect for parse_scrape mock — wires the scrape to a
+        pre-created JP, mirroring what the real extractor does on a link
+        match.  Lets tests assert on JobPost.apply_url after the
+        view writes it post-parse."""
+        def _se(scrape_id, *args, **kwargs):
+            Scrape.objects.filter(pk=scrape_id).update(
+                job_post=jp, status="completed"
+            )
+        return _se
+
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_hints_persisted_on_scrape(self, _mock_parse):
+    def test_apply_url_written_to_jobpost(self, mock_parse):
+        company = Company.objects.create(name="Acme")
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            description=self.LONG_DESC,
+            link=self.LINKEDIN,
+            source="extension",
+            created_by=self.user,
+            complete=False,
+        )
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
                 "text": "Senior Engineer at Acme",
                 "link": self.LINKEDIN,
-                "apply_url_hint": self.ATS,
+                "apply_url": self.ATS,
                 "referrer_url": "https://www.linkedin.com/jobs/search/",
                 "source": "extension",
             },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        jp.refresh_from_db()
+        self.assertEqual(jp.apply_url, self.ATS)
+        self.assertEqual(jp.apply_url_status, "resolved")
         scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
-        self.assertEqual(scrape.apply_url_from_hint, self.ATS)
         self.assertEqual(scrape.referrer_url, "https://www.linkedin.com/jobs/search/")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -729,10 +754,11 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertEqual(scrape.url, self.LINKEDIN)
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_apply_hint_matches_existing_jp(self, _mock_parse):
+    def test_apply_url_matches_existing_jp(self, _mock_parse):
         """When a JobPost already exists at the apply-button destination,
         the response surfaces its id so the frontend can render the
-        relationship immediately."""
+        relationship immediately. ATS host → canonical_redirect routes
+        there over the submitted LinkedIn JP."""
         company = Company.objects.create(name="Rippling")
         existing = JobPost.objects.create(
             title="Senior Engineer",
@@ -747,7 +773,7 @@ class TestScrapeFromTextExtensionHints(TestCase):
             data={
                 "text": "Senior Engineer at Rippling",
                 "link": self.LINKEDIN,
-                "apply_url_hint": self.ATS,
+                "apply_url": self.ATS,
                 "source": "extension",
             },
             format="json",
@@ -755,40 +781,39 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         meta = resp.json().get("meta") or {}
         self.assertEqual(meta.get("apply_match"), existing.id)
-        # ATS is the canonical record — frontend should route there.
         self.assertEqual(meta.get("canonical_redirect"), existing.id)
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_apply_hint_creates_stub_when_no_existing_jp(self, _mock_parse):
-        """No JP at the apply URL → create a stub JP with
-        source='apply_hint_stub' and complete=False so the hold-poller /
-        scrape-graph treats it as upgradeable in place."""
+    def test_apply_url_does_not_create_stub(self, _mock_parse):
+        """One-channel collapse: when no JP exists at the apply URL the
+        api does NOT create a stub. The relationship is fully captured by
+        JobPost.apply_url; the second-side JP only materializes when
+        someone actually submits it."""
+        before = JobPost.objects.count()
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
                 "text": "Senior Engineer at Rippling",
                 "link": self.LINKEDIN,
-                "apply_url_hint": self.ATS,
+                "apply_url": self.ATS,
                 "source": "extension",
             },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         meta = resp.json().get("meta") or {}
-        stub_id = meta.get("apply_match")
-        self.assertIsNotNone(stub_id)
-        stub = JobPost.objects.get(pk=stub_id)
-        self.assertEqual(stub.link, self.ATS)
-        self.assertEqual(stub.source, "apply_hint_stub")
-        self.assertFalse(stub.complete)
-        # ATS host → frontend routes there.
-        self.assertEqual(meta.get("canonical_redirect"), stub_id)
+        self.assertIsNone(meta.get("apply_match"))
+        # No stub at the ATS URL.
+        self.assertFalse(JobPost.objects.filter(link=self.ATS).exists())
+        # No proliferation of phantom JPs either.
+        self.assertEqual(JobPost.objects.count(), before)
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
     def test_referrer_creates_stub_with_referrer_source(self, _mock_parse):
         """Symmetric case: ccsend FROM an ATS page after clicking through
         LinkedIn forwards document.referrer. No LinkedIn JP yet → stub
-        with source='referrer_stub'."""
+        with source='referrer_stub'. (Referrer leg still creates stubs;
+        only the apply leg was collapsed.)"""
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
@@ -810,7 +835,7 @@ class TestScrapeFromTextExtensionHints(TestCase):
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
     def test_canonical_redirect_falls_back_to_submitted_when_no_apply_match(self, _mock_parse):
-        """Without an apply hint or when the apply match isn't an ATS
+        """Without an apply URL or when the apply match isn't an ATS
         host, canonical_redirect points at whatever JP the submit
         produced (which may be None when parse_scrape doesn't attach
         one, but the field is still set explicitly)."""
@@ -825,28 +850,38 @@ class TestScrapeFromTextExtensionHints(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         meta = resp.json().get("meta") or {}
-        # parse_scrape is mocked so no JP is attached; canonical_redirect
-        # mirrors that (None) — the key still appears in the response.
         self.assertIn("canonical_redirect", meta)
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_private_hint_silently_dropped(self, _mock_parse):
-        """Adversarial private/localhost hint must not block ingestion
-        nor end up persisted on the Scrape."""
+    def test_private_apply_url_silently_dropped(self, mock_parse):
+        """Adversarial private/localhost URLs must not block ingestion
+        nor end up persisted as the JP apply_url."""
+        company = Company.objects.create(name="Acme")
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=company,
+            description=self.LONG_DESC,
+            link=self.LINKEDIN,
+            source="extension",
+            created_by=self.user,
+            complete=False,
+        )
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
                 "text": "Senior Engineer at Acme",
                 "link": self.LINKEDIN,
-                "apply_url_hint": "http://localhost:8000/secrets",
+                "apply_url": "http://localhost:8000/secrets",
                 "referrer_url": "http://192.168.1.1/admin",
                 "source": "extension",
             },
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        jp.refresh_from_db()
+        self.assertIsNone(jp.apply_url)
         scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
-        self.assertIsNone(scrape.apply_url_from_hint)
         self.assertIsNone(scrape.referrer_url)
         meta = resp.json().get("meta") or {}
         self.assertIsNone(meta.get("apply_match"))
@@ -863,7 +898,6 @@ class TestScrapeFromTextExtensionHints(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
-        self.assertIsNone(scrape.apply_url_from_hint)
         self.assertIsNone(scrape.referrer_url)
         meta = resp.json().get("meta") or {}
         self.assertIsNone(meta.get("apply_match"))
