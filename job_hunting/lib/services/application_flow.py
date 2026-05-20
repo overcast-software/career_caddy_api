@@ -64,6 +64,23 @@ TERMINAL_BUCKETS = {
     BUCKET_GHOSTED,
 }
 
+# Rank used to keep the per-application sequence monotonically forward.
+# A status logged after a higher-rank status is read as a correction to
+# the prior log: the prior entry pops off the sequence so the funnel
+# reflects the corrected truth instead of a back-edge. d3-sankey rejects
+# any graph with a cycle ("circular link"), so the rank check is also
+# what keeps the cross-application aggregate a DAG.
+STAGE_RANKS: dict[str, int] = {
+    BUCKET_APPLIED: 1,
+    BUCKET_INTERVIEW: 2,
+    BUCKET_OFFER: 3,
+    BUCKET_ACCEPTED: 4,
+    BUCKET_DECLINED: 4,
+    BUCKET_REJECTED: 4,
+    BUCKET_WITHDREW: 4,
+    BUCKET_GHOSTED: 4,
+}
+
 # Status name → bucket. Case-insensitive match on Status.status.
 #
 # Pre-application triage labels (Unvetted, Vetted Good) are deliberately
@@ -109,6 +126,12 @@ def _bucket_for(status_name: str | None) -> str | None:
 def _app_bucket_sequence(application, now) -> list[str]:
     """Return the per-application chronological bucket sequence, deduped.
 
+    Walks status logs in time order; a status with rank ≤ the top of the
+    sequence is treated as a correction to a mis-logged prior status —
+    pop until the new status fits forward. The latest log wins. This
+    keeps the cross-application aggregate a DAG so d3-sankey can lay it
+    out (cycles raise "circular link").
+
     Includes a trailing `ghosted` bucket when the last logged stage is a
     pass-through and the last log is older than GHOST_AFTER_DAYS.
     """
@@ -120,14 +143,26 @@ def _app_bucket_sequence(application, now) -> list[str]:
     )
     sequence: list[str] = []
     last_logged = None
+    last_logged_per_bucket: dict[str, object] = {}
     for s in statuses:
         bucket = _bucket_for(s.status.status if s.status_id else None)
         if bucket is None:
             continue
-        if sequence and sequence[-1] == bucket:
-            continue  # dedupe consecutive duplicates
+        ts = s.logged_at or s.created_at
+        rank = STAGE_RANKS.get(bucket, 0)
+        # Backward-or-equal rank → correction: pop prior misreads until
+        # the new bucket fits strictly forward (or the sequence empties).
+        while sequence and STAGE_RANKS.get(sequence[-1], 0) >= rank:
+            popped = sequence.pop()
+            last_logged_per_bucket.pop(popped, None)
         sequence.append(bucket)
-        last_logged = s.logged_at or s.created_at
+        last_logged_per_bucket[bucket] = ts
+        last_logged = ts
+
+    # Recompute last_logged for the surviving tail bucket — pops may have
+    # invalidated the running value.
+    if sequence:
+        last_logged = last_logged_per_bucket.get(sequence[-1], last_logged)
 
     if sequence and sequence[-1] in STAGE_BUCKETS and last_logged:
         if now - last_logged > timedelta(days=GHOST_AFTER_DAYS):
