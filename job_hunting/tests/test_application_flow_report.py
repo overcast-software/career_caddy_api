@@ -228,6 +228,90 @@ class TestApplicationFlowReport(TestCase):
         self.assertEqual(attrs["total_applications"], 2)
         self.assertEqual(self._edge(attrs, "unscored", "applications"), 2)
 
+    def test_correction_drops_misread_status(self):
+        # Applied → Rejected → Interview Scheduled. The Rejection was a
+        # mis-log corrected by a later Interview log. The sankey must
+        # reflect the corrected truth: applications → applied → interview.
+        # No edges into or out of `rejected` for this app.
+        jp = JobPost.objects.create(title="P", company=self.company, created_by=self.user)
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Applied", days_ago=10)
+        _log(app, "Rejected", days_ago=5)
+        _log(app, "Interview Scheduled", days_ago=2)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "applications", "applied"), 1)
+        self.assertEqual(self._edge(attrs, "applied", "interview"), 1)
+        self.assertEqual(self._edge(attrs, "applied", "rejected"), 0)
+        self.assertEqual(self._edge(attrs, "rejected", "interview"), 0)
+        self.assertEqual(self._edge(attrs, "interview", "rejected"), 0)
+
+    def test_correction_mid_funnel_drops_misread(self):
+        # Applied → Interview → Rejected → Offer → Accepted. The Rejected
+        # mid-funnel was wrong; Offer/Accepted came after, so the truth is
+        # applied → interview → offer → accepted.
+        jp = JobPost.objects.create(title="P", company=self.company, created_by=self.user)
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Applied", days_ago=60)
+        _log(app, "Interview Scheduled", days_ago=40)
+        _log(app, "Rejected", days_ago=30)
+        _log(app, "Offer", days_ago=10)
+        _log(app, "Accepted", days_ago=5)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "applied", "interview"), 1)
+        self.assertEqual(self._edge(attrs, "interview", "offer"), 1)
+        self.assertEqual(self._edge(attrs, "offer", "accepted"), 1)
+        self.assertEqual(self._edge(attrs, "interview", "rejected"), 0)
+        self.assertEqual(self._edge(attrs, "rejected", "offer"), 0)
+
+    def test_terminal_corrected_to_other_terminal(self):
+        # Rejected → Accepted (the rejection got retracted). Latest wins.
+        jp = JobPost.objects.create(title="P", company=self.company, created_by=self.user)
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Applied", days_ago=20)
+        _log(app, "Rejected", days_ago=10)
+        _log(app, "Accepted", days_ago=2)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "applied", "accepted"), 1)
+        self.assertEqual(self._edge(attrs, "applied", "rejected"), 0)
+
+    def test_cross_application_aggregate_is_dag(self):
+        # Two apps whose corrected sequences could otherwise look cyclic
+        # in aggregate (interview→rejected from one, rejected→interview
+        # in another's raw log). The corrected sequences must yield no
+        # back-edge between the same pair of buckets in either direction.
+        jp1 = JobPost.objects.create(title="Normal", company=self.company, created_by=self.user)
+        a1 = JobApplication.objects.create(job_post=jp1, user=self.user)
+        _log(a1, "Applied", days_ago=20)
+        _log(a1, "Interview Scheduled", days_ago=10)
+        _log(a1, "Rejected", days_ago=2)
+
+        jp2 = JobPost.objects.create(title="Corrected", company=self.company, created_by=self.user)
+        a2 = JobApplication.objects.create(job_post=jp2, user=self.user)
+        _log(a2, "Applied", days_ago=20)
+        _log(a2, "Rejected", days_ago=10)
+        _log(a2, "Interview Scheduled", days_ago=2)
+
+        attrs = self._attrs(self.client.get(URL))
+        # Assert no cycle between interview and rejected.
+        a = self._edge(attrs, "interview", "rejected")
+        b = self._edge(attrs, "rejected", "interview")
+        self.assertGreaterEqual(a, 1)
+        self.assertEqual(b, 0)
+
+    def test_aged_correction_uses_corrected_log_timestamp_for_ghost(self):
+        # The ghost gate must use the surviving log's timestamp, not a
+        # popped earlier log's. If user mis-logged Rejected 50 days ago
+        # then corrected to Interview Scheduled 5 days ago, the surviving
+        # interview shouldn't ghost (5 days < 30).
+        jp = JobPost.objects.create(title="P", company=self.company, created_by=self.user)
+        app = JobApplication.objects.create(job_post=jp, user=self.user)
+        _log(app, "Applied", days_ago=60)
+        _log(app, "Rejected", days_ago=50)
+        _log(app, "Interview Scheduled", days_ago=5)
+        attrs = self._attrs(self.client.get(URL))
+        self.assertEqual(self._edge(attrs, "applied", "interview"), 1)
+        self.assertEqual(self._edge(attrs, "interview", "ghosted"), 0)
+
     def test_scope_all_requires_staff(self):
         response = self.client.get(URL + "?scope=all")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
