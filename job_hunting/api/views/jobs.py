@@ -562,7 +562,11 @@ class JobPostViewSet(BaseViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        if obj.created_by_id != request.user.id:
+        # Staff bypass for the edit form (matches destroy() above and the
+        # Phase 1 ticket for jp.edit: created_by + staff may PATCH; everyone
+        # else gets 403). Revisit if usage shows pain — see Plans/PLAN
+        # ActivityPub prep + job-post adaptation/Job-post edit page additions.
+        if not request.user.is_staff and obj.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         ser = self.get_serializer()
         try:
@@ -576,6 +580,19 @@ class JobPostViewSet(BaseViewSet):
         # them back in PATCH bodies from the prior GET; setattr would raise
         # because they have no setter.
         attrs.pop("top_score", None)
+        # When the caller edits `link`, refresh canonical_link from the new
+        # raw URL. Save()'s "set once" guard skips the derivation when
+        # canonical_link is already populated, which is correct on the
+        # create path (callers may seed an explicit canonical_link for
+        # post-redirect dedup — see the email-stub upgrade regression at
+        # tests/test_job_post_extractor.py::
+        # test_canonical_link_hit_upgrades_email_stub_at_redirected_url).
+        # On a PATCH that changes the link, however, the form expects the
+        # canonical_link readonly display to refresh — so we explicitly
+        # clear it here, and save() then re-runs canonicalize_link().
+        if "link" in attrs and attrs["link"] != obj.link:
+            obj.canonical_link = None
+            attrs.pop("canonical_link", None)
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(

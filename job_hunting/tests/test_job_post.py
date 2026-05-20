@@ -154,3 +154,88 @@ class TestJobPostAPI(TestCase):
         retrieve = self.client.get(f"/api/v1/job-posts/{shared.id}/")
         self.assertEqual(retrieve.status_code, 200)
         self.assertEqual(retrieve.json()["data"]["attributes"]["top_score"], 55)
+
+
+class TestJobPostEditApplyUrlCanonical(TestCase):
+    """Phase 1 of Plans/PLAN ActivityPub prep + job-post adaptation:
+    jp.edit surfaces apply_url editable + canonical_link read-only. Backend
+    gate: created_by + staff may PATCH; everyone else 403."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username="jp_owner", password="pass")
+        self.staff = User.objects.create_user(
+            username="jp_staff", password="pass", is_staff=True
+        )
+        self.stranger = User.objects.create_user(username="jp_stranger", password="pass")
+        self.company = Company.objects.create(name="ApplyCo")
+        self.jp = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            link="https://example.com/jobs/abc?utm_source=foo",
+            created_by=self.owner,
+        )
+
+    def _patch(self, user, attributes):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        payload = {
+            "data": {
+                "type": "job-post",
+                "id": str(self.jp.id),
+                "attributes": attributes,
+            }
+        }
+        return client.patch(
+            f"/api/v1/job-posts/{self.jp.id}/", data=payload, format="json"
+        )
+
+    def test_owner_can_patch_apply_url(self):
+        response = self._patch(self.owner, {"apply_url": "https://ats.example.com/123"})
+        self.assertEqual(response.status_code, 200)
+        self.jp.refresh_from_db()
+        self.assertEqual(self.jp.apply_url, "https://ats.example.com/123")
+
+    def test_staff_can_patch_apply_url_on_post_they_dont_own(self):
+        response = self._patch(self.staff, {"apply_url": "https://ats.example.com/staff"})
+        self.assertEqual(response.status_code, 200)
+        self.jp.refresh_from_db()
+        self.assertEqual(self.jp.apply_url, "https://ats.example.com/staff")
+
+    def test_stranger_gets_403_on_patch(self):
+        response = self._patch(self.stranger, {"apply_url": "https://nope.example.com/"})
+        self.assertEqual(response.status_code, 403)
+        self.jp.refresh_from_db()
+        self.assertIsNone(self.jp.apply_url)
+
+    def test_patch_link_re_derives_canonical_link(self):
+        """The whole point of exposing canonical_link readonly: editing the
+        URL must refresh the canonical form on save. Previously save() only
+        set canonical_link when it was empty, so PATCH /link/ was a no-op
+        on canonical_link — the duplicate-detection seam quietly broke."""
+        # Initial canonicalize from setUp's link with utm_source.
+        self.jp.refresh_from_db()
+        original_canonical = self.jp.canonical_link
+        self.assertIsNotNone(original_canonical)
+        # New URL: same job, different tracking — canonical should equal the
+        # tracking-stripped form.
+        new_link = "https://example.com/jobs/abc?gh_src=tracker"
+        response = self._patch(self.owner, {"link": new_link})
+        self.assertEqual(response.status_code, 200)
+        self.jp.refresh_from_db()
+        # canonical_link is the tracking-stripped form, identical for both
+        # variants of the same listing.
+        self.assertNotIn("gh_src", self.jp.canonical_link or "")
+        self.assertNotIn("utm_source", self.jp.canonical_link or "")
+
+    def test_canonical_link_is_writable_in_serializer_but_save_overrides(self):
+        """Serializer still lists canonical_link as writable so PATCH-with-
+        echoed-attrs doesn't 400, but save() re-derives unconditionally so
+        a client-sent value can't desync canonical_link from link."""
+        response = self._patch(
+            self.owner,
+            {"link": "https://example.com/jobs/xyz", "canonical_link": "bogus"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.jp.refresh_from_db()
+        self.assertNotEqual(self.jp.canonical_link, "bogus")
+        self.assertIn("example.com", self.jp.canonical_link or "")
