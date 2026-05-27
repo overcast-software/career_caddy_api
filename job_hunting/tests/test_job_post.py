@@ -35,6 +35,26 @@ class TestJobPostModel(TestCase):
         jp.save()
         self.assertEqual(jp.apply_url_status, "unknown")
 
+    def test_save_strips_trailing_junk_from_link_and_apply_url(self):
+        # Regression for the 2026-05-27 hiring.cafe JP 2981 incident:
+        # LLM URL extractor included the HTML closing `"`, the api
+        # persisted it verbatim, the apply href 404'd in prod.
+        jp = JobPost.objects.create(
+            title="T",
+            company=self.company,
+            created_by=self.user,
+            link='https://hiring.cafe/job/5fsbbgitg82ev1ar"',
+            apply_url='https://ats.example.com/apply/42)',
+        )
+        jp.refresh_from_db()
+        self.assertEqual(jp.link, "https://hiring.cafe/job/5fsbbgitg82ev1ar")
+        self.assertEqual(jp.apply_url, "https://ats.example.com/apply/42")
+        # canonical_link must also be clean — it's derived from link on
+        # save, and is what the frontend dedup pipeline consults.
+        self.assertEqual(
+            jp.canonical_link, "https://hiring.cafe/job/5fsbbgitg82ev1ar"
+        )
+
 
 class TestJobPostAPI(TestCase):
     def setUp(self):

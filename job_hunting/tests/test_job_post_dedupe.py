@@ -8,9 +8,68 @@ from job_hunting.models.job_post_dedupe import (
     find_apply_url_matches,
     find_duplicate,
     fingerprint,
+    strip_url_trailing_junk,
 )
 
 User = get_user_model()
+
+
+class TestStripUrlTrailingJunk(TestCase):
+    """Regression for the 2026-05-27 hiring.cafe JP 2981 incident — LLM
+    URL extractor in cc_auto captured the closing ``"`` from the HTML
+    attribute, the api stored it verbatim, the frontend URL-encoded it
+    to ``%22`` in the apply href, and hiring.cafe 404'd."""
+
+    def test_falsy_passes_through(self):
+        self.assertIsNone(strip_url_trailing_junk(None))
+        self.assertEqual(strip_url_trailing_junk(""), "")
+
+    def test_strips_trailing_double_quote(self):
+        self.assertEqual(
+            strip_url_trailing_junk('https://hiring.cafe/job/5fsbbgitg82ev1ar"'),
+            "https://hiring.cafe/job/5fsbbgitg82ev1ar",
+        )
+
+    def test_strips_trailing_single_quote(self):
+        self.assertEqual(
+            strip_url_trailing_junk("https://example.com/jobs/42'"),
+            "https://example.com/jobs/42",
+        )
+
+    def test_strips_trailing_brackets_and_parens(self):
+        for trail in (")", "]", "}", ">", "}}]>"):
+            self.assertEqual(
+                strip_url_trailing_junk(f"https://example.com/jobs/42{trail}"),
+                "https://example.com/jobs/42",
+                msg=f"trailing {trail!r}",
+            )
+
+    def test_strips_trailing_whitespace_and_comma(self):
+        self.assertEqual(
+            strip_url_trailing_junk("https://example.com/jobs/42,\n"),
+            "https://example.com/jobs/42",
+        )
+
+    def test_leaves_clean_url_alone(self):
+        url = "https://example.com/jobs/42?utm=foo&id=1"
+        self.assertEqual(strip_url_trailing_junk(url), url)
+
+    def test_preserves_internal_punctuation(self):
+        # Only the TRAILING run is stripped — quotes mid-URL stay (they'd
+        # never be valid but we don't want to mangle stored data more
+        # than necessary).
+        self.assertEqual(
+            strip_url_trailing_junk('https://example.com/a"b/c'),
+            'https://example.com/a"b/c',
+        )
+
+    def test_canonicalize_link_strips_trailing_junk(self):
+        # canonicalize_link must invoke the strip as its first step so
+        # downstream urlparse/dedup never sees the slop.
+        self.assertEqual(
+            canonicalize_link('https://example.com/jobs/42"'),
+            "https://example.com/jobs/42",
+        )
 
 
 class TestCanonicalizeLink(TestCase):
