@@ -130,7 +130,21 @@ class JobPostViewSet(BaseViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
 
-
+    @staticmethod
+    def _visible_jobpost_qs(request):
+        """Posts the caller can reach via the five-clause visibility filter
+        (created / applied / scored / scraped / discovered). Staff see all.
+        Mirrors list() and compute_duplicate_candidates so dup-verb authz
+        matches what the user can otherwise see in the UI."""
+        if request.user.is_staff:
+            return JobPost.objects.all()
+        return JobPost.objects.filter(
+            Q(created_by_id=request.user.id)
+            | Q(applications__user_id=request.user.id)
+            | Q(scores__user_id=request.user.id)
+            | Q(scrapes__created_by_id=request.user.id)
+            | Q(discoveries__user_id=request.user.id)
+        ).distinct()
 
     def pre_save_payload(self, request, attrs, creating):
         # Remove any client-supplied ownership fields so they can't be spoofed
@@ -836,6 +850,133 @@ class JobPostViewSet(BaseViewSet):
             {"data": scr_ser.to_resource(scrape)},
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="List job posts marked as duplicates of this one",
+        responses={200: _JSONAPI_LIST, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["get"], url_path="duplicates")
+    def duplicates(self, request, pk=None):
+        """Reverse-FK list: posts whose duplicate_of points at this one.
+        Visibility-filtered so the form's manual-dedup panel only shows
+        the caller's own siblings."""
+        if not JobPost.objects.filter(pk=pk).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        visible = self._visible_jobpost_qs(request)
+        rows = list(visible.filter(duplicate_of_id=int(pk)))
+        ser = self.get_serializer()
+        return Response({"data": [ser.to_resource(r) for r in rows]})
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="Mark this job post as a duplicate of another",
+        request={"application/json": {"type": "object", "properties": {
+            "target_id": {"type": "integer"}
+        }}},
+        responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="mark-duplicate-of")
+    def mark_duplicate_of(self, request, pk=None):
+        """Set this post's duplicate_of to `target_id`. Caller must have
+        BOTH posts in their visibility set (staff bypass). Rejects self-
+        target and any chain that would form a cycle."""
+        visible = self._visible_jobpost_qs(request)
+        post = visible.filter(pk=pk).first()
+        if not post:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            target_id = int(data.get("target_id"))
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "target_id (int) is required"}]},
+                status=400,
+            )
+        if target_id == post.id:
+            return Response(
+                {"errors": [{"detail": "A post cannot be a duplicate of itself"}]},
+                status=400,
+            )
+        target = visible.filter(pk=target_id).first()
+        if not target:
+            return Response(
+                {"errors": [{"detail": "target not found or not visible"}]},
+                status=404,
+            )
+
+        # Cycle check: walk target.canonical chain; if we encounter `post`,
+        # the assignment would create a loop.
+        seen, cur = {post.id}, target
+        while cur is not None:
+            if cur.id in seen:
+                return Response(
+                    {"errors": [{"detail": "Would create a duplicate cycle"}]},
+                    status=400,
+                )
+            seen.add(cur.id)
+            cur = cur.duplicate_of
+
+        post.duplicate_of_id = target.id
+        post.save(update_fields=["duplicate_of_id"])
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(post)})
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="Clear this job post's duplicate_of pointer",
+        responses={200: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="unlink-duplicate")
+    def unlink_duplicate(self, request, pk=None):
+        """Set this post's duplicate_of to NULL. Idempotent — no-op when
+        it was already null. Visibility-gated on the post itself."""
+        visible = self._visible_jobpost_qs(request)
+        post = visible.filter(pk=pk).first()
+        if not post:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if post.duplicate_of_id is not None:
+            post.duplicate_of_id = None
+            post.save(update_fields=["duplicate_of_id"])
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(post)})
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="Promote this post to the canonical row of its dup cluster",
+        responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="promote-canonical")
+    def promote_canonical(self, request, pk=None):
+        """Swap roles: this post becomes canonical, the previous canonical
+        becomes a duplicate of this post, and every sibling that pointed at
+        the old canonical re-points at the new one. Only meaningful when
+        the post currently has duplicate_of set; otherwise 400."""
+        visible = self._visible_jobpost_qs(request)
+        post = visible.filter(pk=pk).first()
+        if not post:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if post.duplicate_of_id is None:
+            return Response(
+                {"errors": [{"detail": "Post is not a duplicate of anything"}]},
+                status=400,
+            )
+
+        old_canonical_id = post.duplicate_of_id
+        with transaction.atomic():
+            # Re-point every sibling (rows whose duplicate_of_id == old root)
+            # at the new canonical, then clear self and flip the old root.
+            JobPost.objects.filter(
+                duplicate_of_id=old_canonical_id
+            ).exclude(pk=post.id).update(duplicate_of_id=post.id)
+            post.duplicate_of_id = None
+            post.save(update_fields=["duplicate_of_id"])
+            JobPost.objects.filter(pk=old_canonical_id).update(
+                duplicate_of_id=post.id
+            )
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(post)})
 
     @extend_schema(
         tags=["Job Posts"],

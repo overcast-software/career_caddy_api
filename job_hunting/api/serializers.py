@@ -818,6 +818,15 @@ class JobPostSerializer(BaseSerializer):
         "scores": {"attr": "scores", "type": "score", "uselist": True},
         "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
         "top-score": {"attr": "top_score_record", "type": "score", "uselist": False},
+        # Self-referential duplicate FK. The Ember frontend reads this on
+        # jp.edit to show the current dup target (and lazy-fetch the row);
+        # writes go through the mark-duplicate-of / unlink-duplicate /
+        # promote-canonical verb endpoints, not via JSON:API PATCH.
+        "duplicate-of": {
+            "attr": "duplicate_of",
+            "type": "job-post",
+            "uselist": False,
+        },
         # Virtual relationship: candidates are computed per-request, not a
         # Django reverse FK. attr name is intentionally non-existent — the
         # framework's getattr(obj, attr, None) returns None safely; the real
