@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from job_hunting.models import Company, JobPost
+from job_hunting.models import Company, DuplicateAnnotation, JobPost
 
 
 User = get_user_model()
@@ -192,6 +192,77 @@ class TestPromoteCanonical(_Base):
         a = self._post("A", link="https://example.com/a")
         resp = self.client.post(self._url(a), {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestAnnotationWrites(_Base):
+    """Each verb writes a DuplicateAnnotation row. Phase 3 audit."""
+
+    def test_mark_writes_annotation(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        resp = self.client.post(
+            f"/api/v1/job-posts/{a.id}/mark-duplicate-of/",
+            {"target_id": b.id},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ann = DuplicateAnnotation.objects.get(from_jp_id=a.id, action="mark")
+        self.assertEqual(ann.to_jp_id, b.id)
+        self.assertIsNone(ann.previous_to_id)
+        self.assertEqual(ann.set_by_id, self.user.id)
+        self.assertIn("candidates", ann.signal_state)
+
+    def test_mark_captures_previous_target(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        c = self._post("C", link="https://example.com/c")
+        a.duplicate_of = b
+        a.save(update_fields=["duplicate_of"])
+        self.client.post(
+            f"/api/v1/job-posts/{a.id}/mark-duplicate-of/",
+            {"target_id": c.id},
+            format="json",
+        )
+        ann = DuplicateAnnotation.objects.get(from_jp_id=a.id, action="mark")
+        self.assertEqual(ann.previous_to_id, b.id)
+        self.assertEqual(ann.to_jp_id, c.id)
+
+    def test_unlink_writes_annotation(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        a.duplicate_of = b
+        a.save(update_fields=["duplicate_of"])
+        self.client.post(
+            f"/api/v1/job-posts/{a.id}/unlink-duplicate/", {}, format="json"
+        )
+        ann = DuplicateAnnotation.objects.get(from_jp_id=a.id, action="unlink")
+        self.assertIsNone(ann.to_jp_id)
+        self.assertEqual(ann.previous_to_id, b.id)
+
+    def test_unlink_idempotent_no_annotation(self):
+        # Idempotent no-op (was already null) must NOT spam annotations.
+        a = self._post("A", link="https://example.com/a")
+        self.client.post(
+            f"/api/v1/job-posts/{a.id}/unlink-duplicate/", {}, format="json"
+        )
+        self.assertEqual(
+            DuplicateAnnotation.objects.filter(
+                from_jp_id=a.id, action="unlink"
+            ).count(),
+            0,
+        )
+
+    def test_promote_writes_annotation(self):
+        root = self._post("Root", link="https://example.com/root")
+        dup = self._post("Dup", link="https://example.com/dup")
+        dup.duplicate_of = root
+        dup.save(update_fields=["duplicate_of"])
+        self.client.post(
+            f"/api/v1/job-posts/{dup.id}/promote-canonical/", {}, format="json"
+        )
+        ann = DuplicateAnnotation.objects.get(from_jp_id=dup.id, action="promote")
+        self.assertEqual(ann.previous_to_id, root.id)
+        self.assertIsNone(ann.to_jp_id)
 
 
 class TestDuplicatesList(_Base):

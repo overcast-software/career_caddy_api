@@ -51,6 +51,7 @@ from .onboarding import onboarding_endpoint, reconcile_onboarding
 from .reports import (
     activity_report,
     application_flow_report,
+    dedupe_feedback_report,
     sources_report,
     report_filter_options,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "reconcile_onboarding",
     "activity_report",
     "application_flow_report",
+    "dedupe_feedback_report",
     "sources_report",
     "report_filter_options",
     "graph_structure",

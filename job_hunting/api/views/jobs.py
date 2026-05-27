@@ -131,6 +131,39 @@ class JobPostViewSet(BaseViewSet):
     serializer_class = JobPostSerializer
 
     @staticmethod
+    def _snapshot_duplicate_signals(post, request):
+        """Freeze the candidate signal set for `post` at decision time so
+        the dedupe-feedback report can ask whether any automatic signal
+        was already firing when the human reached for the verb. Capture
+        before the duplicate_of mutation applies, since
+        compute_duplicate_candidates filters by the current chain."""
+        items = compute_duplicate_candidates(post, request)
+        return {
+            "candidates": [
+                {
+                    "id": it.id,
+                    "confidence": getattr(it, "_confidence", None),
+                    "signals": list(getattr(it, "_match_signals", [])),
+                }
+                for it in items
+            ],
+        }
+
+    @staticmethod
+    def _record_duplicate_annotation(
+        *, from_jp, to_jp_id, previous_to_id, action, request, signal_state
+    ):
+        from job_hunting.models import DuplicateAnnotation
+        DuplicateAnnotation.objects.create(
+            from_jp_id=from_jp.id,
+            to_jp_id=to_jp_id,
+            previous_to_id=previous_to_id,
+            action=action,
+            set_by=request.user if request.user.is_authenticated else None,
+            signal_state=signal_state,
+        )
+
+    @staticmethod
     def _visible_jobpost_qs(request):
         """Posts the caller can reach via the five-clause visibility filter
         (created / applied / scored / scraped / discovered). Staff see all.
@@ -918,8 +951,18 @@ class JobPostViewSet(BaseViewSet):
             seen.add(cur.id)
             cur = cur.duplicate_of
 
+        previous_to_id = post.duplicate_of_id
+        signals = self._snapshot_duplicate_signals(post, request)
         post.duplicate_of_id = target.id
         post.save(update_fields=["duplicate_of_id"])
+        self._record_duplicate_annotation(
+            from_jp=post,
+            to_jp_id=target.id,
+            previous_to_id=previous_to_id,
+            action="mark",
+            request=request,
+            signal_state=signals,
+        )
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(post)})
 
@@ -937,8 +980,18 @@ class JobPostViewSet(BaseViewSet):
         if not post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         if post.duplicate_of_id is not None:
+            previous_to_id = post.duplicate_of_id
+            signals = self._snapshot_duplicate_signals(post, request)
             post.duplicate_of_id = None
             post.save(update_fields=["duplicate_of_id"])
+            self._record_duplicate_annotation(
+                from_jp=post,
+                to_jp_id=None,
+                previous_to_id=previous_to_id,
+                action="unlink",
+                request=request,
+                signal_state=signals,
+            )
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(post)})
 
@@ -964,6 +1017,7 @@ class JobPostViewSet(BaseViewSet):
             )
 
         old_canonical_id = post.duplicate_of_id
+        signals = self._snapshot_duplicate_signals(post, request)
         with transaction.atomic():
             # Re-point every sibling (rows whose duplicate_of_id == old root)
             # at the new canonical, then clear self and flip the old root.
@@ -974,6 +1028,14 @@ class JobPostViewSet(BaseViewSet):
             post.save(update_fields=["duplicate_of_id"])
             JobPost.objects.filter(pk=old_canonical_id).update(
                 duplicate_of_id=post.id
+            )
+            self._record_duplicate_annotation(
+                from_jp=post,
+                to_jp_id=None,
+                previous_to_id=old_canonical_id,
+                action="promote",
+                request=request,
+                signal_state=signals,
             )
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(post)})
