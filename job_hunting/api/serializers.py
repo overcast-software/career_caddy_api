@@ -806,6 +806,11 @@ class JobPostSerializer(BaseSerializer):
         "posting_status",
         "complete",
         "duplicate_of_id",
+        # ActivityPub-aligned per-post visibility (Phase 3.5 prep for
+        # Phase 4 ActivityPub readiness). JSON list of AS2 audience URIs;
+        # the frontend mirrors this via JobPost#isPublic for the Edit
+        # form's Visibility selector and the show-page Private badge.
+        "audience",
     ]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},

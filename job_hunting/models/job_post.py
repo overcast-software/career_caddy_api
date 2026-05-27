@@ -6,6 +6,25 @@ from .base import GetMixin
 from .job_post_dedupe import canonicalize_link, fingerprint, strip_url_trailing_junk
 
 
+# AS2 (ActivityStreams 2.0) Public collection URI. Posts whose `audience`
+# list contains this string are public — visible to anyone, federable
+# without restriction. Phase 3.5 prep for Phase 4 ActivityPub readiness:
+# federation visibility lives on each JobPost via the AS2 `audience`
+# primitive instead of being inferred from content shape.
+AS2_PUBLIC = "https://www.w3.org/ns/activitystreams#Public"
+
+
+def _default_audience_public():
+    """Callable default for JobPost.audience.
+
+    JSONField with a mutable default (list/dict) MUST receive a callable,
+    not a literal — Django would otherwise share one list instance across
+    every freshly-instantiated row. Returning a fresh list per call keeps
+    per-row mutations isolated.
+    """
+    return [AS2_PUBLIC]
+
+
 class JobPost(GetMixin, models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
@@ -106,6 +125,16 @@ class JobPost(GetMixin, models.Model):
         related_name="duplicates",
     )
 
+    # ActivityPub-aligned per-post visibility. Stores AS2 `audience` URI
+    # strings as a JSON list. Default: a fresh `[AS2_PUBLIC]` list per row.
+    # Today this field is *latent* — Phase 4's /as-object/ adapter and
+    # Outbox dispatch will consult it; nothing in core reads it yet beyond
+    # the `is_public()` helper that the frontend mirror reflects. Single-
+    # user instance, so we only ship Public vs Private (= empty list) for
+    # now; Followers/Unlisted granularity is a future UI addition over the
+    # same data shape.
+    audience = models.JSONField(default=_default_audience_public, blank=True)
+
     class Meta:
         db_table = "job_post"
         indexes = [
@@ -150,6 +179,20 @@ class JobPost(GetMixin, models.Model):
     def canonical(self):
         """Walk the duplicate chain; return self if not a dupe."""
         return self.duplicate_of.canonical if self.duplicate_of_id else self
+
+    def is_public(self):
+        """True iff the AS2 Public collection URI is in `audience`.
+
+        Defensive against historical / malformed values: a non-list (None,
+        dict, string from a stray hand-edit) reads as not-public rather
+        than raising. Phase 4 federation dispatch will key off this; for
+        now it's mirrored to the frontend via the JSON:API serializer so
+        the show-page badge can render.
+        """
+        audience = self.audience
+        if not isinstance(audience, list):
+            return False
+        return AS2_PUBLIC in audience
 
     # Per-caller triage state (status / reason_code / note) is pre-attached
     # by JobPostViewSet via `_attach_active_application_status` as
