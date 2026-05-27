@@ -496,6 +496,12 @@ class ResumeSerializer(BaseSerializer):
         "file_path", "title", "name", "notes", "user_id", "favorite", "status",
         "profession", "section_order", "effective_section_order",
     ]
+    # effective_section_order is a computed @property on the model with no
+    # setter — emitted for read convenience (so the frontend can avoid
+    # recomputing the archetype-default fallback) but never round-tripped.
+    # Without this, any Resume PATCH (including a favorite toggle) 500s
+    # the moment Ember Data resends the field.
+    read_only_attributes = ["effective_section_order"]
     slim_attributes = ["name", "title", "notes", "favorite", "profession"]
     user_fk = "user_id"
     relationships = {

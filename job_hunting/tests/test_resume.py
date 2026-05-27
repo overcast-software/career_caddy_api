@@ -96,6 +96,32 @@ class TestResumeAPI(TestCase):
         self.resume.refresh_from_db()
         self.assertTrue(self.resume.favorite)
 
+    def test_patch_ignores_effective_section_order(self):
+        # Ember Data round-trips every @attr on save, so a favorite toggle
+        # PATCH carries effective_section_order alongside favorite. It's a
+        # read-only @property on the model — without read_only_attributes
+        # gating, setattr blows up the request and breaks favoriting.
+        payload = {
+            "data": {
+                "type": "resume",
+                "id": str(self.resume.id),
+                "attributes": {
+                    "favorite": True,
+                    "effective_section_order": ["summary", "experience"],
+                },
+            }
+        }
+        response = self.client.patch(
+            f"/api/v1/resumes/{self.resume.id}/", data=payload, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.resume.refresh_from_db()
+        self.assertTrue(self.resume.favorite)
+        # section_order is the writable column; the computed property must
+        # be unaffected by the inbound value (it derives from section_order
+        # / profession / canonical fallback).
+        self.assertIsNone(self.resume.section_order)
+
     def test_other_user_cannot_retrieve(self):
         other = User.objects.create_user(username="other_resume", password="pass")
         other_client = APIClient()
