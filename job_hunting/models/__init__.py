@@ -34,3 +34,4 @@ from .ai_usage import AiUsage as AiUsage
 from .scrape_profile import ScrapeProfile as ScrapeProfile
 from .job_post_description_decision import JobPostDescriptionDecision as JobPostDescriptionDecision
 from .job_post_overwrite_decision import JobPostOverwriteDecision as JobPostOverwriteDecision
+from .duplicate_annotation import DuplicateAnnotation as DuplicateAnnotation

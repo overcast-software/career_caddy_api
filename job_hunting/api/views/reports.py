@@ -10,7 +10,12 @@ from rest_framework.response import Response
 from job_hunting.lib.services.activity_flow import build_activity
 from job_hunting.lib.services.application_flow import build_flow
 from job_hunting.lib.services.source_flow import build_sources
-from job_hunting.models import JobApplication, JobApplicationStatus, JobPost
+from job_hunting.models import (
+    DuplicateAnnotation,
+    JobApplication,
+    JobApplicationStatus,
+    JobPost,
+)
 
 
 # Cache TTL for the precomputed anonymous demo report. Short enough
@@ -312,6 +317,113 @@ def activity_report(request):
             }
         }
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def dedupe_feedback_report(request):
+    """GET /api/v1/reports/dedupe-feedback/
+
+    Staff-only. Surfaces gaps and overshoots in the automatic dedupe
+    pipeline by inspecting the DuplicateAnnotation corpus.
+
+    Three buckets:
+
+      1. silent_marks — manual marks where no automatic signal was
+         already pointing at the target (find_duplicate / candidates
+         missed it; humans had to catch the link).
+      2. canonical_unlinks — manual unlinks where the snapshot showed
+         canonical_link matched. Over-eager canonicalization is the
+         likely culprit.
+      3. promote_pairs — for each promote, the (from_source -> to_source)
+         pair reveals which origin users consider canonical.
+
+    The signal snapshot is read straight off DuplicateAnnotation.signal_state
+    captured when the verb fired. action='historical' rows have empty
+    snapshots and are excluded.
+    """
+    if not request.user.is_staff:
+        return Response({"errors": [{"detail": "Staff only"}]}, status=403)
+
+    rows = DuplicateAnnotation.objects.exclude(
+        action=DuplicateAnnotation.HISTORICAL
+    ).select_related("from_jp", "to_jp", "previous_to").order_by("-set_at")
+
+    silent_marks = []
+    canonical_unlinks = []
+    promote_pairs = []
+
+    for row in rows:
+        candidates = (row.signal_state or {}).get("candidates") or []
+        if row.action == DuplicateAnnotation.MARK:
+            # The mark's target must have been in the candidate set (or
+            # have fired ANY signal at all) for the dedupe pipeline to
+            # have "known" about it. If candidates is empty OR the
+            # target_id isn't represented, this was a silent catch.
+            if row.to_jp_id is None:
+                continue
+            target_signaled = any(
+                c.get("id") == row.to_jp_id for c in candidates
+            )
+            if not target_signaled:
+                silent_marks.append({
+                    "annotation_id": row.id,
+                    "from_jp_id": row.from_jp_id,
+                    "to_jp_id": row.to_jp_id,
+                    "set_at": row.set_at.isoformat() if row.set_at else None,
+                    "candidate_count": len(candidates),
+                })
+        elif row.action == DuplicateAnnotation.UNLINK:
+            # Was canonical_link firing for the previous target? If so,
+            # the link was being driven by canonicalization and the user
+            # disagreed. Likely a URL-normalization false positive.
+            if row.previous_to_id is None:
+                continue
+            had_canonical = any(
+                c.get("id") == row.previous_to_id
+                and "canonical_link" in (c.get("signals") or [])
+                for c in candidates
+            )
+            if had_canonical:
+                canonical_unlinks.append({
+                    "annotation_id": row.id,
+                    "from_jp_id": row.from_jp_id,
+                    "previous_to_id": row.previous_to_id,
+                    "set_at": row.set_at.isoformat() if row.set_at else None,
+                })
+        elif row.action == DuplicateAnnotation.PROMOTE:
+            # Capture from_source -> previous_to_source so the staff
+            # report can see which origin keeps getting promoted.
+            from_source = getattr(row.from_jp, "source", None) if row.from_jp_id else None
+            previous_source = (
+                getattr(row.previous_to, "source", None)
+                if row.previous_to_id else None
+            )
+            promote_pairs.append({
+                "annotation_id": row.id,
+                "from_jp_id": row.from_jp_id,
+                "previous_to_id": row.previous_to_id,
+                "from_source": from_source,
+                "previous_source": previous_source,
+                "set_at": row.set_at.isoformat() if row.set_at else None,
+            })
+
+    return Response({
+        "data": {
+            "type": "report",
+            "id": "dedupe-feedback",
+            "attributes": {
+                "silent_marks": silent_marks,
+                "canonical_unlinks": canonical_unlinks,
+                "promote_pairs": promote_pairs,
+                "totals": {
+                    "silent_marks": len(silent_marks),
+                    "canonical_unlinks": len(canonical_unlinks),
+                    "promote_pairs": len(promote_pairs),
+                },
+            },
+        }
+    })
 
 
 @api_view(["GET"])
