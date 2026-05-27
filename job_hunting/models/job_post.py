@@ -3,7 +3,7 @@ from django.db import models
 from django.utils import timezone
 
 from .base import GetMixin
-from .job_post_dedupe import canonicalize_link, fingerprint
+from .job_post_dedupe import canonicalize_link, fingerprint, strip_url_trailing_junk
 
 
 class JobPost(GetMixin, models.Model):
@@ -134,6 +134,12 @@ class JobPost(GetMixin, models.Model):
         # an explicit None propagates to INSERT and trips the NOT NULL.
         if self.apply_url_status is None:
             self.apply_url_status = "unknown"
+        # Sanitize trailing HTML/markdown delimiter junk that LLM URL
+        # extractors leak into the field. See
+        # job_post_dedupe.strip_url_trailing_junk — the 2026-05-27
+        # hiring.cafe JP 2981 incident is the canonical case.
+        self.link = strip_url_trailing_junk(self.link)
+        self.apply_url = strip_url_trailing_junk(self.apply_url)
         if self.link and not self.canonical_link:
             self.canonical_link = canonicalize_link(self.link)
         if not self.content_fingerprint:

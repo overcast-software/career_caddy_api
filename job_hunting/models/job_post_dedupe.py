@@ -54,6 +54,35 @@ _TRACKING_PARAMS = {
 
 _WS = re.compile(r"\s+")
 
+# Closing delimiters that LLM URL extractors (and naive regex captures)
+# routinely include when they pull a URL out of HTML or markdown — they
+# eat the matching close quote / paren. None of these characters belong
+# at the END of a real URL, so a trailing run of any of them is parser
+# slop. Strip defensively on every save. Whitespace is folded in for the
+# same reason. Forward slashes and ? # & = are conspicuously absent
+# because they're legitimate URL terminators on some sites.
+_URL_TRAILING_JUNK_CHARS = "\"'<>()[]{}`, \t\n\r"
+
+
+def strip_url_trailing_junk(url: str | None) -> str | None:
+    """Return ``url`` with trailing HTML/markdown delimiter junk removed.
+
+    The 2026-05-27 hiring.cafe JP 2981 incident — link stored as
+    ``https://hiring.cafe/job/5fsbbgitg82ev1ar"`` because the LLM
+    extractor in cc_auto captured the closing ``"`` from the HTML
+    attribute — is the canonical case. None of the parsing layers
+    downstream (urlparse, canonicalize_link, JobPost.save) noticed; the
+    frontend then URL-encoded the literal ``"`` to ``%22`` and the
+    destination 404'd.
+
+    Idempotent; returns the input unchanged when nothing to strip; falls
+    back to the original input when stripping would empty the string.
+    """
+    if not url:
+        return url
+    stripped = url.rstrip(_URL_TRAILING_JUNK_CHARS)
+    return stripped if stripped else url
+
 
 @lru_cache(maxsize=256)
 def _profile_url_rewrites_for_host(host: str) -> tuple:
@@ -121,6 +150,7 @@ def canonicalize_link(url: str | None) -> str | None:
     """
     if not url:
         return None
+    url = strip_url_trailing_junk(url)
     url = _rewrite_via_profile(url)
     try:
         u = urlparse(url)
