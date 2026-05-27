@@ -14,6 +14,7 @@ from job_hunting.models import (
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
     AiUsage, Waitlist, Invitation, ScrapeProfile,
 )
+from job_hunting.models.job_post_dedupe import find_apply_url_matches
 
 
 def _to_primitive(val):
@@ -704,21 +705,14 @@ def compute_duplicate_candidates(post, request):
         for hit in visible.filter(content_fingerprint=post.content_fingerprint):
             _add(hit, "fingerprint", "high")
 
-    # Cross-platform dedup signals. apply_url is the canonical
-    # cross-platform link: a JP whose apply_url points at this JP's link
-    # is the jobboard-side surface for the same role (LinkedIn → ATS, or
-    # any analogue). The relationship is reciprocal — joining either
-    # direction surfaces the partner JP. The referrer leg still lives on
-    # Scrape (per-submit signal, not a destination).
+    # Cross-platform dedup via apply_url reciprocity. Shared primitive
+    # with find_duplicate — see job_post_dedupe.find_apply_url_matches.
+    for hit in find_apply_url_matches(post, base_qs=visible):
+        _add(hit, "apply_hint", "high")
+
+    # Referrer reciprocity stays inline (Scrape-side, not a destination).
     link_targets = [v for v in {post.link, post.canonical_link} if v]
     if link_targets:
-        for hit in visible.filter(apply_url__in=link_targets).distinct():
-            _add(hit, "apply_hint", "high")
-        if post.apply_url:
-            for hit in visible.filter(
-                Q(link=post.apply_url) | Q(canonical_link=post.apply_url)
-            ).distinct():
-                _add(hit, "apply_hint", "high")
         for hit in visible.filter(
             scrapes__referrer_url__in=link_targets
         ).distinct():

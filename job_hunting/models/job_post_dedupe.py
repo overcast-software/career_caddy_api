@@ -153,6 +153,48 @@ def fingerprint(post) -> str | None:
     ).hexdigest()
 
 
+def find_apply_url_matches(post, base_qs=None):
+    """Return JobPosts duplicating `post` via apply_url reciprocity.
+
+    Two reciprocal queries on the cross-platform "apply destination" link:
+    - Forward: an existing post's ``apply_url`` matches the incoming
+      post's ``link`` or ``canonical_link`` (jobboard posted earlier,
+      direct ATS landing followed).
+    - Reverse: an existing post's ``link`` or ``canonical_link`` matches
+      the incoming post's ``apply_url`` (direct ATS posted earlier,
+      jobboard captured later).
+
+    Returns a distinct queryset. Callers handle pk-exclusion, ordering,
+    the ``.canonical`` chain walk, and visibility — pass a pre-filtered
+    ``base_qs`` for the last.
+
+    Shared primitive: ``find_duplicate`` uses this as a decision signal;
+    ``compute_duplicate_candidates`` uses it as the ``apply_hint`` panel
+    signal. Keep behavior identical across both call sites.
+    """
+    from django.db.models import Q
+
+    from .job_post import JobPost
+
+    if base_qs is None:
+        base_qs = JobPost.objects.all()
+
+    link_targets = [v for v in {post.link, post.canonical_link} if v]
+    q_parts = []
+    if link_targets:
+        q_parts.append(Q(apply_url__in=link_targets))
+    if post.apply_url:
+        q_parts.append(Q(link=post.apply_url) | Q(canonical_link=post.apply_url))
+
+    if not q_parts:
+        return base_qs.none()
+
+    q = q_parts[0]
+    for part in q_parts[1:]:
+        q |= part
+    return base_qs.filter(q).distinct()
+
+
 def find_duplicate(post, window_days: int = 30):
     """Return an existing JobPost this one duplicates, or None.
 
@@ -174,6 +216,15 @@ def find_duplicate(post, window_days: int = 30):
         )
         if hit:
             return hit.canonical
+
+    hit = (
+        find_apply_url_matches(post)
+        .exclude(pk=post.pk)
+        .order_by("created_at")
+        .first()
+    )
+    if hit:
+        return hit.canonical
 
     if post.content_fingerprint:
         cutoff = timezone.now() - timedelta(days=window_days)

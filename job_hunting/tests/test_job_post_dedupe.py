@@ -5,8 +5,9 @@ from job_hunting.models import Company, JobPost, ScrapeProfile
 from job_hunting.models.job_post_dedupe import (
     _profile_url_rewrites_for_host,
     canonicalize_link,
-    fingerprint,
+    find_apply_url_matches,
     find_duplicate,
+    fingerprint,
 )
 
 User = get_user_model()
@@ -232,6 +233,207 @@ class TestFindDuplicate(TestCase):
         candidate.content_fingerprint = fingerprint(candidate)
         hit = find_duplicate(candidate)
         self.assertIsNotNone(hit)
+
+    def test_apply_url_forward_match_decides_duplicate(self):
+        """Jobboard JP exists with apply_url pointing at the ATS direct
+        URL; later a JP for that ATS URL gets created. find_duplicate
+        must return the jobboard JP. (The jp 2882/2923 case.)"""
+        jobboard = JobPost.objects.create(
+            title="Senior Security Engineer",
+            company=self.company,
+            link="https://wellfound.com/jobs/4250970-senior-security-engineer",
+            apply_url="https://www.pindrop.com/careers/senior-security-engineer/?gh_jid=7943713",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Senior Security Engineer",
+            company=self.company,
+            link="https://www.pindrop.com/careers/senior-security-engineer/?gh_jid=7943713",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        self.assertEqual(find_duplicate(candidate), jobboard)
+
+    def test_apply_url_reverse_match_decides_duplicate(self):
+        """Direct-ATS JP exists; later a jobboard JP with apply_url
+        pointing back at the ATS link gets created."""
+        ats_direct = JobPost.objects.create(
+            title="Senior Security Engineer",
+            company=self.company,
+            link="https://www.pindrop.com/careers/senior-security-engineer/?gh_jid=7943713",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Senior Security Engineer",
+            company=self.company,
+            link="https://wellfound.com/jobs/4250970",
+            apply_url="https://www.pindrop.com/careers/senior-security-engineer/?gh_jid=7943713",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        self.assertEqual(find_duplicate(candidate), ats_direct)
+
+    def test_apply_url_match_walks_canonical_chain(self):
+        """When the apply-url-matched post is itself flagged as a
+        duplicate of an older post, the older canonical ancestor is
+        returned (matching the canonical_link/fingerprint stages)."""
+        other_company = Company.objects.create(name="Older Co")
+        ancestor = JobPost.objects.create(
+            title="Old listing",
+            company=other_company,
+            link="https://old.example/job/1",
+            created_by=self.user,
+        )
+        JobPost.objects.create(
+            title="Senior Security Engineer",
+            company=self.company,
+            link="https://example.com/board/abc",
+            apply_url="https://www.pindrop.com/careers/senior-security-engineer/",
+            duplicate_of=ancestor,
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Senior Security Engineer",
+            company=self.company,
+            link="https://www.pindrop.com/careers/senior-security-engineer/",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        self.assertEqual(find_duplicate(candidate), ancestor)
+
+    def test_apply_url_stage_runs_after_canonical_link(self):
+        """If both canonical_link and apply_url reciprocity match
+        different existing posts, canonical_link wins (it's the
+        deterministic same-link signal). Pins stage ordering."""
+        canonical_match = JobPost.objects.create(
+            title="Same listing reposted",
+            company=self.company,
+            link="https://example.com/job/9",
+            created_by=self.user,
+        )
+        # Older JP that ALSO matches via apply_url reciprocity but
+        # should be passed over because canonical_link already matched.
+        JobPost.objects.create(
+            title="Cross-platform earlier",
+            company=self.company,
+            link="https://wellfound.com/jobs/cross",
+            apply_url="https://example.com/job/9?utm_source=x",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Repost",
+            company=self.company,
+            link="https://example.com/job/9?utm_source=x",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        self.assertEqual(find_duplicate(candidate), canonical_match)
+
+
+class TestFindApplyUrlMatches(TestCase):
+    """Unit tests for the shared apply_url reciprocity primitive."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="apply", password="pass")
+        self.company = Company.objects.create(name="Acme")
+
+    def test_forward_match(self):
+        """existing.apply_url == incoming.link."""
+        existing = JobPost.objects.create(
+            title="Eng",
+            company=self.company,
+            link="https://a.example/job",
+            apply_url="https://ats.example/job/1",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Eng",
+            company=self.company,
+            link="https://ats.example/job/1",
+        )
+        candidate.canonical_link = candidate.link
+        self.assertIn(existing, list(find_apply_url_matches(candidate)))
+
+    def test_reverse_match(self):
+        """incoming.apply_url == existing.link."""
+        existing = JobPost.objects.create(
+            title="Eng",
+            company=self.company,
+            link="https://ats.example/job/1",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Eng",
+            company=self.company,
+            link="https://a.example/job",
+            apply_url="https://ats.example/job/1",
+        )
+        candidate.canonical_link = candidate.link
+        self.assertIn(existing, list(find_apply_url_matches(candidate)))
+
+    def test_matches_via_canonical_link_too(self):
+        """existing.apply_url matches incoming.canonical_link even when
+        incoming.link still carries tracking params."""
+        existing = JobPost.objects.create(
+            title="Eng",
+            company=self.company,
+            link="https://a.example/job",
+            apply_url="https://ats.example/job/1",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Eng",
+            company=self.company,
+            link="https://ats.example/job/1?utm_source=x",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        self.assertIn(existing, list(find_apply_url_matches(candidate)))
+
+    def test_no_links_or_apply_url_returns_empty(self):
+        candidate = JobPost(title="No urls")
+        self.assertFalse(find_apply_url_matches(candidate).exists())
+
+    def test_no_signal_returns_empty(self):
+        """Posts exist but none of their apply_url / link fields reciprocate."""
+        JobPost.objects.create(
+            title="Unrelated",
+            company=self.company,
+            link="https://other.example/job",
+            created_by=self.user,
+        )
+        candidate = JobPost(
+            title="Eng",
+            company=self.company,
+            link="https://nope.example/job",
+            apply_url="https://no-match.example/ats",
+        )
+        candidate.canonical_link = candidate.link
+        self.assertFalse(find_apply_url_matches(candidate).exists())
+
+    def test_respects_base_qs(self):
+        """When a base_qs filters out potential matches, they don't surface."""
+        other = User.objects.create_user(username="other", password="pass")
+        in_scope = JobPost.objects.create(
+            title="In",
+            company=self.company,
+            link="https://a.example/job",
+            apply_url="https://ats.example/job/1",
+            created_by=self.user,
+        )
+        out_of_scope = JobPost.objects.create(
+            title="Out",
+            company=self.company,
+            link="https://b.example/job",
+            apply_url="https://ats.example/job/1",
+            created_by=other,
+        )
+        candidate = JobPost(
+            title="Cand",
+            company=self.company,
+            link="https://ats.example/job/1",
+        )
+        candidate.canonical_link = candidate.link
+        results = list(find_apply_url_matches(
+            candidate, base_qs=JobPost.objects.filter(created_by=self.user)
+        ))
+        self.assertIn(in_scope, results)
+        self.assertNotIn(out_of_scope, results)
 
 
 class TestJobPostSavePopulatesDedupeFields(TestCase):
