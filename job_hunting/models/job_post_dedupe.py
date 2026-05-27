@@ -161,7 +161,15 @@ def canonicalize_link(url: str | None) -> str | None:
         for k, v in parse_qsl(u.query, keep_blank_values=True)
         if k.lower() not in _TRACKING_PARAMS
     ]
-    return urlunparse(u._replace(query=urlencode(kept), fragment=""))
+    # Normalize trailing slash on non-root paths so two URLs that differ
+    # only by a final `/` collapse to one canonical form. The 2026-05-27
+    # JP 715 vs JP 2963 LinkedIn pair is the regression case — both
+    # carried the same job id but one canonical_link ended in `/` and
+    # the other did not, so the stage-1 exact match in find_duplicate
+    # missed. Preserve a bare `/` (root) since stripping it would lose
+    # the path delimiter.
+    path = u.path.rstrip("/") if u.path and u.path != "/" else u.path
+    return urlunparse(u._replace(path=path, query=urlencode(kept), fragment=""))
 
 
 def fingerprint(post) -> str | None:

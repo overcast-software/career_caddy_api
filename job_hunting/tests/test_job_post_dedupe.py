@@ -89,6 +89,41 @@ class TestCanonicalizeLink(TestCase):
         got = canonicalize_link("https://example.com/jobs/42#apply")
         self.assertNotIn("#apply", got)
 
+    def test_strips_trailing_slash_on_non_root_path(self):
+        # Regression for JP 715 / JP 2963 LinkedIn pair: both rows had
+        # the same job id but one canonical_link ended with `/` and the
+        # other didn't, breaking stage-1 exact-match dedup.
+        self.assertEqual(
+            canonicalize_link("https://www.linkedin.com/jobs/view/4335567500/"),
+            "https://www.linkedin.com/jobs/view/4335567500",
+        )
+
+    def test_two_urls_differing_only_by_trailing_slash_collapse(self):
+        with_slash = canonicalize_link("https://example.com/jobs/42/")
+        without_slash = canonicalize_link("https://example.com/jobs/42")
+        self.assertEqual(with_slash, without_slash)
+
+    def test_preserves_root_path(self):
+        # Bare `/` is the path delimiter — stripping it would produce
+        # `https://example.com` (no path) which technically parses but
+        # round-trips inconsistently across libraries.
+        self.assertEqual(
+            canonicalize_link("https://example.com/"),
+            "https://example.com/",
+        )
+
+    def test_strips_repeated_trailing_slashes(self):
+        self.assertEqual(
+            canonicalize_link("https://example.com/jobs/42///"),
+            "https://example.com/jobs/42",
+        )
+
+    def test_trailing_slash_before_query_strips(self):
+        self.assertEqual(
+            canonicalize_link("https://example.com/jobs/42/?id=1"),
+            "https://example.com/jobs/42?id=1",
+        )
+
     def test_leaves_ziprecruiter_ekm_alone(self):
         # Opaque token IS the identifier; no tracking params to strip.
         url = "https://www.ziprecruiter.com/ekm/AAFu8_x25OYUUjsmCpD2H7FIn"
@@ -128,13 +163,20 @@ class TestCanonicalizeLinkProfileRewrites(TestCase):
         _profile_url_rewrites_for_host.cache_clear()
 
     def test_linkedin_comm_path_rewritten_to_canonical(self):
+        # Trailing slash is normalized away in canonicalize_link (the
+        # 2026-05-27 JP 715 / JP 2963 fix). The rewrite still collapses
+        # /comm/jobs/view/ → /jobs/view/, then the slash strip applies.
         comm = "https://www.linkedin.com/comm/jobs/view/4409035385/"
-        canonical = "https://www.linkedin.com/jobs/view/4409035385/"
+        canonical = "https://www.linkedin.com/jobs/view/4409035385"
         self.assertEqual(canonicalize_link(comm), canonical)
 
-    def test_linkedin_canonical_path_unchanged(self):
-        url = "https://www.linkedin.com/jobs/view/4409035385/"
-        self.assertEqual(canonicalize_link(url), url)
+    def test_linkedin_canonical_path_normalized_without_slash(self):
+        # The canonical form post-2026-05-27 has no trailing slash. Calling
+        # canonicalize_link is idempotent on the no-slash form.
+        with_slash = "https://www.linkedin.com/jobs/view/4409035385/"
+        without_slash = "https://www.linkedin.com/jobs/view/4409035385"
+        self.assertEqual(canonicalize_link(with_slash), without_slash)
+        self.assertEqual(canonicalize_link(without_slash), without_slash)
 
     def test_canonicalize_strips_tracking_after_path_rewrite(self):
         comm = (
@@ -142,10 +184,12 @@ class TestCanonicalizeLinkProfileRewrites(TestCase):
             "?trk=email&utm_source=foo"
         )
         got = canonicalize_link(comm)
-        self.assertIn("/jobs/view/4409035385/", got)
+        self.assertIn("/jobs/view/4409035385", got)
         self.assertNotIn("/comm/", got)
         self.assertNotIn("trk=", got)
         self.assertNotIn("utm_", got)
+        # Trailing slash must be stripped even when the path has a query.
+        self.assertNotIn("/4409035385/?", got)
 
     def test_unknown_host_passes_through(self):
         url = "https://no-profile.example/jobs/1?utm_source=x"

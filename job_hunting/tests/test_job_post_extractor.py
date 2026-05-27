@@ -297,7 +297,11 @@ class TestProcessEvaluation(TestCase):
             title="Senior Software Engineer, Security",
             company=None,  # email stub: title only, no company yet
             link="https://www.linkedin.com/comm/jobs/view/4370923838/",
-            canonical_link="https://www.linkedin.com/jobs/view/4370923838/",
+            # Canonical form post-2026-05-27 strips the trailing slash so
+            # stage-1 dedup matches /jobs/view/<id> with or without the
+            # slash; setting it explicitly here to match what
+            # canonicalize_link would have produced on save().
+            canonical_link="https://www.linkedin.com/jobs/view/4370923838",
             source="email",
             complete=False,
             created_by=self.user,
