@@ -25,6 +25,18 @@ def _default_audience_public():
     return [AS2_PUBLIC]
 
 
+def _default_source_instance():
+    """Callable default for JobPost.source_instance.
+
+    Resolved at row-creation time (NOT module-import time) so the value
+    reflects the running process's CAREER_CADDY_INSTANCE — important for
+    tests that override settings and for the rare same-binary multi-
+    instance dev setup. Returning a string per call (not a settings
+    lookup baked into the migration) keeps fixtures portable.
+    """
+    return settings.CAREER_CADDY_INSTANCE
+
+
 class JobPost(GetMixin, models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
@@ -134,6 +146,20 @@ class JobPost(GetMixin, models.Model):
     # now; Followers/Unlisted granularity is a future UI addition over the
     # same data shape.
     audience = models.JSONField(default=_default_audience_public, blank=True)
+
+    # Stable identifier for the Career Caddy instance that *originated*
+    # this JobPost. Defaults to `settings.CAREER_CADDY_INSTANCE` for rows
+    # created locally; federated rows carry the remote instance hostname
+    # so the five-clause visibility filter (api/job_hunting/api/views/
+    # jobs.py) can exclude them unless the user has opted into that
+    # instance's feed. Indexed because the local-only filter runs on
+    # every list query. The /as-object/ adapter uses this value as the
+    # host portion of the AS2 `id` URI it emits.
+    source_instance = models.CharField(
+        max_length=255,
+        default=_default_source_instance,
+        db_index=True,
+    )
 
     class Meta:
         db_table = "job_post"

@@ -811,7 +811,12 @@ class JobPostSerializer(BaseSerializer):
         # the frontend mirrors this via JobPost#isPublic for the Edit
         # form's Visibility selector and the show-page Private badge.
         "audience",
+        # Phase 4 federation prep: which Career Caddy instance originated
+        # this row. Read-only to clients — the API sets it from settings
+        # on create, federation pull paths set it from the remote actor.
+        "source_instance",
     ]
+    read_only_attributes = ["source_instance"]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
         "cover-letters": {
