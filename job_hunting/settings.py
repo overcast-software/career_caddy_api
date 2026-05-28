@@ -408,6 +408,14 @@ DEFAULT_FROM_EMAIL = os.environ.get(
     "DEFAULT_FROM_EMAIL", "noreply@careercaddy.online"
 )
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:4200")
+
+# Stable identifier for this Career Caddy instance, used as JobPost
+# `source_instance` default and as the host portion of the ActivityPub
+# Actor / object IDs the /as-object/ adapter emits. Local installs
+# default to "localhost"; prod is set via the CAREER_CADDY_INSTANCE env
+# var (careercaddy.online). Federated rows are detected by comparing
+# JobPost.source_instance against this value.
+CAREER_CADDY_INSTANCE = os.environ.get("CAREER_CADDY_INSTANCE", "localhost")
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups

@@ -1042,6 +1042,26 @@ class JobPostViewSet(BaseViewSet):
 
     @extend_schema(
         tags=["Job Posts"],
+        summary="ActivityStreams 2.0 JSON-LD adapter (federation prep)",
+        description=(
+            "Returns the JobPost as an AS2 Note object so future "
+            "ActivityPub consumers can ingest it. Phase 4 federation "
+            "prep — no Outbox, no HTTP signatures, no dispatch yet. "
+            "Visibility-scoped: a regular user only sees rows they "
+            "could see in the normal list view."
+        ),
+        responses={200: OpenApiResponse(description="AS2 Note JSON-LD")},
+    )
+    @action(detail=True, methods=["get"], url_path="as-object")
+    def as_object(self, request, pk=None):
+        from job_hunting.lib.as_object import job_post_as_object
+        post = self._visible_jobpost_qs(request).filter(pk=pk).first()
+        if not post:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        return Response(job_post_as_object(post), content_type="application/activity+json")
+
+    @extend_schema(
+        tags=["Job Posts"],
         summary="Nuclear delete — remove job post and ALL child records",
         responses={204: None, 403: _JSONAPI_ITEM},
     )

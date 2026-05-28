@@ -806,7 +806,17 @@ class JobPostSerializer(BaseSerializer):
         "posting_status",
         "complete",
         "duplicate_of_id",
+        # ActivityPub-aligned per-post visibility (Phase 3.5 prep for
+        # Phase 4 ActivityPub readiness). JSON list of AS2 audience URIs;
+        # the frontend mirrors this via JobPost#isPublic for the Edit
+        # form's Visibility selector and the show-page Private badge.
+        "audience",
+        # Phase 4 federation prep: which Career Caddy instance originated
+        # this row. Read-only to clients — the API sets it from settings
+        # on create, federation pull paths set it from the remote actor.
+        "source_instance",
     ]
+    read_only_attributes = ["source_instance"]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
         "cover-letters": {

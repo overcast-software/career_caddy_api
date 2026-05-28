@@ -3,6 +3,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 from job_hunting.models import Company, JobPost
+from job_hunting.models.job_post import AS2_PUBLIC
 
 User = get_user_model()
 
@@ -259,3 +260,111 @@ class TestJobPostEditApplyUrlCanonical(TestCase):
         self.jp.refresh_from_db()
         self.assertNotEqual(self.jp.canonical_link, "bogus")
         self.assertIn("example.com", self.jp.canonical_link or "")
+
+
+class TestJobPostAudience(TestCase):
+    """Phase 3.5 prep for Phase 4 ActivityPub readiness:
+    JobPost.audience holds AS2 audience URIs; default is the AS2 Public
+    collection so existing-data semantics stay 'public'. is_public()
+    helper mirrors what the frontend reads back via the serializer.
+
+    The field is latent today — federation dispatch will consult it in
+    Phase 4. These tests pin the contract: default, helper truthiness,
+    and JSON:API round-trip."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="audience_user", password="pass")
+        self.company = Company.objects.create(name="AudienceCo")
+
+    def test_new_job_post_defaults_to_public_audience(self):
+        jp = JobPost.objects.create(
+            title="Engineer", company=self.company, created_by=self.user
+        )
+        jp.refresh_from_db()
+        self.assertEqual(jp.audience, [AS2_PUBLIC])
+        self.assertEqual(
+            jp.audience,
+            ["https://www.w3.org/ns/activitystreams#Public"],
+            "AS2 Public URI string must be exact — federation peers match this verbatim",
+        )
+
+    def test_audience_default_is_fresh_per_instance(self):
+        """Mutable defaults that share state across instances are the
+        classic Django footgun. The `default=` callable on the field must
+        return a fresh list each call, not a module-level singleton."""
+        jp1 = JobPost.objects.create(title="One", created_by=self.user)
+        jp2 = JobPost.objects.create(title="Two", created_by=self.user)
+        # Mutating one's list must not leak into the other's.
+        jp1.audience.append("https://example.test/sentinel")
+        self.assertNotIn("https://example.test/sentinel", jp2.audience)
+        self.assertIsNot(jp1.audience, jp2.audience)
+
+    def test_is_public_true_for_default(self):
+        jp = JobPost.objects.create(title="Pub", created_by=self.user)
+        self.assertTrue(jp.is_public())
+
+    def test_is_public_false_for_empty_list(self):
+        """Private posts model visibility as an empty audience list — no
+        recipients enumerated, so no federation dispatch ever fires for
+        the Phase 4 worker."""
+        jp = JobPost.objects.create(
+            title="Priv", created_by=self.user, audience=[]
+        )
+        self.assertFalse(jp.is_public())
+
+    def test_is_public_false_for_followers_only_audience(self):
+        """Followers-only is one of the future granularities the field
+        already accommodates: any audience that doesn't include the AS2
+        Public URI is non-public for badge / visibility purposes."""
+        jp = JobPost.objects.create(
+            title="Followers",
+            created_by=self.user,
+            audience=["https://careercaddy.online/users/me/followers"],
+        )
+        self.assertFalse(jp.is_public())
+
+    def test_is_public_defensive_against_non_list_audience(self):
+        """Historical / malformed values shouldn't crash the badge
+        render. None and non-list values resolve as not-public."""
+        jp = JobPost(title="X", created_by=self.user)
+        jp.audience = None
+        self.assertFalse(jp.is_public())
+        jp.audience = "https://www.w3.org/ns/activitystreams#Public"
+        self.assertFalse(jp.is_public())
+
+    def test_patch_audience_round_trips(self):
+        """JSON:API PATCH with attributes.audience must round-trip the
+        list verbatim through serializer → model → DB → serializer.
+        This is the contract the frontend Visibility selector relies on."""
+        jp = JobPost.objects.create(
+            title="Round-trip", company=self.company, created_by=self.user
+        )
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        payload = {
+            "data": {
+                "type": "job-post",
+                "id": str(jp.id),
+                "attributes": {"audience": []},
+            }
+        }
+        response = client.patch(
+            f"/api/v1/job-posts/{jp.id}/", data=payload, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        jp.refresh_from_db()
+        self.assertEqual(jp.audience, [])
+        self.assertFalse(jp.is_public())
+        # And the response surfaces audience in attributes for the
+        # frontend to consume on subsequent reads.
+        self.assertEqual(response.json()["data"]["attributes"]["audience"], [])
+
+        # Flip back to public via PATCH.
+        payload["data"]["attributes"]["audience"] = [AS2_PUBLIC]
+        response = client.patch(
+            f"/api/v1/job-posts/{jp.id}/", data=payload, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+        jp.refresh_from_db()
+        self.assertEqual(jp.audience, [AS2_PUBLIC])
+        self.assertTrue(jp.is_public())
