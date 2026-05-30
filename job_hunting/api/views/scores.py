@@ -1,7 +1,7 @@
 import logging
 import math
-import threading
 
+from django_q.tasks import async_task
 from rest_framework import status
 from rest_framework.response import Response
 from drf_spectacular.utils import (
@@ -13,7 +13,6 @@ from drf_spectacular.utils import (
 from .base import BaseViewSet
 from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import ScoreSerializer
-from job_hunting.lib.scoring.job_scorer import JobScorer
 from job_hunting.lib.ai_client import get_client
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
@@ -22,19 +21,22 @@ from job_hunting.models import (
     Score,
     JobPost,
     Resume,
-    AiUsage,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def _auto_score_job_post(job_post_id: int, user_id: int) -> bool:
-    """Create a pending Score and kick off a scoring thread for job_post_id.
+    """Create a pending Score and enqueue a scoring task for job_post_id.
 
-    Returns True if the thread was started. Silent no-op (False) when
+    Returns True if the task was enqueued. Silent no-op (False) when
     preconditions aren't met: no AI client, missing description, or no career data.
     Never raises — callers wrap this in try/except anyway but this keeps the
     contract clean.
+
+    The actual scoring work runs in the qcluster worker via
+    job_hunting.lib.tasks.score_job. The view's job is row bookkeeping +
+    enqueue; the task re-fetches and runs the LLM.
     """
     client = get_client(required=False)
     if client is None:
@@ -66,42 +68,11 @@ def _auto_score_job_post(job_post_id: int, user_id: int) -> bool:
             status="pending",
         )
 
-    score_id = my_score.id
-    captured_description = jp.description
-    my_job_scorer = JobScorer(client)
-
-    def _score():
-        import django
-        django.db.close_old_connections()
-        try:
-            result = my_job_scorer.score_job_match(captured_description, resume_markdown)
-            Score.objects.filter(pk=score_id).update(
-                score=result.score,
-                explanation=result.evaluation,
-                status="completed",
-            )
-        except Exception:
-            logger.exception("auto_score: scoring failed for score_id=%s", score_id)
-            Score.objects.filter(pk=score_id).update(status="failed")
-            return
-        try:
-            usage = getattr(result, "_usage", None)
-            model_name = getattr(result, "_model_name", "unknown")
-            if usage:
-                AiUsage.objects.create(
-                    user_id=user_id,
-                    agent_name="job_scorer",
-                    model_name=model_name,
-                    trigger="auto_score",
-                    request_tokens=usage.request_tokens or 0,
-                    response_tokens=usage.response_tokens or 0,
-                    total_tokens=usage.total_tokens or 0,
-                    request_count=usage.requests or 1,
-                )
-        except Exception:
-            logger.exception("auto_score: failed to record AI usage for score_id=%s", score_id)
-
-    threading.Thread(target=_score, daemon=True).start()
+    async_task(
+        "job_hunting.lib.tasks.score_job",
+        my_score.id,
+        trigger="auto_score",
+    )
     return True
 
 
@@ -139,8 +110,6 @@ class ScoreViewSet(BaseViewSet):
                 },
                 status=503,
             )
-
-        myJobScorer = JobScorer(client)
 
         node = data.get("data") or {}
         relationships = node.get("relationships") or {}
@@ -251,48 +220,12 @@ class ScoreViewSet(BaseViewSet):
                 status="pending",
             )
 
-        score_id = myScore.id
-        captured_description = jp.description
-        captured_resume_markdown = resume_markdown
-
-        captured_user_id = request.user.id
-        captured_injected_prompt = injected_prompt
-
-        def _score():
-            import django
-            django.db.close_old_connections()
-            try:
-                result = myJobScorer.score_job_match(captured_description, captured_resume_markdown, injected_prompt=captured_injected_prompt)
-                Score.objects.filter(pk=score_id).update(
-                    score=result.score,
-                    explanation=result.evaluation,
-                    status="completed",
-                )
-            except Exception:
-                logger.exception("Scoring failed for score_id=%s", score_id)
-                Score.objects.filter(pk=score_id).update(status="failed")
-                return
-            # Record AI usage — separate try so a logging failure doesn't mark the score as failed
-            try:
-                usage = getattr(result, "_usage", None)
-                model_name = getattr(result, "_model_name", "unknown")
-                if usage:
-                    AiUsage.objects.create(
-                        user_id=captured_user_id,
-                        agent_name="job_scorer",
-                        model_name=model_name,
-                        trigger="score",
-                        request_tokens=usage.request_tokens or 0,
-                        response_tokens=usage.response_tokens or 0,
-                        total_tokens=usage.total_tokens or 0,
-                        request_count=usage.requests or 1,
-                    )
-                else:
-                    logger.warning("No usage data for score_id=%s", score_id)
-            except Exception:
-                logger.exception("Failed to record AI usage for score_id=%s", score_id)
-
-        threading.Thread(target=_score, daemon=True).start()
+        async_task(
+            "job_hunting.lib.tasks.score_job",
+            myScore.id,
+            injected_prompt=injected_prompt,
+            trigger="score",
+        )
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(myScore)}

@@ -100,8 +100,8 @@ class TestScoreCreateStaffInference(TestCase):
             }
         }
         with patch("job_hunting.api.views.scores.get_client", return_value=MagicMock()), \
-             patch("job_hunting.api.views.scores.threading.Thread") as mock_thread:
-            mock_thread.return_value.start = lambda: None
+             patch("job_hunting.api.views.scores.async_task") as mock_task:
+            mock_task.return_value = "fake-task-id"
             resp = client.post(
                 SCORES_URL,
                 data=payload,
@@ -158,8 +158,8 @@ class TestScoreMultiTenancy(TestCase):
             }
         }
         with patch("job_hunting.api.views.scores.get_client", return_value=MagicMock()), \
-             patch("job_hunting.api.views.scores.threading.Thread") as mock_thread:
-            mock_thread.return_value.start = lambda: None
+             patch("job_hunting.api.views.scores.async_task") as mock_task:
+            mock_task.return_value = "fake-task-id"
             return client.post(
                 SCORES_URL,
                 data=payload,

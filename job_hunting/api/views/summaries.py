@@ -1,6 +1,6 @@
 import math
-import threading
 
+from django_q.tasks import async_task
 from rest_framework import status
 from rest_framework.response import Response
 from drf_spectacular.utils import (
@@ -13,7 +13,6 @@ from .base import BaseViewSet
 from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import SummarySerializer
 from job_hunting.lib.ai_client import get_client
-from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.lib.models import CareerData
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.models import (
@@ -286,32 +285,13 @@ class SummaryViewSet(BaseViewSet):
             user_id=user_id,
             status="pending",
         )
-        summary_id = summary.id
-        captured_injected_prompt = injected_prompt
-        captured_resume = resume
-        captured_career_markdown = career_markdown
 
-        def _generate():
-            import django
-            django.db.close_old_connections()
-            try:
-                if captured_resume is None:
-                    svc = SummaryService(client, job=job_post, resume_markdown=captured_career_markdown, user_id=user_id)
-                else:
-                    svc = SummaryService(client, job=job_post, resume=captured_resume)
-                generated_content = svc.generate_content(injected_prompt=captured_injected_prompt)
-                Summary.objects.filter(pk=summary_id).update(content=generated_content, status="completed")
-                if captured_resume is not None:
-                    ResumeSummary.objects.filter(resume_id=captured_resume.id).update(active=False)
-                    ResumeSummary.objects.get_or_create(
-                        resume_id=captured_resume.id, summary_id=summary_id, defaults={"active": True}
-                    )
-                    ResumeSummary.objects.filter(resume_id=captured_resume.id, summary_id=summary_id).update(active=True)
-                    ResumeSummary.ensure_single_active_for_resume(captured_resume.id)
-            except Exception:
-                Summary.objects.filter(pk=summary_id).update(status="failed")
-
-        threading.Thread(target=_generate, daemon=True).start()
+        async_task(
+            "job_hunting.lib.tasks.summary_job",
+            summary.id,
+            resume_id=resume.id if resume is not None else None,
+            injected_prompt=injected_prompt,
+        )
 
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(summary)}, status=status.HTTP_202_ACCEPTED)
