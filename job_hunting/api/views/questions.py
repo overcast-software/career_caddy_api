@@ -25,11 +25,9 @@ from ..serializers import (
     QuestionSerializer,
     AnswerSerializer,
 )
+from django_q.tasks import async_task
+
 from job_hunting.lib.ai_client import get_client
-from job_hunting.lib.services.db_export_service import DbExportService
-from job_hunting.lib.services.answer_service import AnswerService
-from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
-from job_hunting.lib.models import CareerData
 from job_hunting.models import (
     Question,
     Answer,
@@ -436,16 +434,13 @@ class AnswerViewSet(BaseViewSet):
         except (TypeError, ValueError):
             resume_id_int = 0
 
-        answer_career_markdown = None
+        # Resume existence validation only — the answer task re-derives
+        # career markdown from resume_id or CareerData on its own.
         if resume_id_int:
-            answer_resume = Resume.objects.filter(pk=resume_id_int).first()
-            if not answer_resume:
-                return Response({"errors": [{"detail": "Resume not found"}]}, status=400)
-            answer_career_markdown = DbExportService().resume_markdown_export(answer_resume)
-        else:
-            career_data = CareerData.for_user(request.user.id)
-            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
-            answer_career_markdown = prompt_builder.build_from_career_data(career_data) or None
+            if not Resume.objects.filter(pk=resume_id_int).exists():
+                return Response(
+                    {"errors": [{"detail": "Resume not found"}]}, status=400
+                )
 
         if not content and ai_assist:
             # AI generation — create a pending record and dispatch async
@@ -457,36 +452,13 @@ class AnswerViewSet(BaseViewSet):
                 )
 
             obj = Answer.objects.create(question_id=question.id, status="pending")
-            ans_id = obj.id
-            captured_prompt = injected_prompt
-            captured_career_markdown = answer_career_markdown
 
-            def _generate():
-                import django
-                django.db.close_old_connections()
-                logger.info("AnswerViewSet._generate: start ans_id=%s question_id=%s", ans_id, question.id)
-                try:
-                    svc = AnswerService(client)
-                    logger.info("AnswerViewSet._generate: calling generate_answer ans_id=%s injected_prompt=%r", ans_id, captured_prompt)
-                    result = svc.generate_answer(
-                        question=question,
-                        save=False,
-                        injected_prompt=captured_prompt,
-                        career_markdown=captured_career_markdown,
-                    )
-                    logger.info("AnswerViewSet._generate: got result type=%s ans_id=%s", type(result).__name__, ans_id)
-                    generated_content = result.content if isinstance(result, Answer) else str(result or "")
-                    logger.info("AnswerViewSet._generate: saving content len=%s ans_id=%s", len(generated_content) if generated_content else 0, ans_id)
-                    Answer.objects.filter(pk=ans_id).update(
-                        content=generated_content, status="completed"
-                    )
-                    logger.info("AnswerViewSet._generate: completed ans_id=%s", ans_id)
-                except Exception:
-                    logger.exception("AnswerViewSet._generate: failed ans_id=%s", ans_id)
-                    Answer.objects.filter(pk=ans_id).update(status="failed")
-
-            import threading
-            threading.Thread(target=_generate, daemon=True).start()
+            async_task(
+                "job_hunting.lib.tasks.answer_job",
+                obj.id,
+                injected_prompt=injected_prompt,
+                resume_id=resume_id_int or None,
+            )
 
             return Response({"data": ser.to_resource(obj)}, status=status.HTTP_202_ACCEPTED)
 

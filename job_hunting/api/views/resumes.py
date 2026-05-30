@@ -36,9 +36,10 @@ from ..serializers import (
     SkillSerializer,
     _parse_date,
 )
+from django_q.tasks import async_task
+
 from job_hunting.lib.ai_client import get_client
 from job_hunting.lib.services.summary_service import SummaryService
-from job_hunting.lib.services.ingest_resume import IngestResume
 from job_hunting.models import (
     Summary,
     Description,
@@ -1500,44 +1501,13 @@ class ResumeViewSet(BaseViewSet):
             status="pending",
         )
 
-        resume_id = resume.id
-        user_id = request.user.id
-
-        def _ingest():
-            import django
-            django.db.close_old_connections()
-            User = get_user_model()
-            try:
-                ingest_service = IngestResume(
-                    user=User.objects.get(pk=user_id),
-                    resume=file_blob,
-                    resume_name=resume_name,
-                    agent=None,
-                    db_resume=Resume.objects.get(pk=resume_id),
-                )
-                ingest_service.process()
-
-                r = Resume.objects.filter(pk=resume_id).first()
-                if r:
-                    if not r.title:
-                        r.title = derived_name
-                    r.status = "completed"
-                    r.save()
-            except Exception:
-                logger.exception("Resume ingest failed for resume_id=%s", resume_id)
-                Resume.objects.filter(pk=resume_id).update(status="failed")
-
-        import threading
-
-        def _ingest_with_timeout():
-            t = threading.Thread(target=_ingest, daemon=True)
-            t.start()
-            t.join(timeout=300)  # 5 minute ceiling
-            if t.is_alive():
-                logger.error("Resume ingest timed out for resume_id=%s", resume_id)
-                Resume.objects.filter(pk=resume_id).update(status="failed")
-
-        threading.Thread(target=_ingest_with_timeout, daemon=True).start()
+        async_task(
+            "job_hunting.lib.tasks.resume_parse_job",
+            resume.id,
+            file_blob=file_blob,
+            resume_name=resume_name,
+            derived_name=derived_name,
+        )
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(resume)}

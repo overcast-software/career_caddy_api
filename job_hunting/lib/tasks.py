@@ -325,3 +325,251 @@ def summary_job(
         ResumeSummary.ensure_single_active_for_resume(resume.id)
 
     return {"status": "completed"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Cover Letter / Answer / Resume migrations
+# ---------------------------------------------------------------------------
+# Three more daemon-thread spawn points retire here: cover_letters.create,
+# questions.AnswerViewSet.create (the ai_assist branch), and
+# resumes.ResumeViewSet.ingest. The Question/Answer split is one task —
+# the threading site lives in questions.py but writes Answer rows.
+#
+# Resume specifically passes the uploaded file_blob through the queue as a
+# task kwarg. django_q2 serializes args via pickle; bytes are safe. A
+# proper blob store (s3 or shared volume) is a follow-up — for now,
+# OrmQ rows for resume tasks will be ~size-of-uploaded-file (resumes
+# average ~100KB–2MB, well under Postgres TOAST limits).
+
+
+def cover_letter_job(
+    cover_letter_id: int,
+    *,
+    injected_prompt: str | None = None,
+) -> dict:
+    """Generate a CoverLetter for the JobPost + resume bound to ``cover_letter_id``.
+
+    Replaces the daemon-thread body in
+    ``api/job_hunting/api/views/cover_letters.py``: the ``CoverLetterViewSet.create``
+    path enqueues this task when the request is the AI-generation
+    branch (manual ``attributes.content`` writes still complete
+    synchronously and never enqueue).
+
+    The CoverLetter row already carries ``user_id`` / ``resume_id`` /
+    ``job_post_id`` from the view's row-creation step, so the task
+    re-fetches by pk and re-derives context.
+    """
+    from job_hunting.lib.ai_client import get_client
+    from job_hunting.lib.models import CareerData
+    from job_hunting.lib.services.application_prompt_builder import (
+        ApplicationPromptBuilder,
+    )
+    from job_hunting.lib.services.cover_letter_service import CoverLetterService
+    from job_hunting.models import CoverLetter, JobPost, Resume
+
+    cl = CoverLetter.objects.filter(pk=cover_letter_id).first()
+    if cl is None:
+        logger.warning(
+            "cover_letter_job: cover_letter_id=%s no longer exists",
+            cover_letter_id,
+        )
+        return {"status": "missing"}
+
+    jp = JobPost.objects.filter(pk=cl.job_post_id).first()
+    if jp is None:
+        CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
+        return {"status": "failed"}
+
+    resume = (
+        Resume.objects.filter(pk=cl.resume_id).first() if cl.resume_id else None
+    )
+
+    career_markdown = ""
+    if resume is None:
+        career_data = CareerData.for_user(cl.user_id)
+        prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+        career_markdown = (
+            prompt_builder.build_from_career_data(career_data) or ""
+        )
+        if not career_markdown.strip():
+            CoverLetter.objects.filter(pk=cover_letter_id).update(
+                status="failed"
+            )
+            return {"status": "failed"}
+
+    client = get_client(required=False)
+    if client is None:
+        CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
+        return {"status": "failed"}
+
+    try:
+        svc = CoverLetterService(
+            client,
+            jp,
+            resume=resume,
+            resume_markdown=career_markdown if resume is None else None,
+            user_id=cl.user_id,
+        )
+        gen_kwargs = {}
+        if injected_prompt:
+            gen_kwargs["injected_prompt"] = injected_prompt
+        generated_content = svc.generate_cover_letter(**gen_kwargs)
+    except Exception:
+        CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
+        raise
+
+    CoverLetter.objects.filter(pk=cover_letter_id).update(
+        content=generated_content, status="completed"
+    )
+    return {"status": "completed"}
+
+
+def answer_job(
+    answer_id: int,
+    *,
+    injected_prompt: str | None = None,
+    resume_id: int | None = None,
+) -> dict:
+    """Generate an AI Answer for the Question bound to ``answer_id``.
+
+    Replaces the daemon-thread body in
+    ``api/job_hunting/api/views/questions.py``'s answer-creation path
+    (the ``ai_assist=True`` branch).
+
+    The Answer row already carries ``question_id``; the task re-fetches
+    both. Resume context is per-call (not on the Answer row) so it
+    passes via kwarg. ``resume_id=None`` means use the user's
+    CareerData; ``resume_id`` set means use that specific resume's
+    exported markdown.
+    """
+    from job_hunting.lib.ai_client import get_client
+    from job_hunting.lib.models import CareerData
+    from job_hunting.lib.services.answer_service import AnswerService
+    from job_hunting.lib.services.application_prompt_builder import (
+        ApplicationPromptBuilder,
+    )
+    from job_hunting.lib.services.db_export_service import DbExportService
+    from job_hunting.models import Answer, Question, Resume
+
+    answer = Answer.objects.filter(pk=answer_id).first()
+    if answer is None:
+        logger.warning("answer_job: answer_id=%s no longer exists", answer_id)
+        return {"status": "missing"}
+
+    question = Question.objects.filter(pk=answer.question_id).first()
+    if question is None:
+        Answer.objects.filter(pk=answer_id).update(status="failed")
+        return {"status": "failed"}
+
+    # Re-derive career markdown from resume_id or CareerData.
+    career_markdown = ""
+    if resume_id:
+        resume = Resume.objects.filter(pk=resume_id).first()
+        if resume is None:
+            Answer.objects.filter(pk=answer_id).update(status="failed")
+            return {"status": "failed"}
+        career_markdown = (
+            DbExportService().resume_markdown_export(resume) or ""
+        )
+    else:
+        # Use the user behind the question for CareerData lookup. Question
+        # carries the user via question.user_id (or fall back to the
+        # answer's question's owning relationship).
+        user_id = getattr(question, "user_id", None)
+        if user_id is None:
+            # Question's user model may live on a related field — keep the
+            # branch tolerant.
+            user_id = getattr(question, "created_by_id", None)
+        if user_id is not None:
+            career_data = CareerData.for_user(user_id)
+            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+            career_markdown = (
+                prompt_builder.build_from_career_data(career_data) or ""
+            )
+
+    client = get_client(required=False)
+    if client is None:
+        Answer.objects.filter(pk=answer_id).update(status="failed")
+        return {"status": "failed"}
+
+    try:
+        svc = AnswerService(client)
+        gen_kwargs = {
+            "question": question,
+            "save": False,
+            "injected_prompt": injected_prompt,
+        }
+        if career_markdown:
+            gen_kwargs["career_markdown"] = career_markdown
+        result = svc.generate_answer(**gen_kwargs)
+        generated_content = (
+            result.content if isinstance(result, Answer) else str(result or "")
+        )
+    except Exception:
+        Answer.objects.filter(pk=answer_id).update(status="failed")
+        raise
+
+    Answer.objects.filter(pk=answer_id).update(
+        content=generated_content, status="completed"
+    )
+    return {"status": "completed"}
+
+
+def resume_parse_job(
+    resume_id: int,
+    *,
+    file_blob: bytes,
+    resume_name: str,
+    derived_name: str | None = None,
+) -> dict:
+    """Parse an uploaded resume file and populate the Resume row.
+
+    Replaces the daemon-thread body in
+    ``api/job_hunting/api/views/resumes.py``'s ingest endpoint, including
+    the bespoke ``threading.Thread.join(timeout=300)`` ceiling — the
+    Q_CLUSTER ``timeout: 300`` setting now owns that contract, and
+    django_q.Failure will surface a timeout as a normal failure with the
+    traceback.
+
+    ``file_blob`` rides through the OrmQ row as pickle-serialized
+    bytes. Resume uploads average ~100KB–2MB which is fine for OrmQ;
+    a proper blob store (s3 or shared volume) is a Phase 6+ follow-up.
+    """
+    from django.contrib.auth import get_user_model
+
+    from job_hunting.lib.services.ingest_resume import IngestResume
+    from job_hunting.models import Resume
+
+    resume = Resume.objects.filter(pk=resume_id).first()
+    if resume is None:
+        logger.warning(
+            "resume_parse_job: resume_id=%s no longer exists", resume_id
+        )
+        return {"status": "missing"}
+
+    User = get_user_model()
+    user = User.objects.filter(pk=resume.user_id).first() if resume.user_id else None
+    if user is None:
+        Resume.objects.filter(pk=resume_id).update(status="failed")
+        return {"status": "failed"}
+
+    try:
+        ingest_service = IngestResume(
+            user=user,
+            resume=file_blob,
+            resume_name=resume_name,
+            agent=None,
+            db_resume=resume,
+        )
+        ingest_service.process()
+    except Exception:
+        Resume.objects.filter(pk=resume_id).update(status="failed")
+        raise
+
+    r = Resume.objects.filter(pk=resume_id).first()
+    if r:
+        if not r.title and derived_name:
+            r.title = derived_name
+        r.status = "completed"
+        r.save()
+    return {"status": "completed"}

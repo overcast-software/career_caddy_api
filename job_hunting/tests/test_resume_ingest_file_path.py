@@ -21,10 +21,12 @@ class TestResumeIngestRecordsOriginalFilename(TestCase):
         Resume.file_path so the user can later see where a resume came from.
         The server does not persist the blob — file_path is a reference,
         not a link target."""
-        # Patch the background ingest worker — we only care about the
-        # placeholder Resume row that gets created synchronously.
-        with patch("job_hunting.api.views.resumes.IngestResume") as _MockIngest:
-            _MockIngest.return_value.process.return_value = None
+        # Patch the django-q2 enqueue — we only care about the
+        # placeholder Resume row that gets created synchronously. The
+        # actual resume_parse_job task runs out-of-band in the worker
+        # container.
+        with patch("job_hunting.api.views.resumes.async_task") as mock_task:
+            mock_task.return_value = "fake-task-id"
             uploaded = SimpleUploadedFile(
                 "Jane_Doe_Resume.docx",
                 b"fake-docx-bytes",
