@@ -75,6 +75,19 @@ def _log_scrape_status(
 
         if update_scrape_status:
             Scrape.objects.filter(pk=scrape_id).update(status=status_label)
+            # Emit a terminal-status notification when the Scrape lands
+            # on completed/failed so frontend SSE subscribers can update
+            # the row without polling. Non-terminal status writes (hold,
+            # running, extracting, updating_profile, …) intentionally
+            # don't fire — keeps the event stream low-noise. See
+            # Plans/Push status updates — SSE replaces polling cap.
+            if status_label in ("completed", "failed"):
+                from job_hunting.lib import events
+                scrape = Scrape.objects.filter(pk=scrape_id).only(
+                    "created_by_id"
+                ).first()
+                user_id = scrape.created_by_id if scrape else None
+                events.notify("scrape", scrape_id, status_label, user_id)
         status_obj, _ = Status.objects.get_or_create(
             status=status_label, defaults={"status_type": "scrape"}
         )
