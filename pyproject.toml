@@ -43,6 +43,12 @@ dependencies = [
     "dateparser>=1.2.2",
     # Production server
     "gunicorn>=21.2.0",
+    # Async task queue — Phase 1 of the django-q2 phased rollout
+    # (Plans/Job-queue integration — django-q2 phased rollout). Uses the
+    # existing Postgres broker via the django_q ORM backend; the worker
+    # container runs `manage.py qcluster`. Replaces the 9 daemon-thread
+    # spawn points + 2 polling daemons over Phases 2-5.
+    "django-q2>=1.7.0",
 ]
 
 [dependency-groups]
