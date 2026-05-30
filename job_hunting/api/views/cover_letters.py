@@ -1,7 +1,7 @@
 import logging
-import threading
 
 from django.http import HttpResponse
+from django_q.tasks import async_task
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -17,7 +17,6 @@ from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import CoverLetterSerializer
 from job_hunting.api.permissions import IsGuestReadOnly
 from job_hunting.lib.ai_client import get_client
-from job_hunting.lib.services.cover_letter_service import CoverLetterService
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import CareerData
 from job_hunting.models import (
@@ -345,26 +344,12 @@ class CoverLetterViewSet(BaseViewSet):
             company_id=(company.id if company else None),
             status="pending",
         )
-        cl_id = cover_letter.id
-        captured_injected_prompt = injected_prompt
 
-        def _generate():
-            import django
-            django.db.close_old_connections()
-            try:
-                cl_service = CoverLetterService(
-                    client, job_post, resume=resume, resume_markdown=career_markdown, user_id=user_id
-                )
-                generated_content = cl_service.generate_cover_letter(
-                    injected_prompt=captured_injected_prompt
-                )
-                CoverLetter.objects.filter(pk=cl_id).update(
-                    content=generated_content, status="completed"
-                )
-            except Exception:
-                CoverLetter.objects.filter(pk=cl_id).update(status="failed")
-
-        threading.Thread(target=_generate, daemon=True).start()
+        async_task(
+            "job_hunting.lib.tasks.cover_letter_job",
+            cover_letter.id,
+            injected_prompt=injected_prompt,
+        )
 
         return Response({"data": ser.to_resource(cover_letter)}, status=status.HTTP_202_ACCEPTED)
 
