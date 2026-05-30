@@ -26,6 +26,7 @@ from rest_framework_simplejwt.views import (
 
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from job_hunting.api.chat import chat_proxy
+from job_hunting.api.events import events_stream, events_token
 from job_hunting.api.views import (
     DjangoUserViewSet,
     ResumeViewSet,
@@ -185,6 +186,9 @@ urlpatterns = [
     path("api/v1/admin/graph-aggregate/", graph_aggregate, name="graph-aggregate"),
     path("api/v1/admin/graph-mermaid/", graph_mermaid, name="graph-mermaid"),
     path("api/v1/chat/", chat_proxy, name="chat"),
+    # SSE — Phase 2 of Plans/Push status updates. Issue token, then stream.
+    path("api/v1/events/token/", events_token, name="events-token"),
+    path("api/v1/events/", events_stream, name="events-stream"),
     path("api/v1/token/", UnthrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/v1/token/refresh/", UnthrottledTokenRefreshView.as_view(), name="token_refresh"),
     path("api/v1/token/verify/", UnthrottledTokenVerifyView.as_view(), name="token_verify"),
