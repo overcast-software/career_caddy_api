@@ -11,25 +11,30 @@ from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
 from job_hunting.models import Company, JobPost, Scrape
 
 
-class _InlineThread:
-    """Stand-in for threading.Thread that runs the target inline on .start().
+def _inline_async_task(name, *args, **kwargs):
+    """Stand-in for django_q.tasks.async_task that runs the target inline.
 
-    Use with @patch('job_hunting.api.views.jobs.threading.Thread', new=_InlineThread)
-    — but the import lives inside _run_reextract_async, so we patch the
-    threading module there instead. See @_inline_reextract below.
+    Phase 5a of Plans/Job-queue integration replaced parse_scrape's
+    threading.Thread spawn with an async_task enqueue. The reextract
+    flow ends with parse_scrape(..., sync=False) which enqueues the
+    parse_scrape_job task; under test we resolve that target inline
+    so the assertions can read the post-parse JobPost row immediately.
     """
+    import importlib
 
-    def __init__(self, *, target, daemon=None):
-        self._target = target
-
-    def start(self):
-        self._target()
+    module_path, _, func_name = name.rpartition(".")
+    mod = importlib.import_module(module_path)
+    return getattr(mod, func_name)(*args, **kwargs)
 
 
 def _inline_reextract(fn):
-    """Decorator: patches the threading.Thread used inside _run_reextract_async
-    so the daemon work runs inline within the request thread."""
-    return patch("threading.Thread", new=_InlineThread)(fn)
+    """Decorator: patches async_task in the parse_scrape module so the
+    parse_scrape_job task runs inline within the request thread instead
+    of being enqueued on the qcluster worker."""
+    return patch(
+        "job_hunting.lib.parsers.job_post_extractor.async_task",
+        new=_inline_async_task,
+    )(fn)
 
 
 User = get_user_model()
@@ -85,8 +90,22 @@ class TestJobPostReextractAPI(TestCase):
         self.assertEqual(self.job_post.company_id, self.company.id)
 
     @_inline_reextract
+    @patch(
+        "job_hunting.lib.parsers.completeness_reviewer.maybe_review_and_persist",
+        return_value=None,
+    )
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_reextract_persists_scrape_for_provenance(self, mock_extract):
+    def test_reextract_persists_scrape_for_provenance(
+        self, mock_extract, _mock_reviewer
+    ):
+        # The thin mock description ("Build great things.") would
+        # otherwise trip CompletenessReviewer's "not a real job
+        # description" rejection and flip scrape.status to failed —
+        # this test is about provenance, not review behavior, so the
+        # reviewer is stubbed out. (Before 2026-05-30 the old
+        # _InlineThread patch crashed the reviewer's worker thread by
+        # accident and the rejection silently never landed; the new
+        # surgical async_task patch correctly runs the reviewer.)
         mock_extract.return_value = _make_extracted()
         self.client.post(self.url, data={"text": "pasted content"}, format="json")
         scrape = Scrape.objects.filter(job_post=self.job_post).first()
