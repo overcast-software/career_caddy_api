@@ -40,6 +40,8 @@ from __future__ import annotations
 import logging
 import time
 
+from job_hunting.lib import events
+
 logger = logging.getLogger(__name__)
 
 
@@ -134,9 +136,12 @@ def score_job(
         logger.warning("score_job: score_id=%s no longer exists", score_id)
         return {"score": None, "status": "missing"}
 
+    user_id = score.user_id
+
     jp = JobPost.objects.filter(pk=score.job_post_id).first()
     if jp is None or not (jp.description or "").strip():
         Score.objects.filter(pk=score_id).update(status="failed")
+        events.notify("score", score_id, "failed", user_id)
         logger.warning(
             "score_job: score_id=%s — JobPost missing or empty description",
             score_id,
@@ -147,6 +152,7 @@ def score_job(
         resume = Resume.objects.filter(pk=score.resume_id).first()
         if resume is None:
             Score.objects.filter(pk=score_id).update(status="failed")
+            events.notify("score", score_id, "failed", user_id)
             logger.warning("score_job: resume_id=%s missing", score.resume_id)
             return {"score": None, "status": "failed"}
         exporter = DbExportService()
@@ -159,6 +165,7 @@ def score_job(
 
     if not (resume_markdown or "").strip():
         Score.objects.filter(pk=score_id).update(status="failed")
+        events.notify("score", score_id, "failed", user_id)
         logger.warning(
             "score_job: empty resume markdown for score_id=%s", score_id
         )
@@ -167,6 +174,7 @@ def score_job(
     client = get_client(required=False)
     if client is None:
         Score.objects.filter(pk=score_id).update(status="failed")
+        events.notify("score", score_id, "failed", user_id)
         logger.warning("score_job: no AI client configured")
         return {"score": None, "status": "failed"}
 
@@ -182,6 +190,7 @@ def score_job(
         )
     except Exception:
         Score.objects.filter(pk=score_id).update(status="failed")
+        events.notify("score", score_id, "failed", user_id)
         # Re-raise so django_q.Failure captures the traceback; the row
         # status above is the surface visible to the polling frontend.
         raise
@@ -191,6 +200,7 @@ def score_job(
         explanation=result.evaluation,
         status="completed",
     )
+    events.notify("score", score_id, "completed", user_id)
 
     # AI-usage logging is best-effort — a logging failure must NOT flip
     # the Score back to failed. Same try/except split the daemon-thread
@@ -262,9 +272,12 @@ def summary_job(
         )
         return {"status": "missing"}
 
+    user_id = summary.user_id
+
     jp = JobPost.objects.filter(pk=summary.job_post_id).first()
     if jp is None:
         Summary.objects.filter(pk=summary_id).update(status="failed")
+        events.notify("summary", summary_id, "failed", user_id)
         return {"status": "failed"}
 
     resume = None
@@ -280,11 +293,13 @@ def summary_job(
         )
         if not career_markdown.strip():
             Summary.objects.filter(pk=summary_id).update(status="failed")
+            events.notify("summary", summary_id, "failed", user_id)
             return {"status": "failed"}
 
     client = get_client(required=False)
     if client is None:
         Summary.objects.filter(pk=summary_id).update(status="failed")
+        events.notify("summary", summary_id, "failed", user_id)
         return {"status": "failed"}
 
     try:
@@ -302,11 +317,13 @@ def summary_job(
         )
     except Exception:
         Summary.objects.filter(pk=summary_id).update(status="failed")
+        events.notify("summary", summary_id, "failed", user_id)
         raise
 
     Summary.objects.filter(pk=summary_id).update(
         content=generated_content, status="completed"
     )
+    events.notify("summary", summary_id, "completed", user_id)
 
     # Maintain ResumeSummary's single-active-per-resume invariant when
     # the summary is bound to a resume. Mirrors the daemon-thread body.
@@ -375,9 +392,12 @@ def cover_letter_job(
         )
         return {"status": "missing"}
 
+    user_id = cl.user_id
+
     jp = JobPost.objects.filter(pk=cl.job_post_id).first()
     if jp is None:
         CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
+        events.notify("cover_letter", cover_letter_id, "failed", user_id)
         return {"status": "failed"}
 
     resume = (
@@ -395,11 +415,13 @@ def cover_letter_job(
             CoverLetter.objects.filter(pk=cover_letter_id).update(
                 status="failed"
             )
+            events.notify("cover_letter", cover_letter_id, "failed", user_id)
             return {"status": "failed"}
 
     client = get_client(required=False)
     if client is None:
         CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
+        events.notify("cover_letter", cover_letter_id, "failed", user_id)
         return {"status": "failed"}
 
     try:
@@ -416,11 +438,13 @@ def cover_letter_job(
         generated_content = svc.generate_cover_letter(**gen_kwargs)
     except Exception:
         CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
+        events.notify("cover_letter", cover_letter_id, "failed", user_id)
         raise
 
     CoverLetter.objects.filter(pk=cover_letter_id).update(
         content=generated_content, status="completed"
     )
+    events.notify("cover_letter", cover_letter_id, "completed", user_id)
     return {"status": "completed"}
 
 
@@ -459,7 +483,15 @@ def answer_job(
     question = Question.objects.filter(pk=answer.question_id).first()
     if question is None:
         Answer.objects.filter(pk=answer_id).update(status="failed")
+        events.notify("answer", answer_id, "failed", None)
         return {"status": "failed"}
+
+    # Answer has no user FK; derive from the owning question. user_id model
+    # may live as `user_id` or `created_by_id` depending on Question's
+    # current schema — accept either.
+    user_id = getattr(question, "user_id", None) or getattr(
+        question, "created_by_id", None
+    )
 
     # Re-derive career markdown from resume_id or CareerData.
     career_markdown = ""
@@ -467,29 +499,22 @@ def answer_job(
         resume = Resume.objects.filter(pk=resume_id).first()
         if resume is None:
             Answer.objects.filter(pk=answer_id).update(status="failed")
+            events.notify("answer", answer_id, "failed", user_id)
             return {"status": "failed"}
         career_markdown = (
             DbExportService().resume_markdown_export(resume) or ""
         )
-    else:
-        # Use the user behind the question for CareerData lookup. Question
-        # carries the user via question.user_id (or fall back to the
-        # answer's question's owning relationship).
-        user_id = getattr(question, "user_id", None)
-        if user_id is None:
-            # Question's user model may live on a related field — keep the
-            # branch tolerant.
-            user_id = getattr(question, "created_by_id", None)
-        if user_id is not None:
-            career_data = CareerData.for_user(user_id)
-            prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
-            career_markdown = (
-                prompt_builder.build_from_career_data(career_data) or ""
-            )
+    elif user_id is not None:
+        career_data = CareerData.for_user(user_id)
+        prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+        career_markdown = (
+            prompt_builder.build_from_career_data(career_data) or ""
+        )
 
     client = get_client(required=False)
     if client is None:
         Answer.objects.filter(pk=answer_id).update(status="failed")
+        events.notify("answer", answer_id, "failed", user_id)
         return {"status": "failed"}
 
     try:
@@ -507,11 +532,13 @@ def answer_job(
         )
     except Exception:
         Answer.objects.filter(pk=answer_id).update(status="failed")
+        events.notify("answer", answer_id, "failed", user_id)
         raise
 
     Answer.objects.filter(pk=answer_id).update(
         content=generated_content, status="completed"
     )
+    events.notify("answer", answer_id, "completed", user_id)
     return {"status": "completed"}
 
 
@@ -547,10 +574,13 @@ def resume_parse_job(
         )
         return {"status": "missing"}
 
+    user_id = resume.user_id
+
     User = get_user_model()
     user = User.objects.filter(pk=resume.user_id).first() if resume.user_id else None
     if user is None:
         Resume.objects.filter(pk=resume_id).update(status="failed")
+        events.notify("resume", resume_id, "failed", user_id)
         return {"status": "failed"}
 
     try:
@@ -564,6 +594,7 @@ def resume_parse_job(
         ingest_service.process()
     except Exception:
         Resume.objects.filter(pk=resume_id).update(status="failed")
+        events.notify("resume", resume_id, "failed", user_id)
         raise
 
     r = Resume.objects.filter(pk=resume_id).first()
@@ -572,6 +603,7 @@ def resume_parse_job(
             r.title = derived_name
         r.status = "completed"
         r.save()
+    events.notify("resume", resume_id, "completed", user_id)
     return {"status": "completed"}
 
 
