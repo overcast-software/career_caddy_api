@@ -101,6 +101,12 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "corsheaders",
     "drf_spectacular",
+    # Async task queue — Phase 1 of the django-q2 phased rollout
+    # (Plans/Job-queue integration — django-q2 phased rollout).
+    # The worker container runs `manage.py qcluster`; tasks are
+    # enqueued from views via async_task(). Subsequent phases migrate
+    # the existing 9 daemon-thread spawn points + 2 polling daemons.
+    "django_q",
     "job_hunting.apps.JobHuntingConfig",
 ]
 
@@ -431,3 +437,43 @@ AUTH_PASSWORD_VALIDATORS = [
 if TESTING:
     EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
     REGISTRATION_OPEN = True
+
+# ---------------------------------------------------------------------------
+# Q_CLUSTER — django-q2 task queue configuration.
+#
+# Phase 1 of Plans/Job-queue integration — django-q2 phased rollout.
+# The worker container runs `manage.py qcluster` against the existing
+# Postgres DB (no new infrastructure). Tasks are enqueued from views
+# via `async_task('module.path', *args)`; the qcluster process picks
+# them up off the django_q_ormq queue table.
+#
+# Defaults rationale (open question [?] Worker count / timeout defaults
+# in the plan node):
+#   - 2 workers: matches the archived plan's recommendation; small
+#     enough to fit comfortably alongside api on the rn host.
+#   - 300s timeout: covers Score / Summary / Cover Letter / Resume /
+#     Answer / Question tier-1 LLM calls. parse_scrape (Phase 5) will
+#     override to 600s via the task's `timeout=` kwarg.
+#   - 4s poll: standard django-q2 default; balance between worker
+#     responsiveness and DB load.
+#   - retry=0 globally: per-task retry policies are explicit at the
+#     async_task() call site (federation dispatch will override).
+#
+# This config block has no behavior impact in Phase 1 — only the
+# `health_check` task exists. Subsequent phases migrate the 9
+# daemon-thread spawn points + 2 polling daemons.
+Q_CLUSTER = {
+    "name": "career_caddy",
+    "workers": 2,
+    "recycle": 500,
+    "timeout": 300,
+    "retry": 360,  # Higher than timeout so timed-out tasks don't re-queue immediately
+    "queue_limit": 50,
+    "bulk": 10,
+    "orm": "default",
+    "poll": 4,
+    "label": "Career Caddy Tasks",
+    "save_limit": 1000,
+    "ack_failures": True,
+    "max_attempts": 1,  # No automatic retry; per-task override via async_task(retry=N)
+}
