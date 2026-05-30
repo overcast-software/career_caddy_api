@@ -1,7 +1,8 @@
 import logging
 import os
 import re
-import threading
+
+from django_q.tasks import async_task
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -1104,7 +1105,16 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
     if sync:
         _run()
     else:
-        threading.Thread(target=_run, daemon=True).start()
+        # Phase 5a of Plans/Job-queue integration. parse_scrape used to
+        # fork a daemon thread when sync=False; now the work runs on the
+        # qcluster worker. The task target re-enters parse_scrape with
+        # sync=True so the body above runs inline inside the worker.
+        async_task(
+            "job_hunting.lib.tasks.parse_scrape_job",
+            scrape_id,
+            user_id=user_id,
+            force=force,
+        )
 
 
 _TIER0_DEMOTE_MIN_MISSES = 5

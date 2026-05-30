@@ -573,3 +573,33 @@ def resume_parse_job(
         r.status = "completed"
         r.save()
     return {"status": "completed"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5a — parse_scrape migration
+# ---------------------------------------------------------------------------
+# Replaces the `threading.Thread` daemon spawn at the tail of
+# `parse_scrape` in job_hunting/lib/parsers/job_post_extractor.py. The
+# task target re-enters parse_scrape with `sync=True` so the existing
+# pipeline body (tier-0/1/2/3 fallback, ScrapeProfile update,
+# CompletenessReviewer gate, scrape status logging) runs inline inside
+# the qcluster worker.
+
+
+def parse_scrape_job(
+    scrape_id: int,
+    *,
+    user_id: int | None = None,
+    force: bool = False,
+) -> dict:
+    """Run parse_scrape inside the qcluster worker.
+
+    Tier-2/3 LLM fallbacks routinely take ~30–90 seconds and the
+    pipeline can re-attempt CompletenessReviewer + ScrapeProfile
+    update on top of that. Worker timeout is Q_CLUSTER.timeout=300
+    (5 min) — long-running parses get the full ceiling.
+    """
+    from job_hunting.lib.parsers.job_post_extractor import parse_scrape
+
+    parse_scrape(scrape_id, user_id=user_id, sync=True, force=force)
+    return {"scrape_id": scrape_id, "status": "completed"}
