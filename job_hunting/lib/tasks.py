@@ -635,3 +635,112 @@ def parse_scrape_job(
 
     parse_scrape(scrape_id, user_id=user_id, sync=True, force=force)
     return {"scrape_id": scrape_id, "status": "completed"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 of Plans/Scrape runner — lease timeout sweep
+# ---------------------------------------------------------------------------
+# Crash recovery for the scrape runner. If a runner picks up a Scrape via
+# POST /scrapes/claim-next/ and then dies (kill -9, OOM, network split, host
+# reboot), the row stays at status='running' (or 'extracting',
+# 'updating_profile', …) with a stale `claimed_at` set. Nothing else picks it
+# back up because the claim endpoint only sees status='hold'.
+#
+# The runner heartbeats `claimed_at = NOW()` on each non-terminal status
+# write inside `_log_scrape_status` (shipped Phase 1). This sweep resets any
+# row whose claim is older than the threshold AND status is still
+# non-terminal — that combination identifies a runner that picked up work
+# but stopped checking in. The row goes back to 'hold' for the next claim.
+#
+# Schedule: registered as a django-q2 Schedule (`schedule_type='I'`,
+# minutes=5) by migration 0086. Idempotent; safe to re-run on every deploy.
+# The task itself is idempotent too — runs on a `claimed_at < cutoff`
+# filter, so running it twice in a row only resets what's already stale.
+
+
+# Non-terminal scrape statuses the sweep covers. Anything else (None,
+# 'hold', 'completed', 'failed') is either already-available-to-claim or
+# already-finished and not a candidate for reset.
+_SWEEPABLE_STATUSES = (
+    "running",
+    "extracting",
+    "updating_profile",
+    "resolving_apply_url",
+    "navigating",
+    "resolveapplyurl",
+)
+
+# Default lease window. Tier-3 LLM fallbacks + browser load can hit ~5-7 min
+# on a slow profile, and the heartbeat fires on each status update — 15 min
+# is comfortable headroom for a healthy long-running scrape without leaving
+# crashed claims wedged for hours.
+_DEFAULT_LEASE_MINUTES = 15
+
+
+def sweep_stale_scrape_claims(threshold_minutes: int = _DEFAULT_LEASE_MINUTES) -> dict:
+    """Reset Scrape rows whose runner claim has gone stale.
+
+    A row is stale when:
+    - ``claimed_at`` is older than ``threshold_minutes`` ago AND
+    - ``status`` is non-terminal (still appears to be "in progress")
+
+    The reset clears ``claimed_at`` + ``claimed_by`` and flips ``status``
+    back to ``'hold'``. The next runner that polls ``POST /scrapes/claim-
+    next/`` will pick it back up.
+
+    Returns ``{reset: N, threshold_minutes: M, cutoff: iso}`` for the
+    django_q.Task row so operators can grep the schedule history. A
+    warning is logged per reset row with the prior claimant for blame
+    attribution.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from job_hunting.models import Scrape
+
+    cutoff = timezone.now() - timedelta(minutes=threshold_minutes)
+
+    # Snapshot the candidate rows first so we can log each reset with the
+    # prior claimant (for runner blame attribution in logfire). The .values
+    # avoids hydrating full Scrape instances for what's a small bookkeeping
+    # set in steady state.
+    stale = list(
+        Scrape.objects.filter(
+            claimed_at__lt=cutoff,
+            status__in=_SWEEPABLE_STATUSES,
+        ).values("id", "claimed_by", "claimed_at", "status")
+    )
+
+    if not stale:
+        return {
+            "reset": 0,
+            "threshold_minutes": threshold_minutes,
+            "cutoff": cutoff.isoformat(),
+        }
+
+    # Bulk reset. Identical semantics to per-row .save() but one round-trip.
+    reset_count = Scrape.objects.filter(
+        id__in=[row["id"] for row in stale]
+    ).update(
+        status="hold",
+        claimed_at=None,
+        claimed_by=None,
+    )
+
+    for row in stale:
+        logger.warning(
+            "scrape claim swept: id=%s prior_claimant=%s prior_status=%s "
+            "claimed_at=%s (stale > %sm)",
+            row["id"],
+            row["claimed_by"],
+            row["status"],
+            row["claimed_at"].isoformat() if row["claimed_at"] else None,
+            threshold_minutes,
+        )
+
+    return {
+        "reset": reset_count,
+        "threshold_minutes": threshold_minutes,
+        "cutoff": cutoff.isoformat(),
+    }
