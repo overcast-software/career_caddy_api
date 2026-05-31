@@ -94,6 +94,15 @@ class Scrape(GetMixin, models.Model):
     # fires on canonical-link match, which is the load-bearing dedupe
     # mechanic for tracker-URL stubs.
     skip_extract = models.BooleanField(default=False)
+    # Phase 1 of Plans/Scrape runner — harden hold-poller.
+    # claimed_at + claimed_by support atomic claim by N coexisting
+    # runners (omarchy, pibu, …) via SELECT FOR UPDATE SKIP LOCKED on
+    # POST /scrapes/claim-next/. Bumped on each status update during the
+    # pipeline so a live runner's claim doesn't expire mid-scrape; reset
+    # to NULL by the lease-sweep when claimed_at < NOW() - 15min and
+    # status is non-terminal (covers runner-crash recovery).
+    claimed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    claimed_by = models.CharField(max_length=100, null=True, blank=True)
 
     class Meta:
         db_table = "scrape"
