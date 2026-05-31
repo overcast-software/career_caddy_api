@@ -74,7 +74,20 @@ def _log_scrape_status(
         from django.utils import timezone
 
         if update_scrape_status:
-            Scrape.objects.filter(pk=scrape_id).update(status=status_label)
+            # Heartbeat the claim — the lease sweep in Phase 2 will
+            # reset rows whose claimed_at is older than 15 min, so
+            # bumping it on each status update keeps a long-running
+            # runner from getting reaped mid-scrape. On terminal status
+            # we also clear claimed_at + claimed_by so post-mortem
+            # queries can distinguish "claimed and finished" from
+            # "still claimed by a live runner."
+            update_fields = {"status": status_label}
+            if status_label in ("completed", "failed"):
+                update_fields["claimed_at"] = None
+                update_fields["claimed_by"] = None
+            else:
+                update_fields["claimed_at"] = timezone.now()
+            Scrape.objects.filter(pk=scrape_id).update(**update_fields)
             # Emit a terminal-status notification when the Scrape lands
             # on completed/failed so frontend SSE subscribers can update
             # the row without polling. Non-terminal status writes (hold,

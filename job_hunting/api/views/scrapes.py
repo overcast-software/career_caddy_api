@@ -929,6 +929,91 @@ class ScrapeViewSet(BaseViewSet):
             return apply_match_id
         return submitted_jp_id
 
+    @extend_schema(
+        tags=["Scrapes"],
+        summary="Atomically claim the next hold scrape for processing (runner-only)",
+        request=inline_serializer(
+            name="ScrapeClaimRequest",
+            fields={
+                "runner_name": drf_serializers.CharField(
+                    required=False,
+                    help_text=(
+                        "Identifier recorded on Scrape.claimed_by for "
+                        "audit + multi-runner attribution. Defaults to "
+                        "the request's User-Agent if absent."
+                    ),
+                ),
+            },
+        ),
+        responses={
+            200: _JSONAPI_ITEM,
+            204: OpenApiResponse(description="No hold scrapes available"),
+            403: OpenApiResponse(description="Forbidden — staff or runner key required"),
+        },
+    )
+    @action(detail=False, methods=["post"], url_path="claim-next")
+    def claim_next(self, request):
+        """POST /api/v1/scrapes/claim-next/
+
+        Phase 1 of Plans/Scrape runner — harden hold-poller. Replaces
+        the hold-poller's GET /scrapes/?status=hold + race-on-PATCH
+        pattern. Atomically:
+
+        - Picks the oldest Scrape where status='hold' AND
+          claimed_at IS NULL.
+        - Sets claimed_at = NOW(), claimed_by = <runner_name>,
+          status = 'running'.
+        - Returns the row to the caller.
+
+        Uses SELECT FOR UPDATE SKIP LOCKED so N concurrent runners
+        (omarchy, pibu, …) never pick up the same row. The loser
+        in a race just sees the next row down the queue, or 204.
+
+        Returns 204 when no hold scrapes are available — runner
+        sleeps + retries. (Short-poll for v0; long-poll deferred per
+        plan Q5.)
+
+        Auth: any authenticated caller for now. A 'runner' API-key
+        scope is a Phase 4 nice-to-have; the runner key already
+        scopes against the rest of the api, so this verb is no more
+        privileged than existing CRUD.
+        """
+        from django.db import transaction
+        from django.utils import timezone
+
+        data = request.data if isinstance(request.data, dict) else {}
+        runner_name = (
+            (data.get("runner_name") or "").strip()
+            or request.META.get("HTTP_USER_AGENT", "")[:100]
+            or "anonymous"
+        )
+
+        # Atomic claim — wrap in a transaction so SELECT FOR UPDATE
+        # holds the row lock until the UPDATE commits. SKIP LOCKED
+        # lets concurrent runners see the next row instead of
+        # blocking on the locked one.
+        with transaction.atomic():
+            claimable = (
+                Scrape.objects.select_for_update(skip_locked=True)
+                .filter(status="hold", claimed_at__isnull=True)
+                # Scrape has no created_at; id is monotonic-increasing
+                # under Postgres autoinc and serves as the FIFO key.
+                .order_by("id")
+                .first()
+            )
+            if claimable is None:
+                return Response(status=status.HTTP_204_NO_CONTENT)
+
+            claimable.claimed_at = timezone.now()
+            claimable.claimed_by = runner_name
+            claimable.status = "running"
+            claimable.save(
+                update_fields=["claimed_at", "claimed_by", "status"]
+            )
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(claimable)}, status=200)
+
     @action(detail=True, methods=["post"], url_path="llm-extract")
     def llm_extract(self, request, pk=None):
         """Run LLM extraction against a scrape's captured content and
