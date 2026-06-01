@@ -27,6 +27,7 @@ from rest_framework_simplejwt.views import (
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from job_hunting.api.chat import chat_proxy
 from job_hunting.api.events import events_stream, events_token
+from job_hunting.api.views.federation import actor_view, webfinger
 from job_hunting.api.views import (
     DjangoUserViewSet,
     ResumeViewSet,
@@ -119,6 +120,15 @@ router.register(r"scrape-profiles", ScrapeProfileViewSet, basename="scrape-profi
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # ActivityPub Phase 5a — root-URL routes (NOT under /api/v1/).
+    # WebFinger is RFC 7033 mandated at .well-known; Actor URIs mirror
+    # what job_hunting.lib.as_object.actor_uri has emitted since
+    # Phase 4. Both views are public — federation peers (Mastodon, etc.)
+    # have no auth context on first contact.
+    path(".well-known/webfinger", webfinger, name="webfinger"),
+    re_path(r"^\.well-known/webfinger/?$", webfinger, name="webfinger-trailing"),
+    path("actors/<slug:username>/", actor_view, name="actor"),
+    re_path(r"^actors/(?P<username>[-\w]+)$", actor_view, name="actor-noslash"),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/healthcheck$", healthcheck, name="healthcheck-noslash"),
     path("api/v1/agent-models/", agent_models, name="agent-models"),

@@ -422,6 +422,17 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:4200")
 # var (careercaddy.online). Federated rows are detected by comparing
 # JobPost.source_instance against this value.
 CAREER_CADDY_INSTANCE = os.environ.get("CAREER_CADDY_INSTANCE", "localhost")
+
+# INSTANCE_ORIGIN — full origin (scheme + host[+port]) used to mint
+# every ActivityPub URI this instance emits: actor IDs, object IDs,
+# WebFinger ``links.href``, future Outbox / Inbox URIs. Splitting this
+# from ``CAREER_CADDY_INSTANCE`` lets local-dev / Mastodon-peer harness
+# (Plans/ActivityPub Phase 5 — federation proper/Local test harness)
+# drive http://localhost:8000 or http://api:8000 without forcing the
+# JobPost.source_instance default to change shape. When unset, code
+# paths fall back to ``https://{CAREER_CADDY_INSTANCE}`` for
+# backwards-compatibility with the Phase 4 ``as_object`` adapter.
+INSTANCE_ORIGIN = os.environ.get("INSTANCE_ORIGIN", "http://localhost:8000")
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups
