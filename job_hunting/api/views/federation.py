@@ -202,3 +202,75 @@ def actor_view(request, username: str):
         content_type=AS2_CONTENT_TYPE,
     )
     return response
+
+
+def _empty_collection(request, username: str, collection: str):
+    """Shared body for the three Phase 5a-collection stubs.
+
+    Mastodon (and other strict AP peers) enumerate ``outbox`` / ``followers``
+    / ``following`` once the Actor JSON references them. If those URIs
+    return Django's HTML 404 template, the peer flags the actor as
+    broken and refuses subsequent interactions. Returning a valid empty
+    ``OrderedCollection`` keeps the actor healthy while the real
+    backing models (Phase 5b outbox enumeration + Phase 5c follower
+    tracking) stay deferred.
+
+    ``id`` is computed from the path the peer actually requested so the
+    peer can verify the response matches the URI it dereferenced —
+    catches reverse-proxy rewrites that would otherwise silently
+    desync ``id`` from the request URL.
+    """
+    actor_exists = Actor.objects.filter(preferred_username=username).exists()
+    if not actor_exists:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+
+    collection_id = f"{_actor_uri(username)}/{collection}"
+    body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": collection_id,
+        "type": "OrderedCollection",
+        "totalItems": 0,
+        "orderedItems": [],
+    }
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def actor_outbox(request, username: str):
+    """Empty ``OrderedCollection`` stub for the Actor's outbox.
+
+    Phase 5b will replace this with a paginated enumeration of public
+    ``Create(Note)`` activities derived from JobPost AS2 adapters; for
+    now it exists solely so AP peers don't see a broken endpoint when
+    they walk the Actor JSON.
+    """
+    return _empty_collection(request, username, "outbox")
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def actor_followers(request, username: str):
+    """Empty ``OrderedCollection`` stub for the Actor's followers.
+
+    Real follower enumeration lands in Phase 5c alongside the inbox
+    Follow handler and the FederationFollower table.
+    """
+    return _empty_collection(request, username, "followers")
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def actor_following(request, username: str):
+    """Empty ``OrderedCollection`` stub for the Actor's following list.
+
+    We don't track outbound follows yet — kept as an empty collection
+    so peer enumeration succeeds rather than 404'ing on the HTML
+    debug page.
+    """
+    return _empty_collection(request, username, "following")
