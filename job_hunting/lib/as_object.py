@@ -32,14 +32,32 @@ CAREER_CADDY_NS = "https://careercaddy.online/ns#"
 
 
 def _instance_origin(instance: str | None = None) -> str:
-    """Return ``https://<instance>`` for URI construction.
+    """Return the origin (``scheme://host[:port]``) for URI construction.
 
     Single point of truth for the host portion of every URI the adapter
     emits — actor IDs, object IDs, and any inline URIs all share this
     origin so federation peers see a consistent identity.
+
+    Resolution order:
+    1. Explicit ``instance`` arg (for federated rows whose
+       ``source_instance`` differs from this server) — always
+       https-prefixed; remote peers are expected to terminate TLS.
+    2. ``settings.INSTANCE_ORIGIN`` — full origin, scheme included.
+       Phase 5a addition; lets local-dev / Mastodon harness drive
+       http://localhost:8000 or http://api:8000 without lying about
+       scheme in the emitted URIs.
+    3. ``https://{settings.CAREER_CADDY_INSTANCE}`` — Phase 4 fallback,
+       preserved so the existing as_object tests + any deploy that
+       hasn't set INSTANCE_ORIGIN yet keep working.
     """
-    host = instance or settings.CAREER_CADDY_INSTANCE
-    return f"https://{host}"
+    local_host = settings.CAREER_CADDY_INSTANCE
+    if instance and instance != local_host:
+        # Foreign row — preserve origin URI from its source instance.
+        return f"https://{instance}"
+    origin = getattr(settings, "INSTANCE_ORIGIN", None)
+    if origin:
+        return origin.rstrip("/")
+    return f"https://{local_host}"
 
 
 def actor_uri(username: str, instance: str | None = None) -> str:

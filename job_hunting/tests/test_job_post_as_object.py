@@ -37,7 +37,10 @@ class TestSourceInstanceDefault(TestCase):
         jp.refresh_from_db()
         self.assertEqual(jp.source_instance, settings.CAREER_CADDY_INSTANCE)
 
-    @override_settings(CAREER_CADDY_INSTANCE="other.example.test")
+    @override_settings(
+        CAREER_CADDY_INSTANCE="other.example.test",
+        INSTANCE_ORIGIN="https://other.example.test",
+    )
     def test_default_resolves_setting_at_create_time(self):
         """Callable default re-evaluates per create — important for
         tests that override settings and for the rare same-binary
