@@ -509,6 +509,35 @@ ACTIVITYPUB_FEDERATION_ENABLED = os.environ.get(
     "ACTIVITYPUB_FEDERATION_ENABLED", "True"
 ).lower() in ("true", "1", "yes")
 
+# ---------------------------------------------------------------------------
+# ActivityPub Phase 5e — federated JobPost ingestion.
+#
+# Inbound Create(Note) activities verified by the 5c inbox handler are
+# turned into local JobPost rows via job_hunting.lib.federation_ingest.
+# Tunables:
+#
+# - body cap (256KB): defensive ceiling on AS2 Note.content size so a
+#   misbehaving / malicious peer can't fill our description column with
+#   a megabyte of HTML. Activities that overshoot are logged + rejected.
+# - per-instance quota (100/hour of NEW rows): bounds how fast any single
+#   peer can grow our JobPost table. Counts only `created`, NOT `merged`
+#   — a flood of dedup hits from a legitimate refanout doesn't lock the
+#   peer out. Tracked in Django cache keyed on
+#   ``ap:ingest_quota:<instance_host>:<hour_int>``.
+# - operator kill-switch: ACTIVITYPUB_INGEST_ENABLED=False short-circuits
+#   the ingest call inside the inbox handler. The activity is still
+#   logged to FederationActivity (5c contract) so once the operator
+#   re-enables ingestion, 5e's replay walk can pick the activities up.
+ACTIVITYPUB_INGEST_BODY_MAX_BYTES = int(
+    os.environ.get("ACTIVITYPUB_INGEST_BODY_MAX_BYTES", str(262_144))
+)
+ACTIVITYPUB_INGEST_INSTANCE_QUOTA_PER_HOUR = int(
+    os.environ.get("ACTIVITYPUB_INGEST_INSTANCE_QUOTA_PER_HOUR", "100")
+)
+ACTIVITYPUB_INGEST_ENABLED = os.environ.get(
+    "ACTIVITYPUB_INGEST_ENABLED", "True"
+).lower() in ("true", "1", "yes")
+
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups

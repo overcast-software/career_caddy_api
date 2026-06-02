@@ -1,6 +1,12 @@
+from django.conf import settings
 from django.contrib import admin
 
-from job_hunting.models import FederationActivity, FederationFollower, Waitlist
+from job_hunting.models import (
+    FederationActivity,
+    FederationFollower,
+    JobPost,
+    Waitlist,
+)
 
 
 @admin.register(Waitlist)
@@ -75,4 +81,68 @@ class FederationActivityAdmin(admin.ModelAdmin):
         "retry_count",
         "next_attempt_at",
         "created_at",
+    )
+
+
+class FederatedJobPostFilter(admin.SimpleListFilter):
+    """Federated-origin filter for JobPost admin.
+
+    Local rows carry ``source_instance == CAREER_CADDY_INSTANCE``;
+    federated rows carry the remote peer host. The "federated" option
+    excludes the local default; the "local" option is the inverse;
+    "all" (no filter) falls through to Django's default queryset so the
+    list page still works when none of the radio buttons is selected.
+    """
+
+    title = "origin"
+    parameter_name = "origin"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("federated", "Federated (remote)"),
+            ("local", "Local"),
+        ]
+
+    def queryset(self, request, queryset):
+        local = settings.CAREER_CADDY_INSTANCE
+        if self.value() == "federated":
+            return queryset.exclude(source_instance=local)
+        if self.value() == "local":
+            return queryset.filter(source_instance=local)
+        return queryset
+
+
+@admin.register(JobPost)
+class JobPostAdmin(admin.ModelAdmin):
+    """Minimal admin for JobPost — primary value is the federated filter.
+
+    The 5e ingest path is the first one that lands rows whose
+    ``source_instance`` doesn't match this instance, so the admin
+    surface lets an operator see at-a-glance which peers have
+    contributed federated content + spot federated rows that need to be
+    promoted into a local user's queue via JobPostDiscovery. Not a
+    general JobPost browsing UI — that's the frontend's job — so most
+    columns stay off.
+    """
+
+    list_display = (
+        "id",
+        "title",
+        "source",
+        "source_instance",
+        "posting_status",
+        "created_at",
+    )
+    list_filter = (
+        FederatedJobPostFilter,
+        "source",
+        "posting_status",
+        "complete",
+    )
+    search_fields = ("title", "link", "canonical_link", "source_instance")
+    readonly_fields = (
+        "created_at",
+        "canonical_link",
+        "content_fingerprint",
+        "source_instance",
     )

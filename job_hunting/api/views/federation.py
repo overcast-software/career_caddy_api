@@ -37,6 +37,7 @@ from django.views.decorators.http import require_http_methods
 
 from job_hunting.lib.as_object import build_create_activity_for_jobpost
 from job_hunting.lib import federation_signing
+from job_hunting.lib import federation_ingest
 from job_hunting.models import (
     Actor,
     FederationActivity,
@@ -721,16 +722,33 @@ def _handle_undo(activity: dict, actor: Actor,
 
 def _handle_create(activity: dict, actor: Actor,
                    verified: federation_signing.VerifiedSignature) -> JsonResponse:
-    """Process a Create activity: V1 logs only.
+    """Process a Create activity: log + 5e ingest.
 
-    Federated JobPost ingestion + dedup is 5e's job. The
-    FederationActivity row is the replay tape — 5e walks
-    ``direction=inbound, activity_type=Create`` to build JobPosts when
-    ready.
+    5c logs the audit row; 5e turns the Note into a JobPost (or merges
+    into an existing one). The spec requires us to return 202 to the
+    peer regardless of the ingest outcome — the activity verified, so
+    we accepted it. Internal disposition (created / merged / rejected
+    / skipped) lives on the FederationActivity row's
+    ``delivery_status`` field for the operator + the dedup-feedback
+    report.
+
+    Kill-switch: when ``ACTIVITYPUB_INGEST_ENABLED`` is False the
+    activity is still logged (so post-toggle replay via
+    ``replay_inbound_creates`` can catch up) but no JobPost is touched.
     """
     inner = activity.get("object") or {}
     target = inner.get("id") if isinstance(inner, dict) else None
-    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_CREATE, target)
+    audit_row = _log_inbound(activity, actor, verified, ACTIVITY_TYPE_CREATE, target)
+
+    if getattr(settings, "ACTIVITYPUB_INGEST_ENABLED", True):
+        # audit_row may be None if the unique (direction, activity_id,
+        # target_uri) constraint short-circuited as a replay. In that
+        # case we DON'T re-ingest — the original logged-row's outcome
+        # already represents the activity. The 202 return below is the
+        # idempotent reply the peer expects.
+        if audit_row is not None:
+            federation_ingest.ingest_create_note(activity, federation_activity=audit_row)
+
     return JsonResponse(
         {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
     )
