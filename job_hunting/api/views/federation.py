@@ -1,15 +1,15 @@
-"""ActivityPub federation views — WebFinger + Actor.
+"""ActivityPub federation views — WebFinger + Actor + Inbox.
 
-Phase 5a of Plans/ActivityPub Phase 5 — federation proper. Two root-URL
-views (NOT under /api/v1/) — WebFinger lives at the RFC 7033 mandated
-``.well-known/webfinger`` prefix, and the Actor view at ``/actors/<u>/``
-mirrors the URI shape the Phase 4 ``as_object.actor_uri`` helper has
-been emitting since the Phase 4 prep.
+Phase 5a/5b/5c of Plans/ActivityPub Phase 5 — federation proper.
+Root-URL views (NOT under /api/v1/) — WebFinger lives at the RFC 7033
+mandated ``.well-known/webfinger`` prefix, and the Actor / Outbox /
+Followers / Following / Inbox URIs all hang off ``/actors/<u>/``.
 
-The views are deliberately authentication-free. WebFinger is a public
-discovery primitive — anything else breaks Mastodon's first contact.
-The Actor view is also public; visibility lives at the per-object layer
-(Outbox + Follow gates) in 5b/5c.
+Auth model: WebFinger + Actor + collections are unauthenticated
+(federation peers have no auth context on first contact). The inbox
+is HTTP-Signature-authenticated — every POST proves its actor identity
+cryptographically, so the inbox path skips Django auth + DRF
+permissions and trusts the verified ``keyId`` instead.
 
 Lazy keypair generation: the first request that lands on an Actor row
 with NULL keys generates an RSA-2048 keypair and persists it under
@@ -19,20 +19,45 @@ ThreadPoolExecutor test in ``tests/test_activitypub_phase5a.py``.
 """
 from __future__ import annotations
 
+import json
+import logging
+import uuid
 from urllib.parse import unquote, urlparse
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from django.conf import settings
-from django.db import transaction
+from django.core.cache import cache
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from job_hunting.lib.as_object import build_create_activity_for_jobpost
-from job_hunting.models import Actor, JobPost
+from job_hunting.lib import federation_signing
+from job_hunting.models import (
+    Actor,
+    FederationActivity,
+    FederationFollower,
+    JobPost,
+)
+from job_hunting.models.federation_activity import (
+    ACTIVITY_TYPE_ACCEPT,
+    ACTIVITY_TYPE_CREATE,
+    ACTIVITY_TYPE_FOLLOW,
+    ACTIVITY_TYPE_OTHER,
+    ACTIVITY_TYPE_UNDO,
+    DELIVERY_ACCEPTED,
+    DELIVERY_FAILED,
+    DIRECTION_INBOUND,
+    DIRECTION_OUTBOUND,
+)
 from job_hunting.models.job_post import AS2_PUBLIC
+
+
+logger = logging.getLogger(__name__)
 
 
 # RFC 7033 §10.2 — WebFinger MUST serve ``application/jrd+json``.
@@ -363,15 +388,106 @@ def actor_outbox(request, username: str):
     )
 
 
+def _followers_queryset(actor: Actor):
+    """Return active ``FederationFollower`` rows for ``actor``.
+
+    Filter: ``local_user_id == actor.user_id`` AND
+    ``unfollowed_at IS NULL`` (Undo'd rows stay in the table for audit /
+    re-follow detection but don't enumerate as current followers).
+    Returns an empty queryset when ``actor.user_id`` is None (instance
+    actor doesn't carry per-user followers in V1).
+
+    Sort: ``-accepted_at, -created_at, -id`` — accepted rows first so
+    Mastodon's UI sees confirmed followers ahead of the (rare)
+    pending-Accept stragglers. ``-id`` is the deterministic tiebreaker
+    once timestamps match.
+    """
+    if actor.user_id is None:
+        return FederationFollower.objects.none()
+    return (
+        FederationFollower.objects.filter(
+            local_user_id=actor.user_id,
+            unfollowed_at__isnull=True,
+        )
+        .order_by("-accepted_at", "-created_at", "-id")
+    )
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 def actor_followers(request, username: str):
-    """Empty ``OrderedCollection`` stub for the Actor's followers.
+    """Paginated ``OrderedCollection`` of the Actor's active followers.
 
-    Real follower enumeration lands in Phase 5c alongside the inbox
-    Follow handler and the FederationFollower table.
+    Phase 5c — real follower enumeration backed by ``FederationFollower``.
+    Shape mirrors the Phase 5b outbox:
+    metadata-only ``OrderedCollection`` (no ``page``) advertises
+    ``totalItems`` + ``first`` / ``last``; ``?page=N`` returns an
+    ``OrderedCollectionPage`` of ``actor_uri`` strings (per AS2 spec —
+    followers collection items are bare URIs, not full activities).
     """
-    return _empty_collection(request, username, "followers")
+    actor = Actor.objects.filter(preferred_username=username).first()
+    if actor is None:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+
+    collection_id = f"{_actor_uri(username)}/followers"
+    page_size = getattr(settings, "ACTIVITYPUB_OUTBOX_PAGE_SIZE", 20)
+    queryset = _followers_queryset(actor)
+    total = queryset.count()
+    last_page = _outbox_page_count(total, page_size)
+
+    page_param = request.GET.get("page")
+    if page_param is None:
+        body = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": collection_id,
+            "type": "OrderedCollection",
+            "totalItems": total,
+        }
+        if last_page > 0:
+            body["first"] = f"{collection_id}?page=1"
+            body["last"] = f"{collection_id}?page={last_page}"
+        return HttpResponse(
+            content=JsonResponse(body).content,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    try:
+        page = int(page_param)
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"error": "invalid page"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    if page < 1 or page > last_page:
+        return JsonResponse(
+            {"error": "page out of range"},
+            status=404,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    offset = (page - 1) * page_size
+    items = [
+        follower.actor_uri
+        for follower in queryset[offset : offset + page_size]
+    ]
+
+    body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": f"{collection_id}?page={page}",
+        "type": "OrderedCollectionPage",
+        "partOf": collection_id,
+        "orderedItems": items,
+    }
+    if page < last_page:
+        body["next"] = f"{collection_id}?page={page + 1}"
+    if page > 1:
+        body["prev"] = f"{collection_id}?page={page - 1}"
+
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )
 
 
 @csrf_exempt
@@ -379,8 +495,337 @@ def actor_followers(request, username: str):
 def actor_following(request, username: str):
     """Empty ``OrderedCollection`` stub for the Actor's following list.
 
-    We don't track outbound follows yet — kept as an empty collection
+    V1 doesn't follow remote actors (5d+); kept as an empty collection
     so peer enumeration succeeds rather than 404'ing on the HTML
     debug page.
     """
     return _empty_collection(request, username, "following")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5c — Inbox.
+#
+# Pre-flight order (BAIL on any failure):
+#   1. Body parse (400 on malformed / too large)
+#   2. Activity type sniff (fall through to 202 for forward-compat types)
+#   3. Date header window (401 on stale)
+#   4. HTTP Signature verification (401 on mismatch / missing)
+#   5. Digest header match (401 on mismatch)
+#   6. Per-instance rate limit (429 on bucket full)
+#   7. Replay dedupe via FederationActivity unique (silent 202 on dupe)
+#
+# After verification, dispatch by activity type:
+#   - Follow → upsert FederationFollower + queue Accept(Follow)
+#   - Undo(Follow) → set unfollowed_at
+#   - Create(Note) → log only; 5e ingest is deferred
+#   - * → log as Other; 202
+#
+# TODO(5c+): hook for instance allowlist / blocklist before signature
+# verification — cheaper to reject by Host header than to verify a sig
+# from a banned instance.
+
+
+def _inbox_error(verdict: str, status: int) -> JsonResponse:
+    """Uniform error response. Mastodon's debug UI shows the body verbatim."""
+    return JsonResponse(
+        {"error": verdict}, status=status, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _rate_limit_check(host: str) -> bool:
+    """Per-instance sliding-window rate limit using Django's cache backend.
+
+    Bucket key is ``ap:rl:<host>:<hour-int>``. We increment-or-create and
+    compare against ``ACTIVITYPUB_INBOX_RATE_LIMIT_PER_HOUR``. The hour
+    bucket rolls over wall-clock; that's coarser than a true sliding
+    window but vastly simpler and the practical fediverse rate is
+    nowhere near the 1000/hour default. Returns True if request should
+    proceed, False if it's over the limit.
+
+    Per-instance (not per-IP) keeps the blast radius bounded to a
+    single peer instance: a misbehaving Mastodon server can't grief
+    the global limit for other peers behind the same edge.
+    """
+    if not host:
+        # Refuse to rate-limit on an empty host bucket — that would
+        # let unsigned / partially-parsed requests share a global
+        # counter. Let them through here; the signature step will
+        # reject them.
+        return True
+    limit = getattr(settings, "ACTIVITYPUB_INBOX_RATE_LIMIT_PER_HOUR", 1000)
+    hour = int(timezone.now().timestamp() // 3600)
+    key = f"ap:rl:{host}:{hour}"
+    try:
+        # Django cache: add() is atomic-ish; incr() raises if key absent.
+        # Pattern: try incr, fall back to add+1 on miss.
+        current = cache.incr(key)
+    except ValueError:
+        cache.set(key, 1, 3700)
+        current = 1
+    return current <= limit
+
+
+def _deliver_accept(follow_activity: dict, follower: FederationFollower,
+                    actor: Actor) -> FederationActivity:
+    """Build, sign, and POST an Accept(Follow); persist outbound row.
+
+    On peer 2xx: set FederationFollower.accepted_at + outbound row's
+    delivered_at. On peer error: delivery_status=failed, error stored.
+    Returns the outbound FederationActivity row either way.
+    """
+    actor_uri_str = _actor_uri(actor.preferred_username)
+    accept_id = f"{_origin()}/activities/{uuid.uuid4()}"
+    accept_body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": accept_id,
+        "type": "Accept",
+        "actor": actor_uri_str,
+        "object": follow_activity,
+    }
+    body_bytes = json.dumps(accept_body, separators=(",", ":")).encode("utf-8")
+
+    outbound = FederationActivity.objects.create(
+        direction=DIRECTION_OUTBOUND,
+        activity_type=ACTIVITY_TYPE_ACCEPT,
+        activity_id=accept_id,
+        actor_uri=actor_uri_str,
+        target_uri=follower.actor_uri,
+        local_user_id=actor.user_id,
+        body=json.dumps(accept_body),
+        delivery_status="pending",
+    )
+
+    status_code, snippet = federation_signing.deliver(
+        follower.inbox_uri, body_bytes, actor
+    )
+    if 200 <= status_code < 300:
+        now = timezone.now()
+        outbound.delivery_status = DELIVERY_ACCEPTED
+        outbound.delivered_at = now
+        outbound.save(update_fields=["delivery_status", "delivered_at"])
+        FederationFollower.objects.filter(pk=follower.pk).update(accepted_at=now)
+    else:
+        outbound.delivery_status = DELIVERY_FAILED
+        outbound.delivery_error = f"status={status_code} body={snippet}"
+        outbound.save(update_fields=["delivery_status", "delivery_error"])
+    return outbound
+
+
+def _peer_actor_endpoints(actor_uri: str) -> tuple[str, str | None]:
+    """Fetch the remote actor JSON and return (inbox_uri, shared_inbox_uri).
+
+    Falls back gracefully — if endpoints are missing, returns
+    ``(actor_uri + '/inbox', None)`` as a best-effort default rather
+    than failing the Follow handshake outright. Real-world fediverse
+    actors always populate ``inbox``; the fallback only kicks in for
+    badly-formed peers we still want to be civil to.
+    """
+    timeout = getattr(settings, "ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT", 10)
+    import requests  # local import to keep view-load fast
+    try:
+        response = requests.get(
+            actor_uri,
+            headers={"Accept": AS2_CONTENT_TYPE},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            return f"{actor_uri.rstrip('/')}/inbox", None
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return f"{actor_uri.rstrip('/')}/inbox", None
+    inbox = data.get("inbox") or f"{actor_uri.rstrip('/')}/inbox"
+    shared = (data.get("endpoints") or {}).get("sharedInbox")
+    return inbox, shared
+
+
+def _handle_follow(activity: dict, actor: Actor,
+                   verified: federation_signing.VerifiedSignature) -> JsonResponse:
+    """Process a Follow activity: upsert follower + dispatch Accept."""
+    actor_uri_local = _actor_uri(actor.preferred_username)
+    target = activity.get("object")
+    if target != actor_uri_local:
+        return _inbox_error("follow_target_mismatch", 422)
+
+    follower_actor_uri = activity.get("actor") or verified.actor_uri
+    if not follower_actor_uri:
+        return _inbox_error("missing_actor", 422)
+
+    inbox_uri, shared_inbox_uri = _peer_actor_endpoints(follower_actor_uri)
+    host = FederationFollower.host_for_uri(follower_actor_uri)
+
+    follower, created = FederationFollower.objects.update_or_create(
+        local_user_id=actor.user_id,
+        actor_uri=follower_actor_uri,
+        defaults={
+            "inbox_uri": inbox_uri,
+            "shared_inbox_uri": shared_inbox_uri,
+            "instance_host": host,
+            "unfollowed_at": None,  # re-follow case: clear any prior Undo
+        },
+    )
+
+    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_FOLLOW, target)
+
+    # Synchronous Accept dispatch — V1 one-shot. Failures are logged on
+    # the outbound row; the 5d dispatcher will replay them.
+    _deliver_accept(activity, follower, actor)
+
+    return JsonResponse(
+        {"status": "accepted"},
+        status=202,
+        content_type=AS2_CONTENT_TYPE,
+    )
+
+
+def _handle_undo(activity: dict, actor: Actor,
+                 verified: federation_signing.VerifiedSignature) -> JsonResponse:
+    """Process an Undo(Follow): set unfollowed_at on the follower row.
+
+    Other Undo subtypes (Undo(Like), Undo(Announce)) fall through to
+    the Other bucket — V1 only models Follow, so an Undo against
+    something we never tracked is a no-op (404 with the audit row
+    written so 5e replay still sees it).
+    """
+    inner = activity.get("object") or {}
+    if not isinstance(inner, dict):
+        return _inbox_error("undo_object_not_object", 422)
+    if inner.get("type") != "Follow":
+        # Forward-compat: log + 202, don't 422 a peer for Undo(Like) etc.
+        _log_inbound(activity, actor, verified, ACTIVITY_TYPE_OTHER, None)
+        return JsonResponse(
+            {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+        )
+
+    actor_uri_local = _actor_uri(actor.preferred_username)
+    if inner.get("object") != actor_uri_local:
+        return _inbox_error("undo_target_mismatch", 422)
+
+    follower_actor_uri = inner.get("actor") or verified.actor_uri
+    row = FederationFollower.objects.filter(
+        local_user_id=actor.user_id,
+        actor_uri=follower_actor_uri,
+    ).first()
+    if row is None:
+        # Still log it so the audit trail captures the (rare) case of a
+        # peer sending Undo without our ever having an active row.
+        _log_inbound(activity, actor, verified, ACTIVITY_TYPE_UNDO, actor_uri_local)
+        return _inbox_error("not_following", 404)
+
+    FederationFollower.objects.filter(pk=row.pk).update(unfollowed_at=timezone.now())
+    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_UNDO, actor_uri_local)
+
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _handle_create(activity: dict, actor: Actor,
+                   verified: federation_signing.VerifiedSignature) -> JsonResponse:
+    """Process a Create activity: V1 logs only.
+
+    Federated JobPost ingestion + dedup is 5e's job. The
+    FederationActivity row is the replay tape — 5e walks
+    ``direction=inbound, activity_type=Create`` to build JobPosts when
+    ready.
+    """
+    inner = activity.get("object") or {}
+    target = inner.get("id") if isinstance(inner, dict) else None
+    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_CREATE, target)
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _log_inbound(activity: dict, actor: Actor,
+                 verified: federation_signing.VerifiedSignature,
+                 activity_type: str, target_uri: str | None) -> FederationActivity | None:
+    """Idempotent inbound log writer.
+
+    Idempotency comes from the unique constraint on
+    ``(direction, activity_id)``. A racing duplicate POST loses the
+    IntegrityError race and returns None; caller treats that as
+    "already logged" → silent dedupe.
+    """
+    activity_id = activity.get("id", "")
+    try:
+        return FederationActivity.objects.create(
+            direction=DIRECTION_INBOUND,
+            activity_type=activity_type,
+            activity_id=activity_id,
+            actor_uri=verified.actor_uri,
+            target_uri=target_uri,
+            local_user_id=actor.user_id,
+            body=json.dumps(activity),
+            signature_payload=verified.signature_header,
+            received_at=timezone.now(),
+            delivery_status=DELIVERY_ACCEPTED,
+        )
+    except IntegrityError:
+        logger.info(
+            "ap.inbox.duplicate_activity_id activity_id=%s actor=%s",
+            activity_id, verified.actor_uri,
+        )
+        return None
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def actor_inbox(request, username: str):
+    """Authenticated AP inbox — accept signed POSTs from federation peers."""
+    actor = Actor.objects.filter(preferred_username=username).first()
+    if actor is None:
+        return _inbox_error("actor_not_found", 404)
+    # Ensure the local actor has a keypair before any Accept dispatch.
+    actor = _ensure_keypair(actor)
+
+    max_bytes = getattr(settings, "ACTIVITYPUB_BODY_MAX_BYTES", 1_048_576)
+    body = request.body
+    if len(body) > max_bytes:
+        return _inbox_error("body_too_large", 400)
+
+    try:
+        activity = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _inbox_error("malformed_json", 400)
+    if not isinstance(activity, dict):
+        return _inbox_error("activity_not_object", 400)
+
+    # Signature verification before rate limit so we know the host bucket
+    # we're charging is genuinely the actor's host. Cheap pre-checks
+    # (Date / Digest / required headers) live inside
+    # ``verify_inbound_signature`` and short-circuit before the network
+    # fetch + RSA verify.
+    try:
+        verified = federation_signing.verify_inbound_signature(request, body)
+    except federation_signing.SignatureVerificationError as exc:
+        return _inbox_error(exc.verdict, 401)
+
+    # Per-instance rate limit, keyed by the verified actor's host.
+    host = urlparse(verified.actor_uri).netloc.lower()
+    if not _rate_limit_check(host):
+        return _inbox_error("rate_limited", 429)
+
+    # Replay dedupe via activity_id — silent 202 on duplicate.
+    activity_id = activity.get("id") or ""
+    if activity_id and FederationActivity.objects.filter(
+        direction=DIRECTION_INBOUND, activity_id=activity_id,
+    ).exists():
+        return JsonResponse(
+            {"status": "duplicate"},
+            status=202,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    activity_type = activity.get("type")
+    if activity_type == "Follow":
+        return _handle_follow(activity, actor, verified)
+    if activity_type == "Undo":
+        return _handle_undo(activity, actor, verified)
+    if activity_type == "Create":
+        return _handle_create(activity, actor, verified)
+
+    # Forward-compat: log unknown types as Other so we don't lose them.
+    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_OTHER, None)
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )

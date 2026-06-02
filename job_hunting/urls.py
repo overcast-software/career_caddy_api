@@ -30,6 +30,7 @@ from job_hunting.api.events import events_stream, events_token
 from job_hunting.api.views.federation import (
     actor_followers,
     actor_following,
+    actor_inbox,
     actor_outbox,
     actor_view,
     webfinger,
@@ -141,6 +142,10 @@ urlpatterns = [
     # following enumeration is Phase 5b/5c.
     path("actors/<str:username>/outbox", actor_outbox, name="actor-outbox"),
     path("actors/<str:username>/outbox/", actor_outbox, name="actor-outbox-slash"),
+    # Phase 5c — authenticated AP inbox. HTTP-Signature verified at the
+    # view boundary, no Django auth / DRF permissions on this path.
+    path("actors/<str:username>/inbox", actor_inbox, name="actor-inbox"),
+    path("actors/<str:username>/inbox/", actor_inbox, name="actor-inbox-slash"),
     path("actors/<str:username>/followers", actor_followers, name="actor-followers"),
     path("actors/<str:username>/followers/", actor_followers, name="actor-followers-slash"),
     path("actors/<str:username>/following", actor_following, name="actor-following"),
