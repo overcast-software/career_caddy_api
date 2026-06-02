@@ -442,6 +442,45 @@ INSTANCE_ORIGIN = os.environ.get("INSTANCE_ORIGIN", "http://localhost:8000")
 # starts populating real history.
 ACTIVITYPUB_OUTBOX_PAGE_SIZE = 20
 
+# ---------------------------------------------------------------------------
+# ActivityPub Phase 5c — inbox + Follow + HTTP Signatures.
+#
+# Five operator-tunables governing peer key caching, replay protection
+# window, per-instance rate limiting, outbound delivery timeout, and
+# request body size cap. All env-overridable so a self-hoster can
+# tighten/loosen without code changes.
+#
+# Rationale:
+# - Key cache 5min: peers rotate keys rarely; 5min keeps us responsive
+#   to rotation without re-fetching every inbound POST.
+# - Date window 5min: matches Mastodon's default tolerance for clock
+#   skew. Tighter rejects legit traffic from drifty NTP-less peers.
+# - Rate limit 1000/hour per instance host: well above legitimate
+#   federation rate (Mastodon's busiest peers send ~50/hour to one
+#   actor). Per-instance instead of per-IP so a multi-host federated
+#   server doesn't trip on its own fan-out, and a single instance
+#   can't grief the limit for everyone else.
+# - 10s outbound timeout: typical Mastodon inbox p99 is <2s; 10s
+#   absorbs slow peers without holding the request-handler hostage.
+# - 1MB body cap: largest legitimate Mastodon activity (long status
+#   with multiple attachment refs) is ~50KB; 1MB is generous defence
+#   against memory-exhaustion via giant POSTs.
+ACTIVITYPUB_PEER_KEY_CACHE_TTL = int(
+    os.environ.get("ACTIVITYPUB_PEER_KEY_CACHE_TTL", "300")
+)
+ACTIVITYPUB_DATE_WINDOW_SECONDS = int(
+    os.environ.get("ACTIVITYPUB_DATE_WINDOW_SECONDS", "300")
+)
+ACTIVITYPUB_INBOX_RATE_LIMIT_PER_HOUR = int(
+    os.environ.get("ACTIVITYPUB_INBOX_RATE_LIMIT_PER_HOUR", "1000")
+)
+ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT = int(
+    os.environ.get("ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT", "10")
+)
+ACTIVITYPUB_BODY_MAX_BYTES = int(
+    os.environ.get("ACTIVITYPUB_BODY_MAX_BYTES", str(1_048_576))
+)
+
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups

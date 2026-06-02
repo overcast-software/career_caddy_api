@@ -71,8 +71,14 @@ class TestActorCollectionStubs(TestCase):
         body = response.json()
         self.assertEqual(body["type"], "OrderedCollection")
         self.assertEqual(body["totalItems"], 0)
-        self.assertEqual(body["orderedItems"], [])
         self.assertEqual(body["id"], f"{TEST_ORIGIN}/actors/dough/followers")
+        # Phase 5c: followers became a real paginated collection mirroring
+        # the outbox shape. Empty → metadata-only, no ``first`` /
+        # ``orderedItems`` advertised (peers shouldn't be guessing at page
+        # URIs against an empty collection). The Following stub still
+        # carries ``orderedItems: []`` because no FederationFollower
+        # backing exists for outbound follows in V1.
+        self.assertNotIn("first", body)
 
     def test_followers_unknown_actor_returns_as2_shaped_404(self):
         response = self.client.get("/actors/nobody/followers")
