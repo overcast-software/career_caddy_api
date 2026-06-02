@@ -19,12 +19,20 @@ class DuplicateAnnotation(models.Model):
     UNLINK = "unlink"
     PROMOTE = "promote"
     HISTORICAL = "historical"
+    # Phase 5e — written when an inbound federated Create(Note) merges to
+    # an existing local JobPost (via canonical_link match in the 5e
+    # ingest decision tree). ``set_by`` is NULL on these rows — there's
+    # no local user behind the decision; ``signal_state`` carries the
+    # remote actor + activity id so the dedupe-feedback report can pivot
+    # on federated-origin merges.
+    FEDERATED_MERGE = "federated_merge"
 
     ACTIONS = [
         (MARK, "mark"),
         (UNLINK, "unlink"),
         (PROMOTE, "promote"),
         (HISTORICAL, "historical"),
+        (FEDERATED_MERGE, "federated_merge"),
     ]
 
     from_jp = models.ForeignKey(
