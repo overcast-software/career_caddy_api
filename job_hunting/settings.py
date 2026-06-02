@@ -565,11 +565,12 @@ Q_CLUSTER = {
     "max_attempts": 1,  # No automatic retry; per-task override via async_task(retry=N)
 }
 
-if TESTING:
-    # Phase 5d requirement: tests exercise ``async_task(...)`` callsites
-    # (federation dispatch + score / cover-letter / resume / summary /
-    # question pipelines from Phase 1) but the qcluster process isn't
-    # running in the test environment. ``sync=True`` makes
-    # ``async_task`` execute the target in-band on the calling thread,
-    # so tests get deterministic behaviour without needing a worker.
-    Q_CLUSTER["sync"] = True
+# ``Q_CLUSTER['sync']`` is NOT toggled globally under TESTING. Doing so
+# would force every async_task() call site (resume ingest, score
+# pipeline, summary, cover-letter, ...) to execute the task body
+# in-band on the calling thread, surfacing every task exception as a
+# 500 inside whatever view enqueued it. Several pre-existing tests
+# (e.g. test_ingest_endpoint_blob) rely on the enqueue path returning
+# 202-pending without touching the task body. Phase 5d federation
+# dispatch tests opt into sync mode per-class via
+# ``override_settings(Q_CLUSTER={..., 'sync': True})``.
