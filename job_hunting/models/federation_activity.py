@@ -38,6 +38,11 @@ ACTIVITY_TYPE_FOLLOW = "Follow"
 ACTIVITY_TYPE_UNDO = "Undo"
 ACTIVITY_TYPE_ACCEPT = "Accept"
 ACTIVITY_TYPE_CREATE = "Create"
+# AS2 vocab — extended for 5d so Update + Delete bucket cleanly in the
+# audit log alongside Create / Follow / Undo / Accept. Anything else
+# still falls through to ``Other``.
+ACTIVITY_TYPE_UPDATE = "Update"
+ACTIVITY_TYPE_DELETE = "Delete"
 ACTIVITY_TYPE_OTHER = "Other"
 
 ACTIVITY_TYPE_CHOICES = [
@@ -45,20 +50,26 @@ ACTIVITY_TYPE_CHOICES = [
     (ACTIVITY_TYPE_UNDO, "Undo"),
     (ACTIVITY_TYPE_ACCEPT, "Accept"),
     (ACTIVITY_TYPE_CREATE, "Create"),
+    (ACTIVITY_TYPE_UPDATE, "Update"),
+    (ACTIVITY_TYPE_DELETE, "Delete"),
     (ACTIVITY_TYPE_OTHER, "Other"),
 ]
 
 
 DELIVERY_PENDING = "pending"
 DELIVERY_ACCEPTED = "accepted"
+DELIVERY_DELIVERED = "delivered"
 DELIVERY_REJECTED = "rejected"
 DELIVERY_FAILED = "failed"
+DELIVERY_DEAD_LETTER = "dead_letter"
 
 DELIVERY_STATUS_CHOICES = [
     (DELIVERY_PENDING, "Pending"),
     (DELIVERY_ACCEPTED, "Accepted"),
+    (DELIVERY_DELIVERED, "Delivered"),
     (DELIVERY_REJECTED, "Rejected"),
     (DELIVERY_FAILED, "Failed"),
+    (DELIVERY_DEAD_LETTER, "Dead Letter"),
 ]
 
 
@@ -135,18 +146,45 @@ class FederationActivity(GetMixin, models.Model):
         blank=True,
         help_text="Status code + body snippet on outbound failure; null otherwise.",
     )
+    # 5d retry bookkeeping. ``retry_count`` is the number of attempts so
+    # far (0 on first enqueue, incremented after each non-2xx /
+    # non-rejection outcome). ``next_attempt_at`` is the earliest UTC
+    # time the row is eligible for re-dispatch — also doubles as the
+    # "in-flight at" marker for the periodic ``sweep_pending_dispatches``
+    # belt-and-suspenders so it doesn't re-enqueue rows the qcluster
+    # already scheduled.
+    retry_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of dispatch attempts so far (0 = first attempt has not yet run).",
+    )
+    next_attempt_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "When the row is eligible for the next dispatch attempt. Set to now() "
+            "on enqueue; pushed out per ACTIVITYPUB_DISPATCH_RETRY_BACKOFF_SECONDS "
+            "on transient failure. Null for terminal rows."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "federation_activities"
         constraints = [
-            # Replay dedupe — a peer redelivering the same activity_id is
-            # silently dropped at the inbox handler before it hits this
-            # table; the unique constraint here is the belt to that
-            # suspenders so the audit log never grows duplicates.
+            # Replay dedupe. Inbound: a peer redelivering the same
+            # activity_id is silently dropped at the inbox handler; the
+            # constraint here is the belt to those suspenders.
+            # Outbound: 5d fanout materializes one row per follower
+            # inbox, so the same activity_id repeats across rows. Adding
+            # ``target_uri`` to the unique tuple keeps inbound replay
+            # protection (target_uri is NULL for inbound — NULLs distinct
+            # in Postgres, so the row uniqueness on inbound still keys
+            # on (direction, activity_id) alone via the partial-unique
+            # NULLability semantics).
             models.UniqueConstraint(
-                fields=["direction", "activity_id"],
-                name="federation_activity_unique_direction_id",
+                fields=["direction", "activity_id", "target_uri"],
+                name="federation_activity_unique_direction_id_target",
             ),
         ]
         indexes = [
