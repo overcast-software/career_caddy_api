@@ -18,7 +18,7 @@ API, and no caller in core. Phase 5 federation work will activate it.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Any
 
 from django.conf import settings
@@ -216,6 +216,23 @@ def _render_note_content(job_post) -> str | None:
     return f"<p>{description}</p>"
 
 
+def _activity_uuid(kind: str, discriminator: str) -> str:
+    """Deterministic UUID5 for the activity envelope of ``kind`` + ``discriminator``.
+
+    Phase 5d additions parallel the 5b ``_create_activity_uuid`` helper.
+    The discriminator is what makes two activities of the same kind +
+    JobPost distinct — for Create that's the JobPost id alone (one
+    Create per JobPost), but Update can fire many times across a row's
+    lifetime so it folds in a per-edit timestamp.
+    """
+    return str(uuid.uuid5(ACTIVITYPUB_NAMESPACE, f"{kind}:{discriminator}"))
+
+
+def _local_actor_uri(actor) -> str:
+    """Local helper — actor URI shape mirrors signing module's `_local_actor_uri`."""
+    return f"{_instance_origin()}/actors/{actor.preferred_username}"
+
+
 def build_create_activity_for_jobpost(job_post, actor) -> dict:
     """Build the AS2 ``Create(Note)`` activity envelope for ``job_post``.
 
@@ -267,4 +284,106 @@ def build_create_activity_for_jobpost(job_post, actor) -> dict:
     if published:
         activity["published"] = published
 
+    return activity
+
+
+def _note_for_jobpost(job_post, actor_uri_str: str) -> dict:
+    """Return the Note object for a JobPost — the shape both 5b Create
+    and 5d Update wrap.
+
+    Kept tiny and pure (no env / settings reads) so the wrappers around
+    it can drift independently (e.g. Update may want different ``cc``
+    targeting than Create). Doesn't unify the Phase 4 ``job_post_as_object``
+    helper — that one carries the ``careercaddy:`` extension namespace
+    and renders for the latent /as-object/ adapter, not for activity
+    envelopes that hit federation peers.
+    """
+    note: dict[str, Any] = {
+        "id": object_uri(job_post),
+        "type": "Note",
+        "attributedTo": actor_uri_str,
+        "to": [AS2_PUBLIC],
+    }
+    published = _isoformat(job_post.created_at)
+    if published:
+        note["published"] = published
+    content = _render_note_content(job_post)
+    if content:
+        note["content"] = content
+    url = job_post.canonical_link or job_post.link
+    if url:
+        note["url"] = url
+    return note
+
+
+def build_update_activity_for_jobpost(job_post, actor, *, edit_marker=None) -> dict:
+    """Build the AS2 ``Update(Note)`` activity envelope for ``job_post``.
+
+    Phase 5d worker entry point. Mirrors ``build_create_activity_for_jobpost``
+    but wraps the same Note in an ``Update`` activity and derives a
+    per-edit activity id so subsequent edits don't collide with one
+    another (Create's id deliberately doesn't change across edits — it
+    pins to the JobPost identity, not the revision).
+
+    ``edit_marker`` is the discriminator folded into the activity id.
+    Caller passes JobPost.updated_at when available; falls back to a
+    fresh ISO-now string so the id is still distinct on systems whose
+    JobPost row predates the (not-yet-added) updated_at column.
+    """
+    origin = _instance_origin()
+    actor_uri_str = _local_actor_uri(actor)
+    note = _note_for_jobpost(job_post, actor_uri_str)
+
+    if edit_marker is None:
+        edit_marker = datetime.now(tz=timezone.utc).isoformat()
+    elif isinstance(edit_marker, datetime):
+        edit_marker = edit_marker.isoformat()
+    else:
+        edit_marker = str(edit_marker)
+    discriminator = f"{job_post.pk}:{edit_marker}"
+
+    activity: dict[str, Any] = {
+        "@context": AS2_CONTEXT,
+        "id": f"{origin}/activities/{_activity_uuid('update', discriminator)}",
+        "type": "Update",
+        "actor": actor_uri_str,
+        "to": [AS2_PUBLIC],
+        "cc": [f"{actor_uri_str}/followers"],
+        "object": note,
+    }
+    published = _isoformat(job_post.created_at)
+    if published:
+        activity["published"] = published
+    return activity
+
+
+def build_delete_activity_for_jobpost(job_post, actor) -> dict:
+    """Build the AS2 ``Delete(Tombstone)`` activity envelope for ``job_post``.
+
+    Phase 5d worker entry point. The ``object`` is a Tombstone wrapper
+    rather than a bare URI — Mastodon and Pleroma both prefer Tombstone
+    so they can record the formerType for future moderation surfaces.
+    Activity id is deterministic in JobPost id alone: deletes are
+    idempotent on the receiving end, so a re-attempted Delete should
+    carry the same id and dedupe at the peer.
+    """
+    origin = _instance_origin()
+    actor_uri_str = _local_actor_uri(actor)
+    object_id = object_uri(job_post)
+
+    tombstone: dict[str, Any] = {
+        "id": object_id,
+        "type": "Tombstone",
+        "formerType": "Note",
+    }
+
+    activity: dict[str, Any] = {
+        "@context": AS2_CONTEXT,
+        "id": f"{origin}/activities/{_activity_uuid('delete', str(job_post.pk))}",
+        "type": "Delete",
+        "actor": actor_uri_str,
+        "to": [AS2_PUBLIC],
+        "cc": [f"{actor_uri_str}/followers"],
+        "object": tombstone,
+    }
     return activity

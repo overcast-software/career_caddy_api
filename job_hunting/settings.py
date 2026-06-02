@@ -481,6 +481,34 @@ ACTIVITYPUB_BODY_MAX_BYTES = int(
     os.environ.get("ACTIVITYPUB_BODY_MAX_BYTES", str(1_048_576))
 )
 
+# ---------------------------------------------------------------------------
+# ActivityPub Phase 5d — outbound dispatch worker.
+#
+# The django-q2 worker (already up — Phase 1 of the queue rollout) runs
+# ``dispatch_one`` tasks scheduled by ``enqueue_jobpost_activity`` whenever
+# a public JobPost is created / updated / deleted. Tunables:
+#
+# - retry backoff: [1m, 5m, 30m, 4h, 24h] → 6th attempt dead-letters.
+#   Mirrors Mastodon's exponential schedule; long enough at the tail to
+#   absorb a peer instance being down for a day without spamming.
+# - dead-letter at attempt 6: covers the 5 backoff entries above plus a
+#   final shot per the schedule's index math.
+# - outbound POST timeout 10s: shared with 5c inbound delivery (matches
+#   ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT but kept separate so a slow-
+#   inbox peer can still receive WebFinger-class requests under tighter
+#   budget if we ever split it).
+# - operator kill-switch: setting ACTIVITYPUB_FEDERATION_ENABLED=False
+#   short-circuits ``enqueue_jobpost_activity`` so signals stop fanning
+#   out (worker tasks already in flight still drain).
+ACTIVITYPUB_DISPATCH_RETRY_BACKOFF_SECONDS = [60, 300, 1800, 14400, 86400]
+ACTIVITYPUB_DISPATCH_DEAD_LETTER_AT_RETRY = 6
+ACTIVITYPUB_DISPATCH_TIMEOUT_SECONDS = int(
+    os.environ.get("ACTIVITYPUB_DISPATCH_TIMEOUT_SECONDS", "10")
+)
+ACTIVITYPUB_FEDERATION_ENABLED = os.environ.get(
+    "ACTIVITYPUB_FEDERATION_ENABLED", "True"
+).lower() in ("true", "1", "yes")
+
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups
@@ -536,3 +564,13 @@ Q_CLUSTER = {
     "ack_failures": True,
     "max_attempts": 1,  # No automatic retry; per-task override via async_task(retry=N)
 }
+
+# ``Q_CLUSTER['sync']`` is NOT toggled globally under TESTING. Doing so
+# would force every async_task() call site (resume ingest, score
+# pipeline, summary, cover-letter, ...) to execute the task body
+# in-band on the calling thread, surfacing every task exception as a
+# 500 inside whatever view enqueued it. Several pre-existing tests
+# (e.g. test_ingest_endpoint_blob) rely on the enqueue path returning
+# 202-pending without touching the task body. Phase 5d federation
+# dispatch tests opt into sync mode per-class via
+# ``override_settings(Q_CLUSTER={..., 'sync': True})``.
