@@ -17,6 +17,7 @@ API, and no caller in core. Phase 5 federation work will activate it.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, time
 from typing import Any
 
@@ -24,6 +25,18 @@ from django.conf import settings
 
 
 AS2_CONTEXT = "https://www.w3.org/ns/activitystreams"
+
+# AS2 magic URI for the public-collection — anything addressed `to`
+# (or `cc`'d) this URI is fully public, federable, and crawlable.
+AS2_PUBLIC = "https://www.w3.org/ns/activitystreams#Public"
+
+# Stable UUID5 namespace for the Phase 5b ``Create`` activity IDs the
+# outbox emits. Phase 5b deliberately does NOT persist Activity rows —
+# the dispatcher in Phase 5d will. Until then we derive activity URIs
+# from ``uuid5(NS, "create:<jobpost.id>")`` so the same JobPost yields
+# the same activity URI across requests (idempotency for any peer that
+# caches by ``id``) without needing a DB column.
+ACTIVITYPUB_NAMESPACE = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")  # NS_URL
 
 # Custom vocabulary terms for job-board-specific fields that AS2
 # doesn't model. Namespaced under a careercaddy: prefix so federation
@@ -170,3 +183,88 @@ def job_post_as_object(job_post) -> dict:
     out["careercaddy:extension"] = cc_extension
 
     return out
+
+
+def _create_activity_uuid(job_post) -> str:
+    """Deterministic UUID5 for the ``Create`` activity wrapping ``job_post``.
+
+    Phase 5b ships read-only outbox rendering; we don't persist activity
+    rows yet (5d's territory). Deriving the activity UUID from the
+    JobPost id means two consecutive ``GET /outbox?page=N`` requests
+    return identical ``id`` URIs for the same item — which any peer
+    that caches activities by id will rely on.
+    """
+    return str(uuid.uuid5(ACTIVITYPUB_NAMESPACE, f"create:{job_post.pk}"))
+
+
+def _render_note_content(job_post) -> str | None:
+    """Return the HTML body for the wrapped Note, or None if empty.
+
+    AS2's ``content`` is HTML — peers (Mastodon especially) sanitise on
+    display, so we emit the JobPost description as-is when it looks
+    like HTML and wrap plain text in a single ``<p>``. The detection
+    is shape-only: if the field contains an angle bracket, trust it as
+    pre-rendered markup. Otherwise paragraph-wrap. The slim-payload
+    guard (per the Phase 5b plan): no per-row model lookups — only
+    fields already on the JobPost instance.
+    """
+    description = job_post.description
+    if not description:
+        return None
+    if "<" in description and ">" in description:
+        return description
+    return f"<p>{description}</p>"
+
+
+def build_create_activity_for_jobpost(job_post, actor) -> dict:
+    """Build the AS2 ``Create(Note)`` activity envelope for ``job_post``.
+
+    Reused by the Phase 5b outbox view and the Phase 5d dispatch worker
+    (when it lands) so both surfaces emit byte-identical activities for
+    the same JobPost — which matters once peers start signing the
+    fetched objects and we have to round-trip through deduplication on
+    redelivery.
+
+    ``actor`` is the local ``Actor`` row (Phase 5a model); the activity
+    is attributed to ``actor.uri`` (mirrors the outbox advertising URL).
+    Per the Phase 5b plan: ``to`` is the AS2 Public collection, ``cc``
+    points at the actor's followers collection so future follower
+    fan-out (5d) can address them implicitly.
+    """
+    origin = _instance_origin()
+    actor_uri_str = f"{origin}/actors/{actor.preferred_username}"
+    published = _isoformat(job_post.created_at)
+
+    note: dict[str, Any] = {
+        "id": object_uri(job_post),
+        "type": "Note",
+        "attributedTo": actor_uri_str,
+        "to": [AS2_PUBLIC],
+    }
+    if published:
+        note["published"] = published
+
+    content = _render_note_content(job_post)
+    if content:
+        note["content"] = content
+
+    # Prefer the post's canonical (deduped) link as the human-resolvable
+    # URL — peer UIs surface this as the "view original" link. Fall back
+    # to the raw link when canonicalisation hasn't run yet.
+    url = job_post.canonical_link or job_post.link
+    if url:
+        note["url"] = url
+
+    activity: dict[str, Any] = {
+        "@context": AS2_CONTEXT,
+        "id": f"{origin}/activities/{_create_activity_uuid(job_post)}",
+        "type": "Create",
+        "actor": actor_uri_str,
+        "to": [AS2_PUBLIC],
+        "cc": [f"{actor_uri_str}/followers"],
+        "object": note,
+    }
+    if published:
+        activity["published"] = published
+
+    return activity

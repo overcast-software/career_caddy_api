@@ -433,6 +433,15 @@ CAREER_CADDY_INSTANCE = os.environ.get("CAREER_CADDY_INSTANCE", "localhost")
 # paths fall back to ``https://{CAREER_CADDY_INSTANCE}`` for
 # backwards-compatibility with the Phase 4 ``as_object`` adapter.
 INSTANCE_ORIGIN = os.environ.get("INSTANCE_ORIGIN", "http://localhost:8000")
+
+# Page size for the Phase 5b Actor Outbox enumeration. Mastodon's UI
+# fetches /outbox?page=1 once the actor is discovered and uses the
+# OrderedCollection's `first` / `last` URIs to paginate. 20 is the
+# upper-mid of typical AP peer defaults (Mastodon 20, Lemmy 20-50);
+# keep tunable in case a peer chokes on larger pages once 5d dispatch
+# starts populating real history.
+ACTIVITYPUB_OUTBOX_PAGE_SIZE = 20
+
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups

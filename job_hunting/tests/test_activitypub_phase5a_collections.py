@@ -40,7 +40,12 @@ class TestActorCollectionStubs(TestCase):
 
     # --- Outbox ---------------------------------------------------------
 
-    def test_outbox_returns_empty_ordered_collection(self):
+    def test_outbox_returns_ordered_collection_metadata(self):
+        # Phase 5b replaced the empty-stub with metadata-only OrderedCollection:
+        # totalItems advertises the public-Create count; ``orderedItems`` is
+        # only present on OrderedCollectionPage responses (``?page=N``).
+        # ``first`` / ``last`` are suppressed when the collection is empty so
+        # peers don't dereference a phantom page.
         response = self.client.get("/actors/dough/outbox")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/activity+json")
@@ -50,7 +55,6 @@ class TestActorCollectionStubs(TestCase):
         )
         self.assertEqual(body["type"], "OrderedCollection")
         self.assertEqual(body["totalItems"], 0)
-        self.assertEqual(body["orderedItems"], [])
         self.assertEqual(body["id"], f"{TEST_ORIGIN}/actors/dough/outbox")
 
     def test_outbox_unknown_actor_returns_as2_shaped_404(self):
