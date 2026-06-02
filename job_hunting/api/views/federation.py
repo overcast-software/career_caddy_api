@@ -30,7 +30,9 @@ from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from job_hunting.models import Actor
+from job_hunting.lib.as_object import build_create_activity_for_jobpost
+from job_hunting.models import Actor, JobPost
+from job_hunting.models.job_post import AS2_PUBLIC
 
 
 # RFC 7033 §10.2 — WebFinger MUST serve ``application/jrd+json``.
@@ -240,17 +242,125 @@ def _empty_collection(request, username: str, collection: str):
     )
 
 
+def _outbox_jobpost_queryset(actor: Actor):
+    """Return the actor's public-audience JobPosts in outbox order.
+
+    Filter: ``audience`` contains the AS2 Public URI AND
+    ``created_by_id == actor.user_id``. Posts with empty / private
+    audiences are excluded by definition — they were never federable.
+    When ``actor.user_id is None`` (the future instance-actor case)
+    the queryset is empty so the outbox renders as zero items rather
+    than 500'ing on the absent owner.
+
+    Sort: ``-created_at`` then ``-id`` so identical creation timestamps
+    (paste-storms, demo seed) have a stable secondary order — important
+    once peers diff pages between requests.
+    """
+    if actor.user_id is None:
+        return JobPost.objects.none()
+    return (
+        JobPost.objects.filter(
+            created_by_id=actor.user_id,
+            audience__contains=[AS2_PUBLIC],
+        )
+        .order_by("-created_at", "-id")
+    )
+
+
+def _outbox_page_count(total: int, page_size: int) -> int:
+    """Number of pages needed to enumerate ``total`` items.
+
+    Zero items → zero pages (callers should suppress ``first`` / ``last``
+    in that case so the metadata doesn't advertise a non-existent
+    ``/outbox?page=1``).
+    """
+    if total <= 0:
+        return 0
+    return (total + page_size - 1) // page_size
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 def actor_outbox(request, username: str):
-    """Empty ``OrderedCollection`` stub for the Actor's outbox.
+    """Paginated ``OrderedCollection`` of the actor's public Create(Note) activities.
 
-    Phase 5b will replace this with a paginated enumeration of public
-    ``Create(Note)`` activities derived from JobPost AS2 adapters; for
-    now it exists solely so AP peers don't see a broken endpoint when
-    they walk the Actor JSON.
+    Phase 5b — the read-only outbox. No ``page`` query → metadata-only
+    OrderedCollection advertising ``totalItems``, ``first``, ``last``.
+    ``?page=N`` → an OrderedCollectionPage with up to
+    ``ACTIVITYPUB_OUTBOX_PAGE_SIZE`` Create activities plus ``next`` /
+    ``prev`` / ``partOf`` links. The Create envelope is built fresh per
+    request by ``build_create_activity_for_jobpost``; no Activity rows
+    are persisted (5d's territory) — UUIDs are derived deterministically
+    from the JobPost id so peers caching by ``id`` see stable
+    identifiers across requests.
     """
-    return _empty_collection(request, username, "outbox")
+    actor = Actor.objects.filter(preferred_username=username).first()
+    if actor is None:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+
+    collection_id = f"{_actor_uri(username)}/outbox"
+    page_size = getattr(settings, "ACTIVITYPUB_OUTBOX_PAGE_SIZE", 20)
+    queryset = _outbox_jobpost_queryset(actor)
+    total = queryset.count()
+    last_page = _outbox_page_count(total, page_size)
+
+    page_param = request.GET.get("page")
+    if page_param is None:
+        body = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": collection_id,
+            "type": "OrderedCollection",
+            "totalItems": total,
+        }
+        if last_page > 0:
+            body["first"] = f"{collection_id}?page=1"
+            body["last"] = f"{collection_id}?page={last_page}"
+        return HttpResponse(
+            content=JsonResponse(body).content,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    try:
+        page = int(page_param)
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"error": "invalid page"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    if page < 1 or page > last_page:
+        # Out-of-range: page=0 / negative / past the end / any page
+        # against an empty collection. The metadata body suppresses
+        # ``first`` when the collection is empty, so peers shouldn't be
+        # guessing at page URIs anyway.
+        return JsonResponse(
+            {"error": "page out of range"},
+            status=404,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    offset = (page - 1) * page_size
+    items = [
+        build_create_activity_for_jobpost(job_post, actor)
+        for job_post in queryset[offset : offset + page_size]
+    ]
+
+    body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": f"{collection_id}?page={page}",
+        "type": "OrderedCollectionPage",
+        "partOf": collection_id,
+        "orderedItems": items,
+    }
+    if page < last_page:
+        body["next"] = f"{collection_id}?page={page + 1}"
+    if page > 1:
+        body["prev"] = f"{collection_id}?page={page - 1}"
+
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )
 
 
 @csrf_exempt
