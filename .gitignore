@@ -62,3 +62,7 @@ docker-compose.yml
 # Debug prompt logs
 runtime/
 .claude
+
+# Operator wiki (kept local — claude/cap-* helpers consume it)
+notes.org
+notes.org_archive
