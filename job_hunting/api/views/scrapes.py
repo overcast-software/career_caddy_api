@@ -656,6 +656,19 @@ class ScrapeViewSet(BaseViewSet):
         apply_url = (data.get("apply_url") or "").strip() or None
         canonical_link_hint = (data.get("canonical_link_hint") or "").strip() or None
         referrer_url = (data.get("referrer_url") or "").strip() or None
+        # Per-field structured values the extension extracted client-side
+        # via ScrapeProfile.css_selectors.job_data. Strings only; ints/dicts
+        # in this dict are extension bugs and get dropped. The extractor
+        # uses this as a $0 fast-path that skips the LLM when title +
+        # company_name are present.
+        raw_prefill = data.get("structured_prefill")
+        structured_prefill = None
+        if isinstance(raw_prefill, dict):
+            structured_prefill = {
+                k: v.strip()
+                for k, v in raw_prefill.items()
+                if isinstance(v, str) and v.strip()
+            } or None
 
         if not text:
             return Response(
@@ -794,6 +807,7 @@ class ScrapeViewSet(BaseViewSet):
             created_by=request.user,
             source=source,
             referrer_url=referrer_url,
+            extension_prefill=structured_prefill,
         )
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "pending", note=f"{source} ingest")
@@ -1578,12 +1592,27 @@ class ScrapeProfileViewSet(BaseViewSet):
             )
             if profile:
                 break
-        if not profile or not profile.extension_selectors:
+        if not profile:
+            return Response(
+                {"errors": [{"detail": "No extension selectors for host"}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        # A host can ship apply/canonical selectors (extension_selectors),
+        # structured-prefill job_data selectors (css_selectors.job_data),
+        # or both. 404 only when neither is populated.
+        has_extension = bool(profile.extension_selectors)
+        css_blob = profile.css_selectors if isinstance(profile.css_selectors, dict) else {}
+        has_job_data = isinstance(css_blob.get("job_data"), dict) and bool(css_blob.get("job_data"))
+        if not (has_extension or has_job_data):
             return Response(
                 {"errors": [{"detail": "No extension selectors for host"}]},
                 status=status.HTTP_404_NOT_FOUND,
             )
         cfg = profile.extension_selectors or {}
+        # job_data_selectors lives on css_selectors (the same dict Tier 0
+        # reads server-side) so a single config drives both the
+        # client-side prefill and the server-side BeautifulSoup pass.
+        job_data = css_blob.get("job_data") if isinstance(css_blob.get("job_data"), dict) else {}
         return Response(
             {
                 "data": {
@@ -1598,6 +1627,7 @@ class ScrapeProfileViewSet(BaseViewSet):
                             "canonical_link_selectors", []
                         ),
                         "apply_url_decoder": cfg.get("apply_url_decoder"),
+                        "job_data_selectors": job_data,
                     },
                 }
             }

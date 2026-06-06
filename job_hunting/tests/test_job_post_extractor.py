@@ -546,6 +546,117 @@ class TestProcessEvaluation(TestCase):
         )
 
 
+class TestPrefillExtraction(TestCase):
+    """The extension-prefill fast path. When the browser ran per-host
+    job_data selectors and posted the resulting dict on /scrapes/from-
+    text/, JobPostExtractor.parse() builds ParsedJobData directly from
+    Scrape.extension_prefill and skips the LLM entirely — but only when
+    title + company_name clear the plausibility floor.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="prefillu", password="pw")
+        self.base = dict(
+            url="https://www.linkedin.com/jobs/view/1/",
+            status="pending",
+            job_content="Some job posting content here",
+            created_by=self.user,
+        )
+
+    def test_hit_returns_parsed_data(self):
+        scrape = Scrape.objects.create(
+            extension_prefill={
+                "title": "Senior Engineer",
+                "company_name": "Acme",
+                "location": "Remote",
+            },
+            **self.base,
+        )
+        extractor = JobPostExtractor()
+        data, attempted = extractor._try_prefill_extraction(scrape)
+        self.assertTrue(attempted)
+        self.assertIsNotNone(data)
+        self.assertEqual(data.title, "Senior Engineer")
+        self.assertEqual(data.company_name, "Acme")
+        self.assertEqual(data.location, "Remote")
+
+    def test_missing_company_misses(self):
+        scrape = Scrape.objects.create(
+            extension_prefill={"title": "Senior Engineer"},
+            **self.base,
+        )
+        data, attempted = JobPostExtractor()._try_prefill_extraction(scrape)
+        self.assertTrue(attempted)
+        self.assertIsNone(data)
+
+    def test_short_title_misses_plausibility_floor(self):
+        scrape = Scrape.objects.create(
+            extension_prefill={"title": "X", "company_name": "Acme"},
+            **self.base,
+        )
+        data, attempted = JobPostExtractor()._try_prefill_extraction(scrape)
+        self.assertTrue(attempted)
+        self.assertIsNone(data)
+
+    def test_no_prefill_not_attempted(self):
+        scrape = Scrape.objects.create(extension_prefill=None, **self.base)
+        data, attempted = JobPostExtractor()._try_prefill_extraction(scrape)
+        self.assertFalse(attempted)
+        self.assertIsNone(data)
+
+    def test_company_field_alias_accepted(self):
+        """Some extractors emit `company` instead of `company_name`; the
+        selector dict shape varies and the extension is a thin pass-
+        through. Accept the legacy alias so a per-host config can use
+        either key."""
+        scrape = Scrape.objects.create(
+            extension_prefill={"title": "Senior Engineer", "company": "Acme"},
+            **self.base,
+        )
+        data, attempted = JobPostExtractor()._try_prefill_extraction(scrape)
+        self.assertTrue(attempted)
+        self.assertIsNotNone(data)
+        self.assertEqual(data.company_name, "Acme")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_parse_skips_llm_on_prefill_hit(self, mock_analyze):
+        """End-to-end: parse() sees prefill, skips analyze_with_ai
+        entirely. The LLM cost is what this whole feature exists to
+        eliminate on dogfooded hosts."""
+        scrape = Scrape.objects.create(
+            extension_prefill={
+                "title": "Senior Engineer",
+                "company_name": "Acme",
+            },
+            **self.base,
+        )
+        extractor = JobPostExtractor()
+        extractor.parse(scrape, user=self.user)
+        mock_analyze.assert_not_called()
+        self.assertTrue(extractor.last_prefill_hit)
+        scrape.refresh_from_db()
+        self.assertIsNotNone(scrape.job_post_id)
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(jp.title, "Senior Engineer")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_parse_falls_through_to_llm_when_prefill_misses(self, mock_analyze):
+        """A prefill present but missing required fields falls through
+        to Tier 0 / LLM. last_prefill_hit records the miss so admin /
+        logs can surface the rate."""
+        mock_analyze.return_value = ParsedJobData(
+            title="LLM Recovered", company_name="Acme"
+        )
+        scrape = Scrape.objects.create(
+            extension_prefill={"title": "Senior Engineer"},
+            **self.base,
+        )
+        extractor = JobPostExtractor()
+        extractor.parse(scrape, user=self.user)
+        mock_analyze.assert_called_once()
+        self.assertFalse(extractor.last_prefill_hit)
+
+
 class TestParseScrape(TestCase):
     """Test parse_scrape orchestration function."""
 

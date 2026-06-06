@@ -76,6 +76,33 @@ class TestScrapeProfileExtensionSelectors(TestCase):
         resp = self.client.get(self.URL + "?hostname=noselectors.com")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_job_data_only_profile_returns_200(self):
+        """A profile that ships css_selectors.job_data but no
+        extension_selectors block should still return — the structured-
+        prefill path needs the job_data selectors and doesn't depend on
+        the apply/canonical bundle."""
+        ScrapeProfile.objects.create(
+            hostname="jobdataonly.com",
+            css_selectors={"job_data": {"title": "h1"}},
+        )
+        resp = self.client.get(self.URL + "?hostname=jobdataonly.com")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        attrs = resp.json()["data"]["attributes"]
+        self.assertEqual(attrs["job_data_selectors"], {"title": "h1"})
+        self.assertEqual(attrs["apply_button_selectors"], [])
+
+    def test_linkedin_response_includes_job_data_selectors(self):
+        """0093 seeds linkedin.com with title + company_name job_data
+        selectors; verify they round-trip through the endpoint so the
+        extension can run them client-side."""
+        resp = self.client.get(self.URL + "?hostname=linkedin.com")
+        attrs = resp.json()["data"]["attributes"]
+        self.assertIn("job_data_selectors", attrs)
+        self.assertEqual(attrs["job_data_selectors"]["title"], "h1")
+        self.assertIn(
+            "/company/", attrs["job_data_selectors"]["company_name"]
+        )
+
     def test_missing_hostname_param_returns_400(self):
         resp = self.client.get(self.URL)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
