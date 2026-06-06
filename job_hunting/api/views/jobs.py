@@ -497,6 +497,55 @@ class JobPostViewSet(BaseViewSet):
         # them back in POST bodies from a prior GET; setattr would raise
         # because they have no setter.
         attrs.pop("top_score", None)
+
+        # Phase 2.5 catchall mail provenance. `forwarded_via_address` is a
+        # JobPostDiscovery column (per-user, not per-post), but cc_auto
+        # POSTs it as a JobPost attribute on the same body. Pull it
+        # straight from the raw payload (parse_payload silently drops
+        # any attribute not declared on JobPostSerializer, so it would
+        # vanish before we got here otherwise), validate the source-
+        # pairing invariant, and forward the value into _record_discovery
+        # so the discovery row carries it.
+        #
+        # Pairing rule (serializer-level): forwarded_via_address is
+        # *required* when source == "email-forward" and *forbidden* on
+        # every other source. Forbidden side prevents silent provenance
+        # bleed when a non-mail path echoes a stale field; required side
+        # makes the cc_auto contract enforceable from the API.
+        raw_attrs = (
+            (data.get("data") or {}).get("attributes") or {}
+            if isinstance(data, dict)
+            else {}
+        )
+        forwarded_via_address = raw_attrs.get("forwarded_via_address")
+        if isinstance(forwarded_via_address, str):
+            forwarded_via_address = forwarded_via_address.strip() or None
+        src_for_validation = attrs.get("source") or "manual"
+        if src_for_validation == "email-forward":
+            if not forwarded_via_address:
+                return Response(
+                    {"errors": [{
+                        "status": "400",
+                        "detail": (
+                            "forwarded_via_address is required when "
+                            "source='email-forward'"
+                        ),
+                    }]},
+                    status=400,
+                )
+        else:
+            if forwarded_via_address:
+                return Response(
+                    {"errors": [{
+                        "status": "400",
+                        "detail": (
+                            "forwarded_via_address is only valid when "
+                            "source='email-forward'"
+                        ),
+                    }]},
+                    status=400,
+                )
+
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(
@@ -560,7 +609,13 @@ class JobPostViewSet(BaseViewSet):
             JobPostDiscovery.objects.get_or_create(
                 job_post=post,
                 user=request.user,
-                defaults={"source": attrs.get("source") or "manual"},
+                defaults={
+                    "source": attrs.get("source") or "manual",
+                    # Only populated when source=='email-forward' (validated
+                    # above); other sources arrive here with None and the
+                    # column stays NULL.
+                    "forwarded_via_address": forwarded_via_address,
+                },
             )
 
         if attrs.get("link"):

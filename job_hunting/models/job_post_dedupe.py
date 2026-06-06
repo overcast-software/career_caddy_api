@@ -26,6 +26,14 @@ from job_hunting.lib.url_canonicalize import apply_url_rewrites
 SOURCE_TRUST = {
     "extension": 100,
     "paste": 80,
+    # User-forwarded mail (catchall ingest, Phase 2.5). Distinct from
+    # `email` / `email_direct` (LLM-extracted from third-party digests,
+    # trust 20): the user *themselves* chose to forward this listing,
+    # so it carries human-attested intent. Slotted between `paste` (80)
+    # and `scrape` (70) — higher trust than a fresh-page scrape because
+    # the user vouched for the link, lower than a paste because the
+    # body went through a mail-client's HTML mangler before us.
+    "email-forward": 75,
     "scrape": 70,
     "redirect": 60,
     "manual": 50,

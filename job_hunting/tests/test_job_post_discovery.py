@@ -651,3 +651,225 @@ class ReportsScopedJobPostsTests(TestCase):
             "report helper must include discovery — undercounts per-user "
             "analytics otherwise",
         )
+
+
+class EmailForwardSourceTests(TestCase):
+    """Phase 2.5 — catchall mail ingest provenance contract.
+
+    `source="email-forward"` REQUIRES `forwarded_via_address` (catchall
+    To-address the user forwarded the listing to). Other sources MUST NOT
+    carry the field — surfaces an authorial confusion (e.g. a paste path
+    echoing a stale field) instead of silently writing a wrong mailbox.
+    """
+
+    def setUp(self):
+        self.dough = User.objects.create_user(username="dough", password="p")
+        self.company = Company.objects.create(name="Acme")
+
+    def _client(self):
+        client = APIClient()
+        client.force_authenticate(user=self.dough)
+        return client
+
+    def _payload(self, link, source="email-forward", forwarded_via_address=None, **extra):
+        attrs = {
+            "title": "Engineer",
+            "link": link,
+            "description": "x" * 500,
+            "source": source,
+            **extra,
+        }
+        if forwarded_via_address is not None:
+            attrs["forwarded_via_address"] = forwarded_via_address
+        return {"data": {"type": "job-post", "attributes": attrs}}
+
+    def test_email_forward_creates_discovery_with_address(self):
+        resp = self._client().post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/forward-fresh",
+                forwarded_via_address="dough@careercaddy.online",
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        post_id = int(resp.json()["data"]["id"])
+
+        disc = JobPostDiscovery.objects.get(job_post_id=post_id, user=self.dough)
+        self.assertEqual(disc.source, "email-forward")
+        self.assertEqual(disc.forwarded_via_address, "dough@careercaddy.online")
+
+    def test_email_forward_without_address_rejected(self):
+        resp = self._client().post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/forward-noaddr",
+                forwarded_via_address=None,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        body = resp.json()
+        self.assertIn("forwarded_via_address", body["errors"][0]["detail"])
+
+    def test_non_email_forward_with_address_rejected(self):
+        # `paste` source must not carry forwarded_via_address — that
+        # would mean a paste-path POST is claiming an email-forward
+        # mailbox provenance that doesn't apply.
+        resp = self._client().post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/paste-with-addr",
+                source="paste",
+                forwarded_via_address="dough@careercaddy.online",
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        body = resp.json()
+        self.assertIn("forwarded_via_address", body["errors"][0]["detail"])
+
+    def test_email_source_without_address_ok(self):
+        # `email` (LLM-digest extract) and `email_direct` are the *other*
+        # email sources — they pre-date catchall and do not write the
+        # forwarded_via_address column. Must succeed without it.
+        resp = self._client().post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/email-digest",
+                source="email",
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        post_id = int(resp.json()["data"]["id"])
+        disc = JobPostDiscovery.objects.get(job_post_id=post_id, user=self.dough)
+        self.assertEqual(disc.source, "email")
+        self.assertIsNone(disc.forwarded_via_address)
+
+    def test_email_forward_link_dedupe_records_address(self):
+        # Dedupe-first walk: cc_auto's mailbox lands on a known link.
+        # The 200 echo path must still record the address on the new
+        # discovery row — that's how the operator's UI shows "you
+        # forwarded this via X" for posts that pre-existed.
+        link = "https://acme.example/jobs/forward-dedupe"
+        seeder = User.objects.create_user(username="seeder", password="p")
+        existing = JobPost.objects.create(
+            title="SRE",
+            company=self.company,
+            link=link,
+            description="y" * 500,
+            created_by=seeder,
+        )
+
+        resp = self._client().post(
+            "/api/v1/job-posts/",
+            self._payload(
+                link,
+                forwarded_via_address="dough@careercaddy.online",
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(int(resp.json()["data"]["id"]), existing.id)
+
+        disc = JobPostDiscovery.objects.get(job_post_id=existing.id, user=self.dough)
+        self.assertEqual(disc.source, "email-forward")
+        self.assertEqual(disc.forwarded_via_address, "dough@careercaddy.online")
+
+    def test_email_forward_in_source_trust_ranking(self):
+        # email-forward sits between paste (80) and scrape (70) — user-
+        # attested but not as fresh as a paste from the user's browser.
+        from job_hunting.models.job_post_dedupe import SOURCE_TRUST, source_trust
+
+        self.assertEqual(SOURCE_TRUST["email-forward"], 75)
+        self.assertLess(source_trust("email-forward"), source_trust("paste"))
+        self.assertGreater(source_trust("email-forward"), source_trust("scrape"))
+        # Far above the LLM-extracted email digests.
+        self.assertGreater(source_trust("email-forward"), source_trust("email"))
+
+
+class JobPostDiscoveriesRelationshipTests(TestCase):
+    """JSON:API contract: JobPost exposes `discoveries` as hasMany so the
+    UI can render per-user provenance. The relationship is scoped to the
+    requesting caller — never leaks other users' discoveries (which
+    would expose tenancy on a shared resource)."""
+
+    def setUp(self):
+        self.dough = User.objects.create_user(username="dough", password="p")
+        self.eve = User.objects.create_user(username="eve", password="p")
+        self.company = Company.objects.create(name="Acme")
+        self.post = JobPost.objects.create(
+            title="SRE",
+            company=self.company,
+            link="https://acme.example/jobs/discoveries",
+            description="x" * 500,
+            created_by=self.dough,
+        )
+        # Both users have a discovery on the same shared post.
+        self.dough_disc = JobPostDiscovery.objects.create(
+            job_post=self.post,
+            user=self.dough,
+            source="email-forward",
+            forwarded_via_address="dough@careercaddy.online",
+        )
+        self.eve_disc = JobPostDiscovery.objects.create(
+            job_post=self.post, user=self.eve, source="paste"
+        )
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def test_discoveries_relationship_present_on_jp_show(self):
+        resp = self._client(self.dough).get(
+            f"/api/v1/job-posts/{self.post.id}/?include=discoveries"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        rels = body["data"]["relationships"]
+        self.assertIn("discoveries", rels)
+        # Linkage data exposed when client requested include.
+        self.assertEqual(
+            {item["id"] for item in rels["discoveries"]["data"]},
+            {str(self.dough_disc.id)},
+            "non-staff caller must only see their own discovery",
+        )
+
+    def test_discoveries_sideloaded_include(self):
+        resp = self._client(self.dough).get(
+            f"/api/v1/job-posts/{self.post.id}/?include=discoveries"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        included = resp.json().get("included", [])
+        discs = [r for r in included if r["type"] == "job-post-discovery"]
+        self.assertEqual(len(discs), 1)
+        attrs = discs[0]["attributes"]
+        self.assertEqual(attrs["source"], "email-forward")
+        self.assertEqual(attrs["forwarded_via_address"], "dough@careercaddy.online")
+
+    def test_discoveries_scoped_to_caller_not_other_users(self):
+        # Eve sees only her own discovery, not dough's.
+        resp = self._client(self.eve).get(
+            f"/api/v1/job-posts/{self.post.id}/?include=discoveries"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        included = resp.json().get("included", [])
+        discs = [r for r in included if r["type"] == "job-post-discovery"]
+        self.assertEqual(len(discs), 1)
+        self.assertEqual(discs[0]["attributes"]["source"], "paste")
+        # No forwarded_via_address leakage from dough's row.
+        self.assertIsNone(discs[0]["attributes"].get("forwarded_via_address"))
+
+    def test_staff_sees_all_discoveries(self):
+        staff = User.objects.create_user(
+            username="staff", password="p", is_staff=True
+        )
+        resp = self._client(staff).get(
+            f"/api/v1/job-posts/{self.post.id}/?include=discoveries"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        included = resp.json().get("included", [])
+        discs = [r for r in included if r["type"] == "job-post-discovery"]
+        self.assertEqual(len(discs), 2, "staff bypass must surface every discovery")
