@@ -805,8 +805,16 @@ class JobPostDiscoverySerializer(BaseSerializer):
     user_fk = "user_id"
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
+        # Audit pointer: which user (the authenticated principal at write
+        # time) drove this discovery. Equals `user` on every self-discover
+        # path; differs only when a staff API key (cc_auto's) attributes
+        # the row to another user via POST job-posts' `discover_for_user_id`.
+        "requested-by": {"attr": "requested_by", "type": "user", "uselist": False},
     }
-    relationship_fks = {"job-post": "job_post_id"}
+    relationship_fks = {
+        "job-post": "job_post_id",
+        "requested-by": "requested_by_id",
+    }
 
 
 class JobPostSerializer(BaseSerializer):

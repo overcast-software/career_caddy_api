@@ -13,6 +13,21 @@ class JobPostDiscovery(models.Model):
         on_delete=models.CASCADE,
         related_name="job_post_discoveries",
     )
+    # Audit column (Phase 2.5 staff-on-behalf RBAC). Captures *who* drove
+    # the discovery write — the authenticated principal on the request.
+    # Equals `user` on every self-discover path (the common case where a
+    # human POSTs their own catchall mail or pastes their own URL). Differs
+    # only when a staff-level API key (cc_auto's) attributes a discovery to
+    # a target user other than itself. Nullable for legacy rows that
+    # pre-date this column; backfilled to `user_id` in the same migration
+    # as best-effort historical guess (every legacy row was self-driven).
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_job_post_discoveries",
+    )
     source = models.CharField(max_length=32, default="manual")
     # Phase 2.5 catchall mail ingest provenance. When `source == "email-forward"`,
     # this records the catchall To-address the user forwarded the listing to

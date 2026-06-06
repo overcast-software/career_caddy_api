@@ -520,6 +520,73 @@ class JobPostViewSet(BaseViewSet):
         forwarded_via_address = raw_attrs.get("forwarded_via_address")
         if isinstance(forwarded_via_address, str):
             forwarded_via_address = forwarded_via_address.strip() or None
+
+        # Phase 2.5 staff-on-behalf RBAC. `discover_for_user_id` lets a
+        # staff API key (cc_auto's) attribute a JobPostDiscovery to a
+        # user other than the authenticated principal. Optional —
+        # defaults to request.user.id (self-discover, the common path).
+        #
+        # Pull from raw payload: it's a routing-only field, not a
+        # JobPost column, so JobPostSerializer.parse_payload drops it.
+        # Accept both `discover_for_user_id` and the dasherized
+        # `discover-for-user-id` (Ember/JSON:API client convention).
+        #
+        # RBAC: 403 unless the caller is staff OR is targeting themselves.
+        # Non-staff attempting to write on behalf of another user is
+        # rejected before any DB write. Staff bypass is intentional — the
+        # whole point of the field is to let cc_auto's staff key drive
+        # writes for any user. Audit lives on the discovery row via the
+        # `requested_by_user_id` column (see migration 0095 + model).
+        target_user_id_raw = (
+            raw_attrs.get("discover_for_user_id")
+            or raw_attrs.get("discover-for-user-id")
+        )
+        target_user_id = None
+        if target_user_id_raw is not None:
+            try:
+                target_user_id = int(target_user_id_raw)
+            except (TypeError, ValueError):
+                return Response(
+                    {"errors": [{
+                        "status": "400",
+                        "detail": "discover_for_user_id must be an integer",
+                    }]},
+                    status=400,
+                )
+        else:
+            target_user_id = request.user.id
+
+        if target_user_id != request.user.id and not request.user.is_staff:
+            return Response(
+                {"errors": [{
+                    "status": "403",
+                    "detail": (
+                        "Only staff may attribute a discovery to another user"
+                    ),
+                }]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Resolve the target user — fails fast on a stale id from cc_auto
+        # rather than letting the FK fail at INSERT time.
+        from django.contrib.auth import get_user_model
+        UserModel = get_user_model()
+        if target_user_id == request.user.id:
+            # Avoid an extra DB hit on the self path (every paste / manual
+            # POST that the auth backend already hydrated).
+            target_user = request.user
+        else:
+            target_user = UserModel.objects.filter(id=target_user_id).first()
+            if target_user is None:
+                return Response(
+                    {"errors": [{
+                        "status": "400",
+                        "detail": (
+                            f"discover_for_user_id {target_user_id} does not exist"
+                        ),
+                    }]},
+                    status=400,
+                )
         src_for_validation = attrs.get("source") or "manual"
         if src_for_validation == "email-forward":
             if not forwarded_via_address:
@@ -606,15 +673,21 @@ class JobPostViewSet(BaseViewSet):
         from job_hunting.models import JobPostDiscovery
 
         def _record_discovery(post):
+            # `user` is the target (who gets the visibility signal);
+            # `requested_by` is who drove the write (the authenticated
+            # principal — equals target on every self-discover path,
+            # differs on a staff-on-behalf write). Audit chain lives in
+            # the discovery row, not a side table.
             JobPostDiscovery.objects.get_or_create(
                 job_post=post,
-                user=request.user,
+                user=target_user,
                 defaults={
                     "source": attrs.get("source") or "manual",
                     # Only populated when source=='email-forward' (validated
                     # above); other sources arrive here with None and the
                     # column stays NULL.
                     "forwarded_via_address": forwarded_via_address,
+                    "requested_by": request.user,
                 },
             )
 
