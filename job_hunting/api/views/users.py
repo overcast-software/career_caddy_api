@@ -189,7 +189,17 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         # Restrict list to staff users or return only current user
         if request.user.is_staff:
-            users = User.objects.all()
+            qs = User.objects.all()
+            # Phase 2.5 catchall resolver — cc_auto's staff key needs to
+            # map a To-address local-part to a user id. The lookup is
+            # exact-match: the local-part IS the username after the
+            # USERNAME_POLICY validator. Filter[username] is honored only
+            # for staff because non-staff already get [request.user] and
+            # would gain nothing from narrowing that further.
+            uname_filter = request.query_params.get("filter[username]")
+            if uname_filter is not None:
+                qs = qs.filter(username=uname_filter)
+            users = list(qs)
         else:
             users = [request.user]
 
@@ -335,6 +345,18 @@ class DjangoUserViewSet(viewsets.ViewSet):
             return Response(
                 {"errors": [{"detail": "Password is required"}]}, status=400
             )
+
+        # Phase 2.5 catchall mail prep — see lib/username_policy.py for
+        # the rule. Lives there so the audit_usernames mgmt command and
+        # every signup write path share one source of truth.
+        from job_hunting.lib.username_policy import (
+            UsernamePolicyError,
+            validate_username,
+        )
+        try:
+            validate_username(username)
+        except UsernamePolicyError as e:
+            return Response({"errors": [{"detail": str(e)}]}, status=400)
 
         User = get_user_model()
 

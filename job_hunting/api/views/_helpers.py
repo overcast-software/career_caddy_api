@@ -23,6 +23,19 @@ def _create_user_from_data(username, password, email, first_name="", last_name="
     if not password:
         return None, [{"detail": "Password is required."}], 400
 
+    # Phase 2.5 catchall mail prep — `<username>@careercaddy.online` is
+    # the catchall mailbox. The username must be a safe email local-part.
+    # Lives in lib/username_policy.py so the audit_usernames mgmt command
+    # shares one source of truth.
+    from job_hunting.lib.username_policy import (
+        UsernamePolicyError,
+        validate_username,
+    )
+    try:
+        validate_username(username)
+    except UsernamePolicyError as e:
+        return None, [{"detail": str(e)}], 400
+
     if User.objects.filter(username=username).exists():
         return None, [{"detail": "Username already exists."}], 400
     if email and User.objects.filter(email__iexact=email).exists():
