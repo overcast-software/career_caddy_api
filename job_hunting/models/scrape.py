@@ -110,6 +110,46 @@ class Scrape(GetMixin, models.Model):
     # status is non-terminal (covers runner-crash recovery).
     claimed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     claimed_by = models.CharField(max_length=100, null=True, blank=True)
+    # Phase A — Extension direct-POST plan. How this scrape was *captured*,
+    # as opposed to `source` which records the JobPost write provenance.
+    # `browser`        — historical default. Camoufox/Playwright fetches
+    #                    the page server-side via the scrape graph
+    #                    (Navigate → DetectObstacle → … → PersistJobPost).
+    # `extension-direct` — extension content-script already extracted
+    #                    title + company + description from the user-
+    #                    rendered DOM. Phase B's StartScrape gate will
+    #                    branch the graph past every browser-tier node
+    #                    and feed the captured payload straight into
+    #                    PersistJobPost. Until Phase B lands, the field
+    #                    is metadata only.
+    # Indexed so the future Phase D operator panel can count fast-path
+    # scrapes per day cheaply.
+    SOURCE_MODE_CHOICES = (
+        ("browser", "browser"),
+        ("extension-direct", "extension-direct"),
+    )
+    source_mode = models.CharField(
+        max_length=32,
+        default="browser",
+        choices=SOURCE_MODE_CHOICES,
+        db_index=True,
+    )
+    # Phase A — Extension direct-POST plan. Extension-side capture payload
+    # for `source_mode='extension-direct'` rows. Shape (the v1 contract —
+    # Doug's "trust presence, iterate" rule, no validator threshold):
+    #   {
+    #     "title": "<non-empty str>",          # required
+    #     "company": "<non-empty str>",        # required
+    #     "description": "<non-empty str>",    # required
+    #     "apply_url": "<str>",                # optional
+    #     "location": "<str>",                 # optional
+    #     "extraction_hints": {<dict>},        # optional (per-host hints)
+    #   }
+    # NULL for `source_mode='browser'` rows (validated at write time —
+    # the serializer rejects a browser-mode write that carries a payload
+    # so a paste path can't echo a stale field). Phase B's SkipBrowserTier
+    # node reads this and feeds the fields into PersistJobPost.
+    captured_payload = models.JSONField(null=True, blank=True, default=None)
 
     class Meta:
         db_table = "scrape"

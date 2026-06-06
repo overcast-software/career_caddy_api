@@ -985,6 +985,13 @@ class ScrapeSerializer(BaseSerializer):
         "skip_extract",
         "detected_posting_status",
         "detected_closed_evidence",
+        # Phase A — Extension direct-POST plan. `source_mode` records HOW
+        # the scrape was captured (browser tier vs extension content-
+        # script); `captured_payload` carries the extension's pre-extracted
+        # title/company/description shell when source_mode is
+        # 'extension-direct'. See Scrape model docstrings for shape.
+        "source_mode",
+        "captured_payload",
     ]
     # latest_status_note is a derived @property on Scrape with no setter —
     # output it but reject it on PATCH so frontend round-trips don't 500
@@ -996,6 +1003,113 @@ class ScrapeSerializer(BaseSerializer):
         "scrape-statuses": {"attr": "scrape_statuses", "type": "scrape-status", "uselist": True},
     }
     relationship_fks = {"job-post": "job_post_id", "company": "company_id"}
+
+    # Phase A — required fields on a `source_mode='extension-direct'`
+    # capture payload. "Trust presence, iterate" is Doug's v1 rule (plan
+    # /Plans/PLAN Extension direct-POST when capture is complete): the
+    # gate is non-empty title + company + description. No confidence
+    # threshold, no LLM-side validator — we trust the user-rendered DOM
+    # and surface false-positives only if they show up in the wild.
+    _EXTENSION_DIRECT_REQUIRED_FIELDS = ("title", "company", "description")
+
+    def parse_payload(self, payload):
+        """Validate the source_mode / captured_payload pair before persistence.
+
+        Wraps BaseSerializer.parse_payload so PATCH round-trips through the
+        same gate POST does. Three rules — message shapes mirror the
+        EmailForwardSourceTests pattern (single-line ``detail`` naming the
+        offending field) so the frontend / extension can branch on the
+        field token without parsing prose:
+
+        - ``source_mode='extension-direct'`` REQUIRES ``captured_payload``
+          to be a dict with non-empty string values for title, company,
+          description.
+        - ``source_mode='browser'`` (the default) MUST NOT carry a
+          ``captured_payload`` — surfaces an authorial confusion where a
+          paste path leaks a stale field (same defensive shape the
+          email-forward path uses for ``forwarded_via_address``).
+        - Any other ``source_mode`` value is rejected — Scrape model
+          choices currently only allow the two above.
+        """
+        attrs = super().parse_payload(payload)
+        validate_scrape_source_mode_payload(attrs)
+        return attrs
+
+
+def validate_scrape_source_mode_payload(attrs):
+    """Enforce the Phase A source_mode / captured_payload contract.
+
+    Mutates nothing; raises ``ValueError`` with a single-line message
+    naming the offending field. Both ScrapeSerializer.parse_payload (the
+    PATCH path through BaseViewSet._upsert) and
+    ScrapeViewSet.create (the custom POST that bypasses serializer-based
+    create) call this so the rules hold on every write path.
+
+    Skips validation entirely when neither ``source_mode`` nor
+    ``captured_payload`` appears in ``attrs`` — the JobPost-extractor /
+    apply-resolver / claim-next PATCHes don't touch these fields and
+    must not be forced to echo the model default back.
+    """
+    has_source_mode = "source_mode" in attrs
+    has_payload = "captured_payload" in attrs
+    if not (has_source_mode or has_payload):
+        return
+
+    # When only payload arrives without an explicit source_mode, treat
+    # the absence as "the row already has a source_mode and we're only
+    # touching the payload". The PATCH path through _upsert pre-fills
+    # nothing about existing fields, so a partial update that sets the
+    # payload alone is a legitimate Phase B flow (re-run capture against
+    # an already-extension-direct scrape). Skip the cross-field check.
+    if has_payload and not has_source_mode:
+        return
+
+    source_mode = attrs.get("source_mode")
+    payload = attrs.get("captured_payload")
+
+    valid_modes = {choice for choice, _ in Scrape.SOURCE_MODE_CHOICES}
+    if source_mode not in valid_modes:
+        # Reject unknown values up front. Mirrors the choices the model
+        # would reject on .save() anyway — surfacing it here turns a
+        # 500 (IntegrityError from the DB constraint Django emits for
+        # CharField choices is actually a noop, but a future db-level
+        # CHECK would crash) into a clean 400.
+        raise ValueError(
+            f"source_mode must be one of {sorted(valid_modes)}"
+        )
+
+    if source_mode == "extension-direct":
+        if payload is None:
+            raise ValueError(
+                "captured_payload is required when "
+                "source_mode='extension-direct'"
+            )
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "captured_payload must be an object when "
+                "source_mode='extension-direct'"
+            )
+        for field in ScrapeSerializer._EXTENSION_DIRECT_REQUIRED_FIELDS:
+            value = payload.get(field)
+            if not isinstance(value, str) or not value.strip():
+                # Single-line detail naming the field — mirrors
+                # EmailForwardSourceTests rejection shape so the
+                # extension can branch on the field token, not prose.
+                raise ValueError(
+                    f"captured_payload.{field} is required when "
+                    "source_mode='extension-direct'"
+                )
+        return
+
+    # source_mode == 'browser' — payload must be absent or NULL. A
+    # browser-mode write that carries a payload is almost certainly a
+    # client bug echoing a stale field; refuse it loudly so the bug
+    # surfaces instead of writing a half-fast-path row.
+    if payload is not None:
+        raise ValueError(
+            "captured_payload is only valid when "
+            "source_mode='extension-direct'"
+        )
 
 
 class ScrapeStatusSerializer(BaseSerializer):
