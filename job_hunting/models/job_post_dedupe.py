@@ -47,6 +47,72 @@ def source_trust(source: str | None) -> int:
     return SOURCE_TRUST.get(source or "manual", SOURCE_TRUST["manual"])
 
 
+def prefer_extension_direct_link(
+    existing_jp,
+    incoming_scrape,
+    incoming_link: str | None,
+) -> str | None:
+    """Return the link that should win on a canonical-collision merge.
+
+    Phase A of the Extension direct-POST plan. Tie-breaker rule: the
+    URL the user actually saw their browser render is more trustworthy
+    than a server-side-only fetched URL — the extension's content-
+    script can only fire on a tab the user navigated to. Background
+    scrapes routinely land on tracker / SSO-wrapped variants that the
+    user never sees rendered.
+
+    Rule (in order):
+
+    - If the *incoming* scrape is ``source_mode='extension-direct'``,
+      its link wins.
+    - Otherwise, if the *existing* JobPost's most-recent linked scrape
+      was ``source_mode='extension-direct'``, the existing link wins
+      (returned unchanged).
+    - Otherwise, return ``incoming_link`` so the existing trust-rank
+      logic in ``_trust_aware_overwrite`` keeps its current behavior
+      (overwrite to the new URL on a higher-trust source flip).
+
+    ``JobPost.source`` does NOT carry the extension-direct signal —
+    that field records WHAT KIND of write created the JP (extension /
+    paste / email / …) and stays ``extension`` for both browser-mode
+    and extension-direct scrapes per the plan's orthogonal-axes note.
+    HOW the row was captured lives on ``Scrape.source_mode``, which is
+    why this helper joins through the scrape rather than reading off
+    the JP.
+
+    Returns the link string to keep, or ``None`` when ``incoming_link``
+    is None (caller suppresses the link-overwrite path entirely in
+    that case — same shape ``_trust_aware_overwrite`` already uses).
+    """
+    if not incoming_link:
+        return None
+
+    incoming_mode = getattr(incoming_scrape, "source_mode", None) if incoming_scrape else None
+    if incoming_mode == "extension-direct":
+        return incoming_link
+
+    # Look up the existing JP's most-recent extension-direct scrape.
+    # Walking the reverse relation is cheap — JobPost.scrapes is the
+    # related_name on Scrape.job_post, indexed implicitly via the FK.
+    existing_scrape_qs = getattr(existing_jp, "scrapes", None)
+    if existing_scrape_qs is not None:
+        try:
+            existing_has_extension_direct = existing_scrape_qs.filter(
+                source_mode="extension-direct"
+            ).exists()
+        except Exception:
+            existing_has_extension_direct = False
+        if existing_has_extension_direct:
+            # Existing JP carries an extension-direct provenance —
+            # preserve its link rather than overwriting with the
+            # browser-mode incoming URL. Callers compare the return
+            # value against ``existing_jp.link`` and skip the
+            # overwrite when they're equal, so this naturally no-ops.
+            return existing_jp.link
+
+    return incoming_link
+
+
 _TRACKING_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
     "gh_src", "gh_jid",

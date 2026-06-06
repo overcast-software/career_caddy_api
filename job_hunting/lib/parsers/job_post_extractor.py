@@ -27,7 +27,11 @@ from job_hunting.models import (
     JobPostOverwriteDecision,
     Scrape,
 )
-from job_hunting.models.job_post_dedupe import canonicalize_link, source_trust
+from job_hunting.models.job_post_dedupe import (
+    canonicalize_link,
+    prefer_extension_direct_link,
+    source_trust,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -688,9 +692,21 @@ class JobPostExtractor:
             job.company = company
 
         # Link is canonical-derived — recompute canonical_link in save().
-        if link and job.link != link:
-            diff["link"] = {"before": job.link, "after": link}
-            job.link = link
+        #
+        # Phase A — Extension direct-POST plan merge-bias rule. When the
+        # incoming or existing scrape carries source_mode='extension-
+        # direct', the extension-direct row's link wins regardless of
+        # which side it sits on. The user-rendered URL is more
+        # trustworthy than a server-side-fetched URL (the extension can
+        # only fire on a tab the user actually navigated to; background
+        # scrapes routinely land on tracker/SSO variants the user
+        # never sees). The other fields below still apply the
+        # empty-merge invariant via the job_defaults loop, so this only
+        # changes the link decision.
+        chosen_link = prefer_extension_direct_link(job, scrape, link)
+        if chosen_link and job.link != chosen_link:
+            diff["link"] = {"before": job.link, "after": chosen_link}
+            job.link = chosen_link
             job.canonical_link = None
 
         for field, value in job_defaults.items():

@@ -22,7 +22,11 @@ from ._schema import (
     _SORT_PARAM,
     _JSONAPI_ITEM,
 )
-from ..serializers import ScrapeSerializer, ScrapeProfileSerializer
+from ..serializers import (
+    ScrapeSerializer,
+    ScrapeProfileSerializer,
+    validate_scrape_source_mode_payload,
+)
 from job_hunting.models import (
     JobPost,
     Scrape,
@@ -325,6 +329,39 @@ class ScrapeViewSet(BaseViewSet):
             if url is None:
                 url = attrs.get("url")
 
+        # Phase A — Extension direct-POST plan. The browser extension
+        # POSTs the pre-extracted title/company/description payload
+        # alongside the URL when its content-script gate fires. Validate
+        # the source_mode / captured_payload pair up front — the rest of
+        # this method bypasses the BaseViewSet create() that would route
+        # the same payload through serializer.parse_payload, so the
+        # validator has to fire here too. Single-source helper lives in
+        # serializers.py.
+        source_mode_attr = attrs.get("source_mode") or data.get("source_mode")
+        captured_payload_attr = (
+            attrs.get("captured_payload")
+            if "captured_payload" in attrs
+            else data.get("captured_payload")
+        )
+        validation_input = {}
+        if source_mode_attr is not None:
+            validation_input["source_mode"] = source_mode_attr
+        # Treat presence — not truthiness — as "the caller meant to send
+        # this". A literal null in JSON:API attributes is a legitimate
+        # "no payload" signal on a browser-mode write.
+        if (
+            (isinstance(attrs, dict) and "captured_payload" in attrs)
+            or (isinstance(data, dict) and "captured_payload" in data)
+        ):
+            validation_input["captured_payload"] = captured_payload_attr
+        try:
+            validate_scrape_source_mode_payload(validation_input)
+        except ValueError as exc:
+            return Response(
+                {"errors": [{"status": "400", "detail": str(exc)}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # The synchronous browser-MCP scrape path (`Scraper(...).dispatch()`)
         # is gone — every scrape now creates as `hold` and the
         # hold-poller picks it up. If a caller passes status != "hold"
@@ -429,7 +466,17 @@ class ScrapeViewSet(BaseViewSet):
         # the in-flight scrape identifier and collide with an existing
         # job-post:N lid in the store. Errors-only with a non-2xx
         # status keeps Ember Data from touching the store.
-        if linked_jp is None:
+        #
+        # Phase A exemption: an `extension-direct` push carries a fresh
+        # captured_payload (title/company/description the user just saw
+        # rendered). 409'ing it would drop that payload on the floor —
+        # the future Phase B fast-path needs it to feed
+        # JobPostExtractor.process_evaluation with newer-than-the-DB
+        # contents (which is how the trust-aware overwrite flips a
+        # stale email-pipeline post in place). Mint the scrape, bind it
+        # to the existing JP so the runner can re-extract.
+        is_extension_direct = source_mode_attr == "extension-direct"
+        if linked_jp is None and not is_extension_direct:
             from job_hunting.models.job_post_dedupe import canonicalize_link
             canonical = canonicalize_link(url)
             existing_jp = None
@@ -466,20 +513,42 @@ class ScrapeViewSet(BaseViewSet):
                 )
 
         source = attrs.get("source") or data.get("source") or "scrape"
-        scrape = Scrape.objects.create(
+        create_kwargs = dict(
             url=url,
             source_link=source_link,
             status="hold",
             created_by=request.user,
             source=source,
         )
+        if source_mode_attr is not None:
+            create_kwargs["source_mode"] = source_mode_attr
+        # Persist payload when present in the request — the validator
+        # above already enforced presence-vs-mode consistency, so this is
+        # a straight pass-through.
+        if "captured_payload" in validation_input:
+            create_kwargs["captured_payload"] = captured_payload_attr
+        scrape = Scrape.objects.create(**create_kwargs)
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "hold")
         # Bind to the JobPost: explicit relationship takes precedence,
         # otherwise fall back to matching by URL. Inherit the job
         # post's company when none supplied.
+        #
+        # For extension-direct writes that just skipped the 409 dedupe
+        # gate, also try canonical_link — the runner needs the linkage
+        # so Phase B's fast-path can apply the captured_payload onto
+        # the existing JP (rather than minting a duplicate).
         if not linked_jp:
             linked_jp = JobPost.objects.filter(link=url).first()
+            if not linked_jp and is_extension_direct:
+                from job_hunting.models.job_post_dedupe import (
+                    canonicalize_link,
+                )
+                canonical = canonicalize_link(url)
+                if canonical:
+                    linked_jp = JobPost.objects.filter(
+                        canonical_link=canonical
+                    ).first()
         if linked_jp:
             scrape.job_post = linked_jp
             if not scrape.company_id and linked_jp.company_id:
