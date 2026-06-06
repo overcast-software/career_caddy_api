@@ -873,3 +873,202 @@ class JobPostDiscoveriesRelationshipTests(TestCase):
         included = resp.json().get("included", [])
         discs = [r for r in included if r["type"] == "job-post-discovery"]
         self.assertEqual(len(discs), 2, "staff bypass must surface every discovery")
+
+
+class DiscoverForUserIdRBACTests(TestCase):
+    """Phase 2.5 staff-on-behalf RBAC.
+
+    `POST /api/v1/job-posts/` accepts an optional `discover_for_user_id`
+    attribute. Defaults to request.user.id. RBAC: 403 unless the caller
+    is staff OR is targeting themselves. The discovery row's
+    `requested_by` column captures who drove the write, distinct from
+    `user` which is who the row is attributed to.
+    """
+
+    def setUp(self):
+        self.dough = User.objects.create_user(username="dough", password="p")
+        self.cc_auto = User.objects.create_user(
+            username="cc-auto", password="p", is_staff=True
+        )
+        self.target = User.objects.create_user(username="target", password="p")
+        self.company = Company.objects.create(name="Acme")
+
+    def _client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _payload(self, link, **extra):
+        attrs = {
+            "title": "Engineer",
+            "link": link,
+            "description": "x" * 500,
+            **extra,
+        }
+        return {"data": {"type": "job-post", "attributes": attrs}}
+
+    def test_self_discover_default_works(self):
+        # Omitting discover_for_user_id self-discovers (existing behavior).
+        resp = self._client(self.dough).post(
+            "/api/v1/job-posts/",
+            self._payload("https://acme.example/jobs/self-default"),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        post_id = int(resp.json()["data"]["id"])
+
+        disc = JobPostDiscovery.objects.get(job_post_id=post_id)
+        self.assertEqual(disc.user_id, self.dough.id)
+        self.assertEqual(
+            disc.requested_by_id, self.dough.id,
+            "self-discover: requested_by == user",
+        )
+
+    def test_self_discover_explicit_ok(self):
+        # Non-staff targeting self via explicit id is allowed.
+        resp = self._client(self.dough).post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/self-explicit",
+                discover_for_user_id=self.dough.id,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        post_id = int(resp.json()["data"]["id"])
+        disc = JobPostDiscovery.objects.get(job_post_id=post_id)
+        self.assertEqual(disc.user_id, self.dough.id)
+        self.assertEqual(disc.requested_by_id, self.dough.id)
+
+    def test_staff_on_behalf_attributes_to_target(self):
+        # The cc_auto contract: staff key writes a row for some other
+        # user. `user` = target, `requested_by` = staff principal.
+        resp = self._client(self.cc_auto).post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/staff-on-behalf",
+                discover_for_user_id=self.target.id,
+                source="email-forward",
+                forwarded_via_address="target@careercaddy.online",
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        post_id = int(resp.json()["data"]["id"])
+
+        disc = JobPostDiscovery.objects.get(job_post_id=post_id)
+        self.assertEqual(
+            disc.user_id, self.target.id,
+            "discovery `user` is the target, not the writer",
+        )
+        self.assertEqual(
+            disc.requested_by_id, self.cc_auto.id,
+            "audit chain: requested_by captures who drove the write",
+        )
+        self.assertEqual(disc.source, "email-forward")
+        self.assertEqual(disc.forwarded_via_address, "target@careercaddy.online")
+
+    def test_non_staff_on_behalf_403(self):
+        # The whole point of the RBAC: a non-staff user cannot drive
+        # writes for someone else even by guessing their id.
+        resp = self._client(self.dough).post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/non-staff-on-behalf",
+                discover_for_user_id=self.target.id,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403, resp.content)
+        # No row should have been created.
+        self.assertFalse(
+            JobPostDiscovery.objects.filter(user_id=self.target.id).exists(),
+            "403 must reject before any DB write",
+        )
+
+    def test_staff_on_behalf_target_does_not_exist(self):
+        # Stale id from cc_auto's resolver — fail fast with a clear 400.
+        resp = self._client(self.cc_auto).post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/stale-target",
+                discover_for_user_id=99999,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("does not exist", resp.json()["errors"][0]["detail"])
+
+    def test_discover_for_user_id_non_integer_rejected(self):
+        resp = self._client(self.cc_auto).post(
+            "/api/v1/job-posts/",
+            self._payload(
+                "https://acme.example/jobs/bad-id",
+                discover_for_user_id="not-an-int",
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn(
+            "integer", resp.json()["errors"][0]["detail"].lower()
+        )
+
+    def test_staff_on_behalf_dedupe_branches_record_requested_by(self):
+        # Dedupe-first walk: link-dedupe and fingerprint-dedupe paths
+        # must also record requested_by on the discovery row, not just
+        # the fresh-create path.
+        link = "https://acme.example/jobs/staff-dedupe"
+        existing = JobPost.objects.create(
+            title="SRE",
+            company=self.company,
+            link=link,
+            description="y" * 500,
+            created_by=self.cc_auto,
+        )
+
+        resp = self._client(self.cc_auto).post(
+            "/api/v1/job-posts/",
+            self._payload(
+                link,
+                discover_for_user_id=self.target.id,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(int(resp.json()["data"]["id"]), existing.id)
+
+        disc = JobPostDiscovery.objects.get(
+            job_post_id=existing.id, user_id=self.target.id
+        )
+        self.assertEqual(disc.requested_by_id, self.cc_auto.id)
+
+    def test_discovery_resource_exposes_requested_by_relationship(self):
+        # JSON:API contract: the per-discovery resource carries
+        # `requested-by` so the audit chain is visible to callers
+        # with rights to read the row.
+        post = JobPost.objects.create(
+            title="SRE",
+            company=self.company,
+            link="https://acme.example/jobs/audit-rel",
+            description="x" * 500,
+            created_by=self.cc_auto,
+        )
+        JobPostDiscovery.objects.create(
+            job_post=post,
+            user=self.target,
+            requested_by=self.cc_auto,
+            source="email-forward",
+            forwarded_via_address="target@careercaddy.online",
+        )
+
+        resp = self._client(self.target).get(
+            f"/api/v1/job-posts/{post.id}/?include=discoveries"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        included = resp.json().get("included", [])
+        discs = [r for r in included if r["type"] == "job-post-discovery"]
+        self.assertEqual(len(discs), 1)
+        rels = discs[0].get("relationships", {})
+        req_by = rels.get("requested-by", {}).get("data")
+        self.assertIsNotNone(req_by, "requested-by relationship must be present")
+        self.assertEqual(req_by["id"], str(self.cc_auto.id))
