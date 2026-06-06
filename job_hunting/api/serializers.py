@@ -8,7 +8,7 @@ from rest_framework import serializers
 
 from job_hunting.models import (
     Status, Skill, Description, Certification, Education, Summary,
-    Company, ApiKey, Question, JobPost,
+    Company, ApiKey, Question, JobPost, JobPostDiscovery,
     Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
@@ -783,6 +783,32 @@ class JobPostDuplicateCandidateSerializer(BaseSerializer):
         }
 
 
+class JobPostDiscoverySerializer(BaseSerializer):
+    """Per-user provenance for a JobPost.
+
+    JobPost is shared across users; the per-user "I know about this post"
+    signal lives on JobPostDiscovery. Exposed as a hasMany on JobPost so
+    the UI can render forwarder provenance (which catchall mailbox
+    surfaced this listing) and so reports can audit ingest paths. The
+    `requested_by` relationship is added by the Phase 2.5 staff-or-self
+    RBAC ticket — staff API keys (cc_auto's) can attribute a discovery
+    to a user other than the request's authenticated principal.
+    """
+
+    type = "job-post-discovery"
+    model = JobPostDiscovery
+    attributes = [
+        "source",
+        "forwarded_via_address",
+        "created_at",
+    ]
+    user_fk = "user_id"
+    relationships = {
+        "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
+    }
+    relationship_fks = {"job-post": "job_post_id"}
+
+
 class JobPostSerializer(BaseSerializer):
     type = "job-post"
     model = JobPost
@@ -854,6 +880,16 @@ class JobPostSerializer(BaseSerializer):
             "type": "job-post-duplicate-candidate",
             "uselist": True,
         },
+        # Per-user provenance hasMany. Records the catchall To-address
+        # used for the Phase 2.5 email-forward source, and surfaces who
+        # has signal on this shared post. Scoped to the requesting user
+        # in `get_related` — discoveries are by definition per-user and
+        # leaking other users' rows here would expose tenancy.
+        "discoveries": {
+            "attr": "discoveries",
+            "type": "job-post-discovery",
+            "uselist": True,
+        },
     }
     relationship_fks = {"company": "company_id"}
     linked_relationships = [
@@ -889,6 +925,15 @@ class JobPostSerializer(BaseSerializer):
         # and _confidence on each row for JobPostDuplicateCandidateSerializer.
         if rel_name == "duplicate-candidates":
             return "job-post-duplicate-candidate", compute_duplicate_candidates(obj, request)
+        # Discoveries are per-user — scope to the requesting caller. Staff
+        # bypasses (they can see every signal) so an admin tooling view
+        # can audit cross-user provenance; non-staff sees only their own
+        # discoveries on this shared post.
+        if rel_name == "discoveries":
+            qs = obj.discoveries.all()
+            if user_id and not getattr(getattr(request, "user", None), "is_staff", False):
+                qs = qs.filter(user_id=user_id)
+            return "job-post-discovery", list(qs)
         return super().get_related(obj, rel_name)
 
     def to_resource(self, obj):
@@ -1518,4 +1563,5 @@ TYPE_TO_SERIALIZER = {
     "invitation": InvitationSerializer,
     "scrape-profile": ScrapeProfileSerializer,
     "job-post-duplicate-candidate": JobPostDuplicateCandidateSerializer,
+    "job-post-discovery": JobPostDiscoverySerializer,
 }
