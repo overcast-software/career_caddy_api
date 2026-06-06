@@ -62,6 +62,13 @@ class Scrape(GetMixin, models.Model):
     referrer_url = models.CharField(
         max_length=2000, null=True, blank=True, db_index=True
     )
+    # Per-field structured values the browser extension extracted client-side
+    # using ScrapeProfile.css_selectors.job_data. Shape mirrors the selector
+    # dict keys (title, company_name, location, salary, description, …) — null
+    # per field on a selector miss. Read by JobPostExtractor._try_prefill_
+    # extraction as a $0 fast-path that bypasses the LLM when title +
+    # company_name are present.
+    extension_prefill = models.JSONField(null=True, blank=True)
     # Phase 3 learning loop: when the resolver ends in unknown/failed,
     # the ai-side heuristic scan stores candidate "Apply" elements
     # here for later aggregation + promotion into

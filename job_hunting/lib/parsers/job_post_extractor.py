@@ -145,6 +145,10 @@ class JobPostExtractor:
         # None = tier 0 not attempted; True = tier 0 produced data;
         # False = tier 0 selectors present but didn't match required fields.
         self.last_tier0_hit: Optional[bool] = None
+        # None = prefill not attempted; True = prefill produced data;
+        # False = prefill dict present but didn't satisfy the title +
+        # company_name gate.
+        self.last_prefill_hit: Optional[bool] = None
         # Outcome of the most recent parse, used to shape the completion status
         # note so the frontend can branch flash messaging:
         #   "created"       — new JobPost inserted
@@ -160,7 +164,21 @@ class JobPostExtractor:
         linked JobPost (overwrite non-None extracted values, preserve
         company). Use for explicit re-scrape / re-parse / re-extract flows.
         """
-        # Try Tier 0 (deterministic CSS extraction) first — $0 cost
+        # Try the extension prefill first — the browser already ran the
+        # per-host job_data selectors against the live DOM, so when title
+        # + company_name landed we can build ParsedJobData without paying
+        # an LLM round-trip.
+        validated_data, prefill_attempted = self._try_prefill_extraction(scrape)
+        if prefill_attempted:
+            self.last_prefill_hit = validated_data is not None
+        else:
+            self.last_prefill_hit = None
+        if validated_data:
+            logger.info("Extension prefill extraction succeeded for scrape %s", scrape.id)
+            self.last_tier0_hit = None
+            return self.process_evaluation(scrape, validated_data, user=user, force=force)
+
+        # Try Tier 0 (deterministic CSS extraction) next — $0 cost
         validated_data, tier0_attempted = self._try_tier0_extraction(scrape)
         if tier0_attempted:
             self.last_tier0_hit = validated_data is not None
@@ -787,6 +805,65 @@ class JobPostExtractor:
         except Exception:
             logger.debug("Could not load scrape profile hints", exc_info=True)
             return ""
+
+    # Field length floor for accepting the prefill bypass. h1 misfires on
+    # error pages ("Error", "404") collapse short; a 3-char title + company
+    # gate keeps those out without rejecting legitimate short titles like
+    # "PM" or "QA".
+    _PREFILL_MIN_FIELD_LEN = 3
+
+    def _try_prefill_extraction(
+        self, scrape: Scrape,
+    ) -> tuple[Optional[ParsedJobData], bool]:
+        """Attempt extraction from the extension-supplied structured prefill.
+
+        The browser extension reads ScrapeProfile.css_selectors.job_data via
+        the extension-selectors endpoint, runs each selector against the
+        live DOM, and posts the resulting dict on /scrapes/from-text/. We
+        persist it on Scrape.extension_prefill and bypass the LLM here
+        when title + company_name are both populated.
+
+        Returns a (data, attempted) tuple:
+          - (ParsedJobData, True)  — title + company_name plausible.
+          - (None, True)           — Prefill present but missing required
+                                     fields / failed plausibility gate.
+          - (None, False)          — No prefill on the scrape.
+        """
+        prefill = getattr(scrape, "extension_prefill", None)
+        if not isinstance(prefill, dict) or not prefill:
+            return None, False
+
+        title = (prefill.get("title") or "").strip()
+        company = (
+            prefill.get("company_name") or prefill.get("company") or ""
+        ).strip()
+        if (
+            len(title) < self._PREFILL_MIN_FIELD_LEN
+            or len(company) < self._PREFILL_MIN_FIELD_LEN
+        ):
+            return None, True
+
+        description = (prefill.get("description") or "").strip() or None
+        location = (prefill.get("location") or "").strip() or None
+        try:
+            data = ParsedJobData(
+                title=title,
+                company_name=company,
+                description=description,
+                location=location,
+                remote=None,
+                salary_min=None,
+                salary_max=None,
+                link=scrape.url,
+                extraction_date=datetime.now(),
+            )
+        except Exception:
+            logger.debug(
+                "Prefill validation failed scrape_id=%s prefill=%r",
+                scrape.id, prefill, exc_info=True,
+            )
+            return None, True
+        return data, True
 
     def _try_tier0_extraction(self, scrape: Scrape) -> tuple[Optional[ParsedJobData], bool]:
         """Attempt deterministic extraction using CSS selectors from ScrapeProfile.

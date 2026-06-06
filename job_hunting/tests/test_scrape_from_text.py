@@ -941,3 +941,112 @@ class TestScrapeFromTextExtensionHints(TestCase):
             self.assertEqual(meta.get("referrer_match"), existing.id)
         finally:
             _profile_url_rewrites_for_host.cache_clear()
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextStructuredPrefill(TestCase):
+    """The extension reads per-host css_selectors.job_data via the
+    extension-selectors endpoint, runs each selector against the live
+    DOM, and posts the resulting dict as `structured_prefill`. The api
+    persists it on Scrape.extension_prefill; JobPostExtractor uses it
+    as a $0 LLM-skip when title + company_name are present.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="prefiller", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_structured_prefill_persisted_on_scrape(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "source": "extension",
+                "structured_prefill": {
+                    "title": "Senior Engineer",
+                    "company_name": "Acme",
+                    "location": "Remote",
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(
+            scrape.extension_prefill,
+            {
+                "title": "Senior Engineer",
+                "company_name": "Acme",
+                "location": "Remote",
+            },
+        )
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_prefill_non_string_values_dropped(self, _mock_parse):
+        """Extension bugs / type drift mustn't poison the prefill
+        column — non-strings get filtered before the JSONField write."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "structured_prefill": {
+                    "title": "Senior Engineer",
+                    "company_name": "Acme",
+                    "salary": 180000,
+                    "description": ["nested", "structure"],
+                },
+            },
+            format="json",
+        )
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(
+            scrape.extension_prefill,
+            {"title": "Senior Engineer", "company_name": "Acme"},
+        )
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_prefill_blank_values_dropped(self, _mock_parse):
+        """Whitespace / empty selector misses end up as empty strings;
+        strip them so the extractor's title+company_name gate sees
+        truthful coverage."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "structured_prefill": {
+                    "title": "Senior Engineer",
+                    "company_name": "   ",
+                },
+            },
+            format="json",
+        )
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.extension_prefill, {"title": "Senior Engineer"})
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_prefill_missing_yields_null(self, _mock_parse):
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Senior Engineer at Acme"},
+            format="json",
+        )
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertIsNone(scrape.extension_prefill)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_prefill_non_dict_silently_ignored(self, _mock_parse):
+        """A malformed payload (list instead of dict) shouldn't 4xx the
+        whole submit — drop the bad signal, persist nothing."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Engineer at Acme",
+                "structured_prefill": ["title", "company_name"],
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertIsNone(scrape.extension_prefill)
