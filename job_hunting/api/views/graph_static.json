@@ -179,12 +179,26 @@
       "group": "terminal",
       "label": "Extract fail",
       "description": "Terminal: every tier produced something EvaluateExtraction rejected, or persistence failed. outcome='failure' with failure_reason='extraction'."
+    },
+    {
+      "id": "SkipBrowserTier",
+      "group": "scrape",
+      "label": "Skip browser tier",
+      "description": "Fast-path entry for source_mode='extension-direct' scrapes. The extension content-script already extracted title + company + description from the user-rendered DOM; this node copies those fields onto state.parsed (ParsedJobData shape) and routes straight to PersistJobPost. Browser-tier nodes (Navigate \u2192 Capture \u2192 Tier*) never run. When the payload carries apply_url, routes directly to PersistJobPost; otherwise routes through ResolveApplyUrl (no-op without a browser page) and into PersistJobPost."
     }
   ],
   "edges": [
     {
       "from": "StartScrape",
+      "to": "ExtractFail"
+    },
+    {
+      "from": "StartScrape",
       "to": "LoadProfile"
+    },
+    {
+      "from": "StartScrape",
+      "to": "SkipBrowserTier"
     },
     {
       "from": "LoadProfile",
@@ -344,6 +358,18 @@
     },
     {
       "from": "UpdateProfile",
+      "to": "ResolveApplyUrl"
+    },
+    {
+      "from": "ResolveApplyUrl",
+      "to": "PersistJobPost"
+    },
+    {
+      "from": "SkipBrowserTier",
+      "to": "PersistJobPost"
+    },
+    {
+      "from": "SkipBrowserTier",
       "to": "ResolveApplyUrl"
     }
   ]
