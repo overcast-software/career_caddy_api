@@ -12,6 +12,7 @@ from job_hunting.models.job_post_dedupe import (
     find_apply_url_matches,
     find_duplicate,
     fingerprint,
+    normalized_fingerprint,
     strip_url_trailing_junk,
 )
 
@@ -285,6 +286,141 @@ class TestFingerprint(TestCase):
         self.assertNotEqual(fingerprint(a), fingerprint(b))
 
 
+class TestNormalizedFingerprint(TestCase):
+    """Phase B fingerprint — slug-folded title + location.
+
+    Catches the punctuation-drift twins (en-dash vs hyphen vs minus,
+    smart quote vs ASCII quote, NFKC-foldable codepoints) that the
+    case+whitespace fold in ``fingerprint`` cannot see.
+    """
+
+    def setUp(self):
+        self.company = Company.objects.create(name="Allstate")
+
+    def test_none_without_company(self):
+        jp = JobPost(title="Engineer")
+        self.assertIsNone(normalized_fingerprint(jp))
+
+    def test_none_without_title(self):
+        jp = JobPost(company=self.company)
+        self.assertIsNone(normalized_fingerprint(jp))
+
+    def test_en_dash_and_hyphen_collapse(self):
+        """JP 1329 vs JP 3323 regression: U+002D hyphen-minus and
+        U+2013 en-dash in titles collapse to the same hash."""
+        hyphen = JobPost(
+            company=self.company,
+            title="Software Engineer - Product Security",
+            location="Northbrook, IL",
+        )
+        en_dash = JobPost(
+            company=self.company,
+            title="Software Engineer – Product Security",
+            location="Northbrook, IL",
+        )
+        self.assertEqual(
+            normalized_fingerprint(hyphen),
+            normalized_fingerprint(en_dash),
+        )
+
+    def test_em_dash_and_minus_sign_also_collapse(self):
+        """The whole unicode dash family folds — em-dash and the math
+        minus sign aren't just hypothetical; LinkedIn renders the
+        math minus in some job titles."""
+        em_dash = JobPost(
+            company=self.company,
+            title="Software Engineer — Product Security",
+            location="NYC",
+        )
+        minus = JobPost(
+            company=self.company,
+            title="Software Engineer − Product Security",
+            location="NYC",
+        )
+        hyphen = JobPost(
+            company=self.company,
+            title="Software Engineer - Product Security",
+            location="NYC",
+        )
+        self.assertEqual(
+            normalized_fingerprint(em_dash),
+            normalized_fingerprint(hyphen),
+        )
+        self.assertEqual(
+            normalized_fingerprint(minus),
+            normalized_fingerprint(hyphen),
+        )
+
+    def test_smart_quotes_collapse(self):
+        """Curly single-quote vs ASCII apostrophe."""
+        smart = JobPost(
+            company=self.company,
+            title="Driver’s License Manager",
+            location="NYC",
+        )
+        ascii_q = JobPost(
+            company=self.company,
+            title="Driver's License Manager",
+            location="NYC",
+        )
+        self.assertEqual(
+            normalized_fingerprint(smart),
+            normalized_fingerprint(ascii_q),
+        )
+
+    def test_case_and_whitespace_collapse(self):
+        a = JobPost(
+            company=self.company,
+            title=" Software Engineer ",
+            location="Redmond, WA",
+        )
+        b = JobPost(
+            company=self.company,
+            title="software  engineer",
+            location="redmond, wa",
+        )
+        self.assertEqual(
+            normalized_fingerprint(a),
+            normalized_fingerprint(b),
+        )
+
+    def test_different_company_different_hash(self):
+        other = Company.objects.create(name="Beta")
+        a = JobPost(company=self.company, title="Dev", location="NYC")
+        b = JobPost(company=other, title="Dev", location="NYC")
+        self.assertNotEqual(
+            normalized_fingerprint(a),
+            normalized_fingerprint(b),
+        )
+
+    def test_substantive_title_difference_different_hash(self):
+        """Different words (not just punctuation noise) must produce
+        different hashes — the slug fold doesn't over-collapse."""
+        a = JobPost(
+            company=self.company,
+            title="Software Engineer",
+            location="NYC",
+        )
+        b = JobPost(
+            company=self.company,
+            title="Senior Software Engineer",
+            location="NYC",
+        )
+        self.assertNotEqual(
+            normalized_fingerprint(a),
+            normalized_fingerprint(b),
+        )
+
+    def test_returns_40_char_hex(self):
+        jp = JobPost(
+            company=self.company, title="Dev", location="NYC"
+        )
+        fp = normalized_fingerprint(jp)
+        self.assertEqual(len(fp), 40)
+        # sha1 hex — all chars in [0-9a-f].
+        self.assertTrue(all(c in "0123456789abcdef" for c in fp))
+
+
 class TestFindDuplicate(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="dup", password="pass")
@@ -556,6 +692,207 @@ class TestJobPostSavePopulatesDedupeFields(TestCase):
         self.assertEqual(jp.canonical_link, "https://example.com/job/1")
         self.assertIsNotNone(jp.content_fingerprint)
         self.assertEqual(len(jp.content_fingerprint), 40)
+        # Phase B: normalized_fingerprint also populated on every save.
+        self.assertIsNotNone(jp.normalized_fingerprint)
+        self.assertEqual(len(jp.normalized_fingerprint), 40)
+
+    def test_save_skips_normalized_fingerprint_when_company_missing(self):
+        """Null-skip semantics mirror ``fingerprint`` — a stub post
+        with no company gets a null normalized_fingerprint, NOT a
+        crash."""
+        jp = JobPost.objects.create(
+            title="Orphan",
+            link="https://example.com/orphan",
+        )
+        jp.refresh_from_db()
+        self.assertIsNone(jp.normalized_fingerprint)
+        self.assertIsNone(jp.content_fingerprint)
+
+
+class TestFindDuplicateNormalizedFingerprint(TestCase):
+    """Phase B widened ``find_duplicate`` fingerprint stage — matches
+    by either ``content_fingerprint`` OR ``normalized_fingerprint``.
+
+    Pin the JP 1329 / JP 3323 regression: same role, same company,
+    title differs only by U+002D hyphen vs U+2013 en-dash. The case+
+    whitespace fold in ``fingerprint`` produces different sha1s; the
+    slug fold in ``normalized_fingerprint`` produces the same. The
+    widened fingerprint stage finds the existing row via the new
+    column when the legacy column misses.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="phaseb", password="pass")
+        self.company = Company.objects.create(name="Allstate")
+
+    def test_en_dash_vs_hyphen_dedupes_via_normalized_fingerprint(self):
+        original = JobPost.objects.create(
+            title="Software Engineer - Product Security",
+            company=self.company,
+            location="Northbrook, IL",
+            link="https://linkedin.com/jobs/view/4405744429",
+            created_by=self.user,
+        )
+        original.refresh_from_db()
+
+        # Candidate uses the en-dash glyph. Different link so the
+        # canonical_link stage misses; no apply_url so that stage
+        # misses too. Only the fingerprint stage can fire — and only
+        # the normalized column matches, the legacy column does not.
+        candidate = JobPost(
+            title="Software Engineer – Product Security",  # U+2013
+            company=self.company,
+            location="Northbrook, IL",
+            link="https://allstate.jobs/job/23310874",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        candidate.content_fingerprint = fingerprint(candidate)
+        candidate.normalized_fingerprint = normalized_fingerprint(candidate)
+
+        # Sanity-check the regression precondition: the legacy column
+        # IS different (case+whitespace fold doesn't fold the en-dash);
+        # the new column matches.
+        self.assertNotEqual(
+            original.content_fingerprint,
+            candidate.content_fingerprint,
+        )
+        self.assertEqual(
+            original.normalized_fingerprint,
+            candidate.normalized_fingerprint,
+        )
+
+        hit = find_duplicate(candidate)
+        self.assertEqual(hit, original)
+
+    def test_legacy_content_fingerprint_still_dedupes(self):
+        """Backward compat: when content_fingerprint matches but
+        normalized_fingerprint differs (shouldn't happen in practice
+        but defensible because the slug fold is a strict refinement),
+        the legacy column still drives a dedupe hit. Tests the OR
+        predicate from the candidate-only-has-legacy direction."""
+        original = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            location="NYC",
+            link="https://example.com/old",
+            created_by=self.user,
+        )
+        original.refresh_from_db()
+
+        candidate = JobPost(
+            title="Senior Engineer",
+            company=self.company,
+            location="NYC",
+            link="https://example.com/new",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        candidate.content_fingerprint = fingerprint(candidate)
+        # Force-null the new column on the candidate to simulate a
+        # write path that hasn't been updated to populate it. The OR
+        # predicate should still match via content_fingerprint.
+        candidate.normalized_fingerprint = None
+        self.assertEqual(find_duplicate(candidate), original)
+
+    def test_both_null_skips_dedupe(self):
+        """When both fingerprint columns are null on the candidate
+        (e.g. stub post with no company), the fingerprint stage is
+        skipped entirely — neither column drives a query."""
+        candidate = JobPost(title="Orphan")
+        candidate.content_fingerprint = None
+        candidate.normalized_fingerprint = None
+        self.assertIsNone(find_duplicate(candidate))
+
+
+class TestComputeDuplicateCandidatesNormalizedFingerprint(TestCase):
+    """Phase B added a ``normalized_fingerprint`` signal to
+    ``compute_duplicate_candidates``. Surface it as a high-confidence
+    reason code so the frontend duplicate-candidates panel can render
+    the punctuation-drift twins the legacy ``fingerprint`` signal
+    silently missed."""
+
+    def setUp(self):
+        from rest_framework.test import APIRequestFactory
+
+        self.user = User.objects.create_user(
+            username="cdcphaseb", password="pass"
+        )
+        self.company = Company.objects.create(name="Allstate")
+        self.factory = APIRequestFactory()
+
+    def _request(self):
+        req = self.factory.get("/api/v1/job-posts/")
+        req.user = self.user
+        return req
+
+    def test_normalized_fingerprint_signal_emitted(self):
+        """En-dash vs hyphen pair: candidate is the en-dash version,
+        existing post is the hyphen version. Signal must surface."""
+        from job_hunting.api.serializers import compute_duplicate_candidates
+
+        existing = JobPost.objects.create(
+            title="Software Engineer - Product Security",
+            company=self.company,
+            location="Northbrook, IL",
+            link="https://linkedin.com/jobs/view/4405744429",
+            created_by=self.user,
+        )
+        existing.refresh_from_db()
+
+        candidate = JobPost.objects.create(
+            title="Software Engineer – Product Security",  # U+2013
+            company=self.company,
+            location="Northbrook, IL",
+            link="https://allstate.jobs/job/23310874",
+            created_by=self.user,
+        )
+        candidate.refresh_from_db()
+
+        # Sanity: legacy column differs, new column matches.
+        self.assertNotEqual(
+            existing.content_fingerprint, candidate.content_fingerprint
+        )
+        self.assertEqual(
+            existing.normalized_fingerprint,
+            candidate.normalized_fingerprint,
+        )
+
+        candidates = compute_duplicate_candidates(candidate, self._request())
+        self.assertEqual(len(candidates), 1)
+        signals = candidates[0]._match_signals
+        self.assertIn("normalized_fingerprint", signals)
+        # Legacy fingerprint signal must NOT fire — the columns differ.
+        self.assertNotIn("fingerprint", signals)
+        # High-confidence (same tier as the existing fingerprint signal).
+        self.assertEqual(candidates[0]._confidence, "high")
+
+    def test_both_fingerprint_signals_stack_when_columns_agree(self):
+        """When the legacy and new columns coincidentally agree (the
+        common case — no exotic punctuation in either title), the
+        candidate carries BOTH signal codes for the same hit. The
+        ``_add`` helper stacks them by candidate id."""
+        from job_hunting.api.serializers import compute_duplicate_candidates
+
+        JobPost.objects.create(
+            title="Plain Engineer",
+            company=self.company,
+            location="NYC",
+            link="https://example.com/a",
+            created_by=self.user,
+        )
+        candidate = JobPost.objects.create(
+            title="Plain Engineer",
+            company=self.company,
+            location="NYC",
+            link="https://example.com/b",
+            created_by=self.user,
+        )
+        candidate.refresh_from_db()
+
+        candidates = compute_duplicate_candidates(candidate, self._request())
+        self.assertEqual(len(candidates), 1)
+        signals = candidates[0]._match_signals
+        self.assertIn("fingerprint", signals)
+        self.assertIn("normalized_fingerprint", signals)
 
 
 class TestRollingFingerprintWindow(TestCase):

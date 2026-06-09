@@ -711,6 +711,18 @@ def compute_duplicate_candidates(post, request):
         for hit in visible.filter(content_fingerprint=post.content_fingerprint):
             _add(hit, "fingerprint", "high")
 
+    # Phase B signal — slug-folded fingerprint catches punctuation-drift
+    # twins ("Software Engineer - Product Security" U+002D hyphen vs
+    # U+2013 en-dash) that the case+whitespace fold in ``fingerprint``
+    # misses. Emitted as a separate signal code so the frontend can
+    # surface BOTH reasons when both columns coincidentally agree
+    # (the common case — _add stacks signals on the same candidate).
+    if post.normalized_fingerprint:
+        for hit in visible.filter(
+            normalized_fingerprint=post.normalized_fingerprint
+        ):
+            _add(hit, "normalized_fingerprint", "high")
+
     # Cross-platform dedup via apply_url reciprocity. Shared primitive
     # with find_duplicate — see job_post_dedupe.find_apply_url_matches.
     for hit in find_apply_url_matches(post, base_qs=visible):

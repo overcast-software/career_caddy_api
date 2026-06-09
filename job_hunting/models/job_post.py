@@ -3,7 +3,12 @@ from django.db import models
 from django.utils import timezone
 
 from .base import GetMixin
-from .job_post_dedupe import canonicalize_link, fingerprint, strip_url_trailing_junk
+from .job_post_dedupe import (
+    canonicalize_link,
+    fingerprint,
+    normalized_fingerprint,
+    strip_url_trailing_junk,
+)
 
 
 # AS2 (ActivityStreams 2.0) Public collection URI. Posts whose `audience`
@@ -129,6 +134,20 @@ class JobPost(GetMixin, models.Model):
     content_fingerprint = models.CharField(
         max_length=40, null=True, blank=True
     )
+    # Phase B sibling of ``content_fingerprint``. Computed from the slug
+    # fold of title + location (NFKC + unicode-dash/quote fold + strip
+    # punctuation) so visually-identical-but-byte-different titles
+    # collapse onto a single signal. The 2026-06-09 JP 1329 vs JP 3323
+    # pair (U+002D hyphen vs U+2013 en-dash in "Software Engineer -
+    # Product Security") is the canonical regression.
+    #
+    # Kept alongside ``content_fingerprint`` rather than replacing it —
+    # ``find_duplicate`` ORs both columns so old rows (backfilled to
+    # both, but with potentially-stale legacy hashes) still hit and the
+    # new normalization catches punctuation-drift twins.
+    normalized_fingerprint = models.CharField(
+        max_length=40, null=True, blank=True, db_index=True
+    )
     duplicate_of = models.ForeignKey(
         "self",
         on_delete=models.SET_NULL,
@@ -228,6 +247,8 @@ class JobPost(GetMixin, models.Model):
             self.canonical_link = canonicalize_link(self.link)
         if not self.content_fingerprint:
             self.content_fingerprint = fingerprint(self)
+        if not self.normalized_fingerprint:
+            self.normalized_fingerprint = normalized_fingerprint(self)
         super().save(*args, **kwargs)
 
     @property
@@ -302,6 +323,7 @@ class JobPost(GetMixin, models.Model):
         )
         candidate.canonical_link = canonicalize_link(candidate.link)
         candidate.content_fingerprint = fingerprint(candidate)
+        candidate.normalized_fingerprint = normalized_fingerprint(candidate)
         existing = find_duplicate(candidate)
         if existing:
             # Roll the dedupe window forward on this resolution path

@@ -729,11 +729,13 @@ class JobPostViewSet(BaseViewSet):
         # Populate dedupe fields pre-save so find_duplicate sees them.
         from job_hunting.models.job_post_dedupe import (
             canonicalize_link,
-            fingerprint,
             find_duplicate,
+            fingerprint,
+            normalized_fingerprint,
         )
         obj.canonical_link = canonicalize_link(obj.link)
         obj.content_fingerprint = fingerprint(obj)
+        obj.normalized_fingerprint = normalized_fingerprint(obj)
         dupe = find_duplicate(obj)
         if dupe:
             merge_empty_fields_from_attrs(dupe, attrs)

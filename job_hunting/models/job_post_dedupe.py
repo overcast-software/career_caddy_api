@@ -12,6 +12,7 @@ from datetime import timedelta
 from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from job_hunting.lib.slug import slug
 from job_hunting.lib.url_canonicalize import apply_url_rewrites
 
 
@@ -265,6 +266,43 @@ def fingerprint(post) -> str | None:
     ).hexdigest()
 
 
+def normalized_fingerprint(post) -> str | None:
+    """sha1(company_id | slug(title) | slug(location)) — Phase B sibling
+    of ``fingerprint``.
+
+    Same shape and null-skip semantics as ``fingerprint``, but with the
+    title and location passed through ``job_hunting.lib.slug.slug``
+    (NFKC fold, unicode-dash/quote fold, lowercase, strip punctuation
+    except ASCII hyphen-minus, collapse whitespace + hyphen runs).
+
+    Kills punctuation drift that the case+whitespace-only normalization
+    in ``fingerprint`` misses. The canonical regression:
+
+    - JP 1329 "Software Engineer - Product Security" (U+002D hyphen)
+      vs JP 3323 "Software Engineer – Product Security" (U+2013 en-dash)
+      — visually identical, same role, but ``fingerprint`` produced
+      different hashes because the en-dash survives the lowercase pass.
+      ``normalized_fingerprint`` folds the dash family to a single
+      ASCII hyphen-minus so both rows collapse.
+
+    Additive, not replacement — ``fingerprint`` stays the primary
+    signal (rollback path + the indexed column today). Phase B widens
+    the fingerprint stage in ``find_duplicate`` to OR both columns;
+    once the new column is trusted in prod the old one can be retired
+    as a separate future ticket.
+    """
+    if not (getattr(post, "company_id", None) and post.title):
+        return None
+    parts = [
+        str(post.company_id),
+        slug(post.title),
+        slug(post.location or ""),
+    ]
+    return hashlib.sha1(
+        "|".join(parts).encode(), usedforsecurity=False
+    ).hexdigest()
+
+
 def find_apply_url_matches(post, base_qs=None):
     """Return JobPosts duplicating `post` via apply_url reciprocity.
 
@@ -338,7 +376,9 @@ def find_duplicate(post, window_days: int = 30):
     if hit:
         return hit.canonical
 
-    if post.content_fingerprint:
+    if post.content_fingerprint or post.normalized_fingerprint:
+        from django.db.models import Q
+
         cutoff = timezone.now() - timedelta(days=window_days)
         # Rolling window on ``last_seen_at`` (NOT ``created_at``). The
         # column is bumped on every dedupe hit / scrape attach / merge
@@ -349,12 +389,22 @@ def find_duplicate(post, window_days: int = 30):
         # match is the only signal that catches cross-platform reposts
         # once the link / canonical_link diverge, and a static
         # ``created_at`` window blunts it for long-tail roles.
+        #
+        # Phase B widens the in-window predicate to OR both fingerprint
+        # columns: ``content_fingerprint`` (case+whitespace fold) and
+        # ``normalized_fingerprint`` (slug fold — unicode dashes, smart
+        # quotes, punctuation). Either-or so an old row written before
+        # the new column was populated still matches by the legacy
+        # signal, and a punctuation-drift twin (the JP 1329 / 3323
+        # en-dash vs hyphen pair) collapses by the new one.
+        fp_predicate = Q()
+        if post.content_fingerprint:
+            fp_predicate |= Q(content_fingerprint=post.content_fingerprint)
+        if post.normalized_fingerprint:
+            fp_predicate |= Q(normalized_fingerprint=post.normalized_fingerprint)
         hit = (
             JobPost.objects
-            .filter(
-                content_fingerprint=post.content_fingerprint,
-                last_seen_at__gte=cutoff,
-            )
+            .filter(fp_predicate, last_seen_at__gte=cutoff)
             .exclude(pk=post.pk)
             .order_by("created_at")
             .first()
