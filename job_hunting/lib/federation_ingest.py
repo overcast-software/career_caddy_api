@@ -381,6 +381,13 @@ def ingest_create_note(
             return _mark_rejected(federation_activity, "sticky_closed_local")
 
         _write_federated_merge_annotation(canonical, existing, activity)
+        # Roll the dedupe window forward — a federated refanout
+        # counts as a fresh "seen" event for the local row. Without
+        # this, a remote actor still posting an old role does not
+        # extend its window and the next non-link/canonical match
+        # could re-fork it.
+        from job_hunting.models.job_post_dedupe import bump_last_seen
+        bump_last_seen(existing)
         logger.info(
             "ap.5e.merged candidate_canonical=%s into local_jp=%s instance=%s",
             canonical, existing.pk, instance_host,

@@ -1,9 +1,13 @@
-from django.test import TestCase
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
+from django.test import TestCase
+from django.utils import timezone
 
 from job_hunting.models import Company, JobPost, ScrapeProfile
 from job_hunting.models.job_post_dedupe import (
     _profile_url_rewrites_for_host,
+    bump_last_seen,
     canonicalize_link,
     find_apply_url_matches,
     find_duplicate,
@@ -552,3 +556,175 @@ class TestJobPostSavePopulatesDedupeFields(TestCase):
         self.assertEqual(jp.canonical_link, "https://example.com/job/1")
         self.assertIsNotNone(jp.content_fingerprint)
         self.assertEqual(len(jp.content_fingerprint), 40)
+
+
+class TestRollingFingerprintWindow(TestCase):
+    """Regression for the rolling-window dedupe enhancement.
+
+    The 30-day fingerprint window previously queried ``created_at``,
+    blunting cross-platform dedupe for long-tail roles. JP 1329
+    (Allstate, 42 days old) was the canonical repro: a fresh capture
+    of the same role from a different host failed to dedupe.
+
+    These tests pin the contract: the window is now keyed on
+    ``last_seen_at``, and any write-path resolve-to-existing decision
+    must bump it.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="rolling", password="pass")
+        self.company = Company.objects.create(name="Allstate")
+
+    def _make_original(self, *, created_days_ago: int, last_seen_days_ago: int):
+        now = timezone.now()
+        original = JobPost.objects.create(
+            title="Software Engineer Product Security",
+            company=self.company,
+            location="Northbrook, IL",
+            link="https://linkedin.com/jobs/view/4405744429",
+            created_by=self.user,
+        )
+        # Bypass auto_now_add by going through queryset update; refresh
+        # afterwards so the in-memory instance matches.
+        JobPost.objects.filter(pk=original.pk).update(
+            created_at=now - timedelta(days=created_days_ago),
+            last_seen_at=now - timedelta(days=last_seen_days_ago),
+        )
+        original.refresh_from_db()
+        return original
+
+    def _make_candidate(self):
+        candidate = JobPost(
+            title="software engineer product security",
+            company=self.company,
+            location="Northbrook, IL",
+            link="https://allstate.jobs/job/23310874",
+        )
+        candidate.canonical_link = canonicalize_link(candidate.link)
+        candidate.content_fingerprint = fingerprint(candidate)
+        return candidate
+
+    def test_old_post_kept_alive_by_recent_last_seen_matches(self):
+        """JP 1329 case: created 42d ago but bumped 5d ago via a
+        rescrape — must still dedupe under the rolling window."""
+        original = self._make_original(
+            created_days_ago=42, last_seen_days_ago=5
+        )
+        candidate = self._make_candidate()
+        self.assertEqual(find_duplicate(candidate), original)
+
+    def test_stale_post_with_old_last_seen_does_not_match(self):
+        """Symmetric: when neither created_at nor last_seen_at is in
+        the rolling window, fingerprint dedupe correctly returns None
+        (the role is truly stale, not a long-tail repost)."""
+        self._make_original(
+            created_days_ago=120, last_seen_days_ago=120
+        )
+        candidate = self._make_candidate()
+        # Strip canonical_link so we exercise the fingerprint stage
+        # alone — the candidate's link is a different host so a
+        # canonical_link match wouldn't fire anyway, but this makes
+        # the test explicit.
+        candidate.canonical_link = None
+        self.assertIsNone(find_duplicate(candidate))
+
+    def test_bump_last_seen_advances_the_column(self):
+        """``bump_last_seen`` writes a fresh timestamp via
+        update_fields and the persisted value reflects it."""
+        original = self._make_original(
+            created_days_ago=42, last_seen_days_ago=42
+        )
+        before = original.last_seen_at
+        bump_last_seen(original)
+        original.refresh_from_db()
+        self.assertGreater(original.last_seen_at, before)
+
+    def test_merge_empty_fields_bumps_last_seen(self):
+        """The shared merge helper bumps last_seen_at on every call,
+        even when no DEDUPE_BACKFILL_FIELDS need to be filled."""
+        from job_hunting.lib.job_post_merge import (
+            merge_empty_fields_from_attrs,
+        )
+
+        original = self._make_original(
+            created_days_ago=42, last_seen_days_ago=42
+        )
+        before = original.last_seen_at
+        # No-op merge: pass an empty attrs dict so no field is written
+        # but the helper still bumps last_seen_at.
+        written = merge_empty_fields_from_attrs(original, {})
+        self.assertEqual(written, [])
+        original.refresh_from_db()
+        self.assertGreater(original.last_seen_at, before)
+
+    def test_create_path_dedupe_via_fingerprint_bumps_existing(self):
+        """Integration: a second JobPost.save() that gets routed
+        through find_duplicate (here: simulating the merge call site
+        in views/jobs.py) bumps the existing row's last_seen_at.
+
+        Original is 42 days old by created_at but was kept alive 5
+        days ago (the rolling-window enhancement's central use case
+        — JP 1329 Allstate). The fingerprint dedupe stage finds it
+        via the rolling last_seen_at predicate; the merge call site
+        then bumps last_seen_at again to reflect this new sighting."""
+        from job_hunting.lib.job_post_merge import (
+            merge_empty_fields_from_attrs,
+        )
+
+        original = self._make_original(
+            created_days_ago=42, last_seen_days_ago=5
+        )
+        before = original.last_seen_at
+
+        # Build the same-fingerprint candidate the way views/jobs.py
+        # would; resolve via find_duplicate; merge.
+        candidate = self._make_candidate()
+        candidate.canonical_link = None  # force fingerprint stage
+        dupe = find_duplicate(candidate)
+        self.assertEqual(dupe, original)
+        merge_empty_fields_from_attrs(
+            dupe,
+            {"source": "extension", "description": "Fresh capture body"},
+        )
+        original.refresh_from_db()
+        self.assertGreater(original.last_seen_at, before)
+
+
+class TestJobPostExtractorBumpsLastSeen(TestCase):
+    """Round-trip the extractor's persist tail: confirm last_seen_at
+    advances on the scrape→existing-JP resolution path."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="ext-rolling", password="pass"
+        )
+        self.company = Company.objects.create(name="Allstate")
+
+    def test_persist_tail_bumps_last_seen_on_existing_jp(self):
+        """The extractor's ``_persist`` tail calls ``bump_last_seen``
+        on every persist branch, so the post-scrape attach to an
+        existing JP advances the rolling window without needing the
+        full graph round-trip."""
+        # Simulate the bump that the extractor performs at its
+        # persist tail (``bump_last_seen(job)``). The aim of this
+        # test is not to drive the full extractor — that surface has
+        # heavy fixtures — but to lock the contract that every code
+        # path that lands on an existing JP bumps the column. The
+        # extractor test in tests/test_job_post_extractor*.py covers
+        # the graph wiring; this checks the helper's invariant.
+        now = timezone.now()
+        jp = JobPost.objects.create(
+            title="SWE",
+            company=self.company,
+            location="Remote",
+            link="https://example.com/job/x",
+            created_by=self.user,
+        )
+        JobPost.objects.filter(pk=jp.pk).update(
+            last_seen_at=now - timedelta(days=10)
+        )
+        jp.refresh_from_db()
+        old = jp.last_seen_at
+        bump_last_seen(jp)
+        jp.refresh_from_db()
+        self.assertGreater(jp.last_seen_at, old)
