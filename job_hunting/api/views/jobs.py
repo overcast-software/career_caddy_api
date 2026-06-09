@@ -224,13 +224,32 @@ class JobPostViewSet(BaseViewSet):
         # detection. Bypass the per-user-signal filter so a JobPost
         # someone else created is still visible when the user asks
         # specifically for it.
+        #
+        # Match across three URL fields, since the user may have navigated
+        # directly to a stored apply destination (e.g. an ATS landing page
+        # like allstateinsurance.contacthr.com/151916501 — see JP 1329).
+        # Without the apply_url leg, the popup would say "not tracked" on
+        # a URL we already know about, and the user would re-scrape it.
+        #
+        # NULL safety: SQL `=` never matches NULL, so a stored
+        # `apply_url IS NULL` row can't false-match against the query URL.
+        # No explicit IS NOT NULL guard needed.
         link_filter = request.query_params.get("filter[link]")
         if link_filter is not None:
             from job_hunting.models.job_post_dedupe import canonicalize_link
             canonical = canonicalize_link(link_filter)
-            qs = JobPost.objects.filter(
-                Q(link=link_filter) | Q(canonical_link=canonical)
-            )
+            # Build the OR-clause defensively. `canonicalize_link("")`
+            # returns None; `Q(field=None)` translates to `field IS NULL`,
+            # which would over-match any row whose canonical_link or
+            # apply_url is NULL (the common case for apply_url). Drop the
+            # canonical legs when the input doesn't yield a canonical
+            # form. The exact-match legs against the raw input still run
+            # and return the empty set for an empty query, which is the
+            # right behavior.
+            clauses = Q(link=link_filter) | Q(apply_url=link_filter)
+            if canonical:
+                clauses |= Q(canonical_link=canonical) | Q(apply_url=canonical)
+            qs = JobPost.objects.filter(clauses)
         elif request.user.is_staff:
             qs = JobPost.objects.all()
         else:
