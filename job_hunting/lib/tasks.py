@@ -744,3 +744,103 @@ def sweep_stale_scrape_claims(threshold_minutes: int = _DEFAULT_LEASE_MINUTES) -
         "threshold_minutes": threshold_minutes,
         "cutoff": cutoff.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# ScrapeProfile sharpen — staff-triggered enhancer pass
+# ---------------------------------------------------------------------------
+# Triggered by POST /api/v1/scrape-profiles/:id/sharpen/. The endpoint
+# enqueues this task and returns 202 with the job_id so the staff curator
+# (or the eventual /admin frontend button) can fire-and-forget.
+#
+# Integration with the agents-side `scrape-profile-enhancer` flow lives in
+# `agents/` and is NOT importable from the api container — the
+# `agents/` submodule ships as its own image (browser/Camoufox runtime).
+# Until a runnable enhancer driver lands (subprocess shell-out, MCP RPC,
+# or a runner-claimed work queue analogous to scrape-claim-next), this
+# task's body is a recorded intent: it persists the request snapshot
+# (timestamp, requester, source scrape) onto the profile so the offline
+# enhancer pass has a queue to walk, and the audit row tells staff the
+# request landed. The line marked `# ENHANCER INTEGRATION POINT` is
+# where the real driver call goes when one exists.
+#
+# This split keeps the api/agents Python boundary intact (no cross-image
+# imports) while giving the frontend a working button to wire today.
+
+
+def sharpen_scrape_profile(
+    profile_id: int,
+    *,
+    source_scrape_id: int,
+    requested_by_id: int | None = None,
+) -> dict:
+    """Record a sharpen request against a ScrapeProfile + source Scrape.
+
+    The task body re-fetches the profile and source scrape, records the
+    request onto the profile's metadata (extraction_hints log line +
+    timestamps), and emits a structured log line the offline enhancer
+    pass / future runner can pick up. The actual selector / hint
+    rewriting lives in the agents-side enhancer; this task is the api's
+    half of the contract.
+
+    Returns ``{profile_id, source_scrape_id, status}`` for the
+    django_q Task row's ``result`` column.
+    """
+    from django.utils import timezone
+
+    from job_hunting.models import Scrape, ScrapeProfile
+
+    profile = ScrapeProfile.objects.filter(pk=profile_id).first()
+    if profile is None:
+        logger.warning(
+            "sharpen_scrape_profile: profile_id=%s no longer exists",
+            profile_id,
+        )
+        return {
+            "profile_id": profile_id,
+            "source_scrape_id": source_scrape_id,
+            "status": "missing",
+        }
+
+    source_scrape = Scrape.objects.filter(pk=source_scrape_id).first()
+    if source_scrape is None:
+        logger.warning(
+            "sharpen_scrape_profile: source_scrape_id=%s no longer exists",
+            source_scrape_id,
+        )
+        return {
+            "profile_id": profile_id,
+            "source_scrape_id": source_scrape_id,
+            "status": "source_missing",
+        }
+
+    # ENHANCER INTEGRATION POINT — the agents-side scrape-profile-enhancer
+    # subagent runs out-of-process today (Claude subagent, operator-driven).
+    # When a runnable driver lands (MCP tool, subprocess shell-out, or a
+    # runner-claimed work queue), invoke it here. For now we record the
+    # request so the offline pass can walk it.
+    now = timezone.now()
+    existing_hints = profile.extraction_hints or ""
+    hint_line = (
+        f"\n[sharpen-request {now.isoformat()}] "
+        f"requested_by={requested_by_id or 'anonymous'} "
+        f"source_scrape={source_scrape_id}"
+    )
+    profile.extraction_hints = existing_hints + hint_line
+    profile.save(update_fields=["extraction_hints", "updated_at"])
+
+    logger.info(
+        "sharpen_scrape_profile: profile=%s hostname=%s source_scrape=%s "
+        "requested_by=%s — request recorded; awaiting enhancer pass",
+        profile.id,
+        profile.hostname,
+        source_scrape_id,
+        requested_by_id,
+    )
+
+    return {
+        "profile_id": profile_id,
+        "source_scrape_id": source_scrape_id,
+        "hostname": profile.hostname,
+        "status": "requested",
+    }
