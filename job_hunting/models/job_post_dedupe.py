@@ -340,11 +340,20 @@ def find_duplicate(post, window_days: int = 30):
 
     if post.content_fingerprint:
         cutoff = timezone.now() - timedelta(days=window_days)
+        # Rolling window on ``last_seen_at`` (NOT ``created_at``). The
+        # column is bumped on every dedupe hit / scrape attach / merge
+        # so a role that keeps being re-seen on different channels
+        # stays in-window past the literal 30-day cutoff from its first
+        # capture. The JP 1329 Allstate case (42 days old, rescraped
+        # from a different host) regresses without this — fingerprint
+        # match is the only signal that catches cross-platform reposts
+        # once the link / canonical_link diverge, and a static
+        # ``created_at`` window blunts it for long-tail roles.
         hit = (
             JobPost.objects
             .filter(
                 content_fingerprint=post.content_fingerprint,
-                created_at__gte=cutoff,
+                last_seen_at__gte=cutoff,
             )
             .exclude(pk=post.pk)
             .order_by("created_at")
@@ -354,3 +363,32 @@ def find_duplicate(post, window_days: int = 30):
             return hit.canonical
 
     return None
+
+
+def bump_last_seen(post, *, now=None) -> None:
+    """Set ``post.last_seen_at`` to ``now()`` and persist it.
+
+    Called from every write path that resolves an incoming JobPost
+    shell to an existing row — see the call sites in
+    ``views/jobs.py:create()``,
+    ``lib/parsers/job_post_extractor.py`` (link-hit + stub-upgrade
+    branches), ``lib/job_post_merge.py``, ``lib/federation_ingest.py``,
+    and ``models/job_post.from_json``. Bumping rolls the fingerprint
+    window forward so a long-tail role keeps being dedupe-eligible
+    while it keeps being re-seen.
+
+    Uses a targeted ``update_fields`` save so concurrent writes that
+    touch unrelated columns don't get clobbered. Idempotent — calling
+    twice in a single request is cheap (two UPDATEs hitting one
+    column) but pointless; callers should call once per dedupe
+    decision, not per field merge.
+
+    ``now`` is injected for tests; production callers should omit it
+    and let the helper pull ``timezone.now()`` itself.
+    """
+    from django.utils import timezone as _tz
+
+    if post is None or not getattr(post, "pk", None):
+        return
+    post.last_seen_at = now or _tz.now()
+    post.save(update_fields=["last_seen_at"])

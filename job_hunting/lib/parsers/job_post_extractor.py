@@ -650,6 +650,18 @@ class JobPostExtractor:
                 user_id=scrape.created_by_id,
                 defaults={"source": getattr(scrape, "source", None) or "scrape"},
             )
+
+        # Roll the dedupe window forward. Every persist branch above
+        # either created a fresh row (where last_seen_at defaults to
+        # now()) or resolved the scrape to an existing row. For the
+        # existing-row case this is the bump that keeps the row in
+        # ``find_duplicate``'s fingerprint window past 30 days — without
+        # it, a long-tail role rescraped from a different host (JP 1329
+        # / 42 days old at the rolling-window enhancement) would fall
+        # out of the window and re-fork. Cheap idempotent UPDATE on the
+        # create branch; load-bearing on the dedupe branch.
+        from job_hunting.models.job_post_dedupe import bump_last_seen
+        bump_last_seen(job)
         return True
 
     def _trust_aware_overwrite(

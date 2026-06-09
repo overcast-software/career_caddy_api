@@ -137,6 +137,26 @@ class JobPost(GetMixin, models.Model):
         related_name="duplicates",
     )
 
+    # Rolling activity timestamp for cross-platform dedupe. Bumped to
+    # ``timezone.now()`` whenever any write path resolves an incoming
+    # JobPost shell to this row (canonical_link / fingerprint /
+    # apply_url-reciprocity hit, scrape attach, federation merge).
+    # ``find_duplicate``'s 30-day fingerprint window queries this column
+    # instead of ``created_at`` so a role that keeps being re-seen on a
+    # different channel stays "alive" for dedupe past the 30-day mark.
+    #
+    # Long-tail roles (Allstate JP 1329, 42 days old at the time of the
+    # rolling-window enhancement) routinely escape the static 30-day
+    # window. Rolling the window off ``last_seen_at`` widens coverage
+    # without dragging genuinely-stale roles in — the row only stays
+    # eligible for fingerprint match while it keeps being re-seen.
+    #
+    # Default ``timezone.now`` so freshly-created rows are immediately
+    # in-window (matching the prior ``created_at``-based behavior on
+    # the create path). Historical rows are backfilled by migration
+    # 0097 to ``GREATEST(created_at, max(scrape.created_at))``.
+    last_seen_at = models.DateTimeField(default=timezone.now, db_index=True)
+
     # ActivityPub-aligned per-post visibility. Stores AS2 `audience` URI
     # strings as a JSON list. Default: a fresh `[AS2_PUBLIC]` list per row.
     # Today this field is *latent* — Phase 4's /as-object/ adapter and
@@ -167,6 +187,15 @@ class JobPost(GetMixin, models.Model):
             models.Index(
                 fields=["content_fingerprint", "-created_at"],
                 name="jobpost_fp_recent_idx",
+            ),
+            # Rolling-window fingerprint dedupe index. ``find_duplicate``
+            # queries (content_fingerprint, last_seen_at >= cutoff)
+            # ordered by created_at on every JobPost write path; without
+            # this composite the planner falls back to seq scan once the
+            # table grows beyond the fingerprint-only b-tree's locality.
+            models.Index(
+                fields=["content_fingerprint", "-last_seen_at"],
+                name="jobpost_fp_lastseen_idx",
             ),
         ]
 
@@ -275,6 +304,13 @@ class JobPost(GetMixin, models.Model):
         candidate.content_fingerprint = fingerprint(candidate)
         existing = find_duplicate(candidate)
         if existing:
+            # Roll the dedupe window forward on this resolution path
+            # too — JobPost.from_json is called from chat-server CRUD
+            # MCP tools and a handful of legacy import scripts. Bumping
+            # here keeps every dedupe-resolves-to-existing entry point
+            # symmetric with the views/jobs.py + parse_scrape paths.
+            from job_hunting.models.job_post_dedupe import bump_last_seen
+            bump_last_seen(existing)
             return existing
         job_post, _ = cls.objects.get_or_create(
             title=candidate.title,
