@@ -156,6 +156,28 @@ class JobPost(GetMixin, models.Model):
         related_name="duplicates",
     )
 
+    # Phase C of the dedupe redesign — repost relation.
+    #
+    # A *duplicate* is "same hiring cycle, collapse into one row";
+    # ``duplicate_of`` is the canonical pointer for that collapse.
+    # A *repost* is "different hiring cycle for the same role — same
+    # company re-posted weeks/months later". Both rows stay queryable
+    # independently (no collapse), but the relation is recorded so the
+    # frontend can surface "this role has been listed before" and the
+    # dedupe-feedback report can reason about repost cadence.
+    #
+    # SET_NULL on delete so a delete of the upstream row doesn't cascade
+    # away the downstream repost. ``related_name="reposts"`` reverses to
+    # ``original.reposts.all()`` for "find every later listing of the
+    # same role" without needing a join.
+    reposted_from = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reposts",
+    )
+
     # Rolling activity timestamp for cross-platform dedupe. Bumped to
     # ``timezone.now()`` whenever any write path resolves an incoming
     # JobPost shell to this row (canonical_link / fingerprint /

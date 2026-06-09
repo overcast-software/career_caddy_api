@@ -303,3 +303,355 @@ class TestDuplicatesList(_Base):
     def test_404_when_post_does_not_exist(self):
         resp = self.client.get("/api/v1/job-posts/999999/duplicates/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class TestMarkDuplicateFieldOverrides(_Base):
+    """Phase C — ``field_overrides`` lets the operator carry the
+    caller's (A) value for one or more allowlisted fields onto the
+    target (B) BEFORE the duplicate-link is set, so the canonical row
+    picks up the better content surfaced on the dupe."""
+
+    def _url(self, jp):
+        return f"/api/v1/job-posts/{jp.id}/mark-duplicate-of/"
+
+    def test_override_title_from_a_to_b(self):
+        # A has the better title; the operator wants B (the canonical)
+        # to inherit it before A collapses into B.
+        a = self._post(
+            "Senior Software Engineer - Product Security",
+            link="https://example.com/a",
+        )
+        b = self._post("SSE PS", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a),
+            {
+                "target_id": b.id,
+                "field_overrides": {"title": "A"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        b.refresh_from_db()
+        a.refresh_from_db()
+        self.assertEqual(
+            b.title, "Senior Software Engineer - Product Security"
+        )
+        # Duplicate link is set AFTER the override applies.
+        self.assertEqual(a.duplicate_of_id, b.id)
+
+    def test_override_b_choice_is_noop(self):
+        # Choosing "B" for a field means "keep the target's value" — no
+        # mutation on the target.
+        a = self._post("A title", link="https://example.com/a")
+        b = self._post("B title", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a),
+            {
+                "target_id": b.id,
+                "field_overrides": {"title": "B"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        b.refresh_from_db()
+        self.assertEqual(b.title, "B title")
+
+    def test_override_records_into_signal_state(self):
+        a = self._post("A new title", link="https://example.com/a")
+        b = self._post("B old title", link="https://example.com/b")
+        self.client.post(
+            self._url(a),
+            {
+                "target_id": b.id,
+                "field_overrides": {"title": "A", "location": "B"},
+            },
+            format="json",
+        )
+        ann = DuplicateAnnotation.objects.get(from_jp_id=a.id, action="mark")
+        self.assertEqual(
+            ann.signal_state.get("field_overrides"),
+            {"title": "A", "location": "B"},
+        )
+        # Relation defaults to "duplicate" when omitted.
+        self.assertEqual(ann.signal_state.get("relation"), "duplicate")
+
+    def test_override_applies_before_link_is_set(self):
+        # Regression guard: if the target save fails mid-flight, the
+        # link must NOT already be in place pointing at stale content.
+        # We can't trigger an actual failure here, but we can assert
+        # the order via DB state — the target's overridden field is
+        # present at the same instant duplicate_of_id is set.
+        a = self._post("Operator-preferred title", link="https://example.com/a")
+        b = self._post("Bad title", link="https://example.com/b")
+        self.client.post(
+            self._url(a),
+            {"target_id": b.id, "field_overrides": {"title": "A"}},
+            format="json",
+        )
+        a.refresh_from_db()
+        b.refresh_from_db()
+        # Both invariants hold post-call.
+        self.assertEqual(b.title, "Operator-preferred title")
+        self.assertEqual(a.duplicate_of_id, b.id)
+
+    def test_override_rejects_unknown_field(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a),
+            {
+                "target_id": b.id,
+                "field_overrides": {"created_by": "A"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        a.refresh_from_db()
+        self.assertIsNone(a.duplicate_of_id)
+
+    def test_override_rejects_invalid_choice(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a),
+            {
+                "target_id": b.id,
+                "field_overrides": {"title": "C"},
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_override_rejects_non_object(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a),
+            {"target_id": b.id, "field_overrides": ["title"]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestMarkRepost(_Base):
+    """Phase C — ``relation: "repost"`` writes ``reposted_from`` instead
+    of ``duplicate_of`` so both rows stay queryable independently."""
+
+    def _url(self, jp):
+        return f"/api/v1/job-posts/{jp.id}/mark-duplicate-of/"
+
+    def test_relation_repost_sets_reposted_from(self):
+        original = self._post("Engineer", link="https://example.com/orig")
+        repost = self._post("Engineer", link="https://example.com/repost")
+        resp = self.client.post(
+            self._url(repost),
+            {"target_id": original.id, "relation": "repost"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        repost.refresh_from_db()
+        self.assertEqual(repost.reposted_from_id, original.id)
+        # Critical: the duplicate pointer stays null on a repost.
+        self.assertIsNone(repost.duplicate_of_id)
+
+    def test_relation_repost_keeps_both_rows_queryable(self):
+        # Reposts don't collapse — both rows must still be retrievable
+        # via their own GET endpoint.
+        original = self._post("Engineer", link="https://example.com/orig")
+        repost = self._post("Engineer", link="https://example.com/repost")
+        self.client.post(
+            self._url(repost),
+            {"target_id": original.id, "relation": "repost"},
+            format="json",
+        )
+
+        r_original = self.client.get(f"/api/v1/job-posts/{original.id}/")
+        r_repost = self.client.get(f"/api/v1/job-posts/{repost.id}/")
+        self.assertEqual(r_original.status_code, status.HTTP_200_OK)
+        self.assertEqual(r_repost.status_code, status.HTTP_200_OK)
+
+    def test_relation_repost_records_mark_repost_action(self):
+        original = self._post("Engineer", link="https://example.com/orig")
+        repost = self._post("Engineer", link="https://example.com/repost")
+        self.client.post(
+            self._url(repost),
+            {"target_id": original.id, "relation": "repost"},
+            format="json",
+        )
+        ann = DuplicateAnnotation.objects.get(
+            from_jp_id=repost.id, action="mark_repost"
+        )
+        self.assertEqual(ann.to_jp_id, original.id)
+        self.assertEqual(ann.signal_state.get("relation"), "repost")
+
+    def test_relation_repost_with_field_overrides(self):
+        original = self._post("Engineer", link="https://example.com/orig")
+        repost = self._post(
+            "Senior Engineer", link="https://example.com/repost"
+        )
+        self.client.post(
+            self._url(repost),
+            {
+                "target_id": original.id,
+                "relation": "repost",
+                "field_overrides": {"title": "A"},
+            },
+            format="json",
+        )
+        original.refresh_from_db()
+        repost.refresh_from_db()
+        # Override copies repost's title onto the original (the
+        # mechanic is the same regardless of relation).
+        self.assertEqual(original.title, "Senior Engineer")
+        self.assertEqual(repost.reposted_from_id, original.id)
+        self.assertIsNone(repost.duplicate_of_id)
+
+    def test_relation_repost_rejects_self_target(self):
+        a = self._post("A", link="https://example.com/a")
+        resp = self.client.post(
+            self._url(a),
+            {"target_id": a.id, "relation": "repost"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_relation_repost_allows_back_link_pattern(self):
+        # Repost doesn't participate in the canonical walk, so a
+        # reciprocal link that would have been a cycle under
+        # ``duplicate_of`` is fine here. Confirms Phase C's "no cycle
+        # check on repost" stance.
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        # b is already a repost of a — marking a as a repost of b is
+        # allowed; both rows stay queryable.
+        b.reposted_from = a
+        b.save(update_fields=["reposted_from"])
+        resp = self.client.post(
+            self._url(a),
+            {"target_id": b.id, "relation": "repost"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        a.refresh_from_db()
+        self.assertEqual(a.reposted_from_id, b.id)
+
+    def test_invalid_relation_rejected(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a),
+            {"target_id": b.id, "relation": "sibling"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestMarkDuplicateBackwardCompat(_Base):
+    """Phase C regression guard: when neither ``relation`` nor
+    ``field_overrides`` is supplied, behavior must match pre-Phase-C
+    exactly — sets ``duplicate_of`` and writes a ``mark`` annotation."""
+
+    def _url(self, jp):
+        return f"/api/v1/job-posts/{jp.id}/mark-duplicate-of/"
+
+    def test_no_extras_writes_mark_action_only(self):
+        a = self._post("A", link="https://example.com/a")
+        b = self._post("B", link="https://example.com/b")
+        resp = self.client.post(
+            self._url(a), {"target_id": b.id}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        a.refresh_from_db()
+        self.assertEqual(a.duplicate_of_id, b.id)
+        self.assertIsNone(a.reposted_from_id)
+        ann = DuplicateAnnotation.objects.get(from_jp_id=a.id)
+        self.assertEqual(ann.action, "mark")
+        # Signal state still carries the new keys, but with empty /
+        # default values so the report can analyze uniformly.
+        self.assertEqual(ann.signal_state.get("relation"), "duplicate")
+        self.assertEqual(ann.signal_state.get("field_overrides"), {})
+
+
+class TestComputeDuplicateCandidatesRepost(TestCase):
+    """Phase C — ``compute_duplicate_candidates`` emits a ``repost``
+    reason code (in place of ``normalized_fingerprint``) when the
+    candidate is older than
+    ``settings.DEDUPE_REPOST_THRESHOLD_DAYS``."""
+
+    def setUp(self):
+        from rest_framework.test import APIRequestFactory
+        self.user = User.objects.create_user(
+            username="repostuser", password="pw"
+        )
+        self.company = Company.objects.create(name="Allstate")
+        self.factory = APIRequestFactory()
+
+    def _request(self):
+        req = self.factory.get("/api/v1/job-posts/")
+        req.user = self.user
+        return req
+
+    def _make_post(self, *, title, link, created_days_ago=0):
+        from django.utils import timezone
+        from datetime import timedelta
+        post = JobPost.objects.create(
+            title=title,
+            company=self.company,
+            location="Northbrook, IL",
+            link=link,
+            created_by=self.user,
+        )
+        if created_days_ago:
+            now = timezone.now()
+            JobPost.objects.filter(pk=post.pk).update(
+                created_at=now - timedelta(days=created_days_ago),
+            )
+            post.refresh_from_db()
+        return post
+
+    def test_emits_repost_when_gap_exceeds_threshold(self):
+        from job_hunting.api.serializers import compute_duplicate_candidates
+
+        # Existing row is 30 days old, threshold is 14 days → repost.
+        self._make_post(
+            title="Engineer", link="https://ex.com/1", created_days_ago=30,
+        )
+        candidate = self._make_post(
+            title="Engineer", link="https://ex.com/2",
+        )
+        items = compute_duplicate_candidates(candidate, self._request())
+        self.assertEqual(len(items), 1)
+        signals = items[0]._match_signals
+        self.assertIn("repost", signals)
+        self.assertNotIn("normalized_fingerprint", signals)
+
+    def test_emits_normalized_fingerprint_within_threshold(self):
+        from job_hunting.api.serializers import compute_duplicate_candidates
+
+        # Existing row is fresh (default created_at = now) → still the
+        # ordinary normalized_fingerprint code (Phase B behavior).
+        self._make_post(title="Engineer", link="https://ex.com/1")
+        candidate = self._make_post(title="Engineer", link="https://ex.com/2")
+        items = compute_duplicate_candidates(candidate, self._request())
+        self.assertEqual(len(items), 1)
+        signals = items[0]._match_signals
+        self.assertIn("normalized_fingerprint", signals)
+        self.assertNotIn("repost", signals)
+
+    def test_threshold_respects_setting_override(self):
+        from django.test import override_settings
+        from job_hunting.api.serializers import compute_duplicate_candidates
+
+        # 10-day-old candidate against a 7-day threshold → repost.
+        self._make_post(
+            title="Engineer", link="https://ex.com/1", created_days_ago=10,
+        )
+        candidate = self._make_post(
+            title="Engineer", link="https://ex.com/2",
+        )
+        with override_settings(DEDUPE_REPOST_THRESHOLD_DAYS=7):
+            items = compute_duplicate_candidates(
+                candidate, self._request()
+            )
+        self.assertEqual(len(items), 1)
+        self.assertIn("repost", items[0]._match_signals)
