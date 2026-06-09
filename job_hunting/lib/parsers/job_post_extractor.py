@@ -22,6 +22,7 @@ from job_hunting.lib.services.application_flow import STUB_MIN_WORDS
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 from job_hunting.models import (
     Company,
+    CompanyAlias,
     JobPost,
     JobPostDiscovery,
     JobPostOverwriteDecision,
@@ -256,6 +257,121 @@ class JobPostExtractor:
     def _is_placeholder(self, value: str) -> bool:
         return (value or "").strip().lower() in self._PLACEHOLDER_NAMES
 
+    def _resolve_company(self, scrape: Scrape, validated_data) -> Company:
+        """Find or mint the Company for ``validated_data.company_name``.
+
+        Phase A of the dedupe redesign. Order of operations:
+
+        1. ``Company.find_by_alias(name)`` — exact match on
+           ``slug(strip_corp_suffix(name))`` against
+           ``CompanyAlias.name_slug``. Hit → attach to that Company.
+        2. Literal-name ``get_or_create`` fallback — protects the
+           pre-alias rollout window where some Companies have not yet
+           been backfilled into the alias table.
+        3. On a fresh mint, write a self-alias row
+           (``source="extraction"``) so the next capture of the same
+           name finds it via step 1, AND stash the top-3 trigram-
+           similar candidates on the scrape for staff review.
+
+        Fuzzy similarity is presentation-only — it never auto-attaches.
+        The fuzzy candidates feed the "Suggested companies" callout
+        the frontend renders on Scrape show.
+        """
+        from job_hunting.lib.slug import slug, strip_corp_suffix
+
+        name = validated_data.company_name
+        display_name = validated_data.company_display_name
+
+        # Step 1: exact alias match.
+        existing = Company.find_by_alias(name)
+        if existing is not None:
+            return existing
+
+        # Step 2: literal-name fallback. During the rollout window not
+        # every Company has been alias-backfilled yet; we still want
+        # to attach to existing rows by literal name rather than mint
+        # a duplicate. MultipleObjectsReturned defensively guarded —
+        # ``name`` is unique on the model but historic data can race.
+        try:
+            company, created = Company.objects.get_or_create(
+                name=name,
+                defaults={"display_name": display_name},
+            )
+        except Company.MultipleObjectsReturned:
+            company = Company.objects.filter(name=name).first()
+            created = False
+
+        if not created:
+            return company
+
+        # Step 3a: write the self-alias for the just-minted Company so
+        # future captures of the same name hit step 1 instead of
+        # racing here again. Guard against the unlikely case of two
+        # mints colliding on the same slug in the same transaction —
+        # the unique constraint on name_slug makes that a no-op.
+        candidate_slug = slug(strip_corp_suffix(name))
+        if candidate_slug:
+            CompanyAlias.objects.get_or_create(
+                name_slug=candidate_slug,
+                defaults={
+                    "company": company,
+                    "name": name,
+                    "source": CompanyAlias.SOURCE_EXTRACTION,
+                },
+            )
+
+        # Step 3b: stash top-3 trigram-similar alias rows for staff
+        # review. No minimum score threshold — always stash exactly
+        # three (or fewer if the table is small). Surfaced by the
+        # frontend as a "Suggested companies" callout on Scrape show;
+        # the staff curator hits "Merge into…" if a suggestion is in
+        # fact the same entity.
+        try:
+            suggestions = self._compute_company_suggestions(name, company)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception(
+                "Failed to compute trigram suggestions for Company %s (%r): %s",
+                company.id,
+                name,
+                exc,
+            )
+            suggestions = []
+        if suggestions:
+            scrape.company_suggestions = suggestions
+            scrape.save(update_fields=["company_suggestions"])
+
+        return company
+
+    @staticmethod
+    def _compute_company_suggestions(name: str, just_created: Company) -> list:
+        """Return top-3 trigram-similar Companies as JSON-ready dicts.
+
+        Excludes ``just_created`` from the result so the suggestion
+        list is always "other Companies that look similar" — the
+        fresh row would otherwise dominate its own suggestion set
+        because the self-alias name slug is an exact match.
+        """
+        from django.contrib.postgres.search import TrigramSimilarity
+        from job_hunting.lib.slug import slug, strip_corp_suffix
+
+        candidate_slug = slug(strip_corp_suffix(name))
+        if not candidate_slug:
+            return []
+        qs = (
+            CompanyAlias.objects.exclude(company_id=just_created.id)
+            .annotate(similarity=TrigramSimilarity("name_slug", candidate_slug))
+            .order_by("-similarity")
+            .values("company_id", "name", "similarity")[:3]
+        )
+        return [
+            {
+                "company_id": row["company_id"],
+                "name": row["name"],
+                "similarity": float(row["similarity"]) if row["similarity"] is not None else 0.0,
+            }
+            for row in qs
+        ]
+
     def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None, force: bool = False) -> bool:
         self.last_outcome = "created"
         if self._is_placeholder(validated_data.title):
@@ -270,13 +386,17 @@ class JobPostExtractor:
             return False
 
         # Find or create company — Company is a shared resource (no user scoping).
-        try:
-            company, _ = Company.objects.get_or_create(
-                name=validated_data.company_name,
-                defaults={"display_name": validated_data.company_display_name},
-            )
-        except Company.MultipleObjectsReturned:
-            company = Company.objects.filter(name=validated_data.company_name).first()
+        #
+        # Phase A of the dedupe redesign: gate on
+        # ``Company.find_by_alias`` first (exact ``CompanyAlias.name_slug``
+        # match), then fall back to literal ``name`` get_or_create, and on
+        # mint of a fresh row write the self-alias plus stash top-3
+        # trigram-similar candidates on the scrape for staff review. The
+        # fuzzy candidates NEVER auto-attach — Doug's option (b) gate: only
+        # exact ``name_slug`` match auto-resolves. See plan
+        # ``go-over-this-plan-staged-sutherland.md`` Phase A and api
+        # notes.org ``Architecture/Dedupe pipeline contract``.
+        company = self._resolve_company(scrape, validated_data)
 
         # Effective description: prefer LLM output; fall back to the
         # user's raw paste when the LLM omitted it AND the scrape is

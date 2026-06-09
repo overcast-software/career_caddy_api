@@ -1,5 +1,6 @@
 import math
 
+from django.db import transaction
 from django.db.models import Max, Q
 from rest_framework import status
 from rest_framework.decorators import action
@@ -21,6 +22,8 @@ from ..serializers import (
 )
 from job_hunting.models import (
     Company,
+    CompanyAlias,
+    DuplicateAnnotation,
     JobPost,
     JobApplication,
     Score,
@@ -253,4 +256,159 @@ class CompanyViewSet(BaseViewSet):
         )
         data = [QuestionSerializer().to_resource(q) for q in questions_list]
         return Response({"data": data})
+
+    @extend_schema(
+        tags=["Companies"],
+        summary="Merge this company into another (staff only)",
+        responses={
+            200: _JSONAPI_LIST,
+            400: None,
+            403: None,
+            404: None,
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="merge-into")
+    def merge_into(self, request, pk=None):
+        """Move all FKs from this Company into ``target_id`` and delete source.
+
+        Phase A of the dedupe redesign. Staff-only — destructive
+        operation that consolidates duplicate Company rows. The
+        sequence is wrapped in a single atomic block so the database
+        either reaches the target-only state or remains untouched.
+
+        Body shape (plain JSON or JSON:API both accepted):
+
+            {"target_id": <int>}
+            {"data": {"attributes": {"target_id": <int>}}}
+
+        Side effects:
+        - ``JobPost.company_id`` and ``Scrape.company_id`` and
+          ``JobApplication.company_id`` rows pointing at ``pk`` are
+          repointed at ``target_id``.
+        - ``CompanyAlias.company_id`` rows are repointed. Unique
+          collisions on ``name_slug`` are dropped (the target's
+          version wins; the source's row is deleted).
+        - The source Company is deleted.
+        - One ``DuplicateAnnotation`` row is written with
+          ``action="company_merge"``; ``signal_state`` captures
+          source + target + counts. When the source Company has at
+          least one moved JobPost, that JP anchors the annotation's
+          ``from_jp`` FK; when there were zero moved JPs, no
+          annotation row is written (the operation is still logged).
+        """
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Only staff may merge companies."}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        source = Company.objects.filter(pk=pk).first()
+        if not source:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        # Body parse: accept both plain JSON and JSON:API shapes.
+        target_id = self._extract_target_id(request.data)
+        if target_id is None:
+            return Response(
+                {"errors": [{"detail": "target_id is required."}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            target_id = int(target_id)
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "target_id must be an integer."}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if target_id == source.id:
+            return Response(
+                {"errors": [{"detail": "Cannot merge a company into itself."}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        target = Company.objects.filter(pk=target_id).first()
+        if not target:
+            return Response(
+                {"errors": [{"detail": "target Company not found."}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        with transaction.atomic():
+            # Move JobPost FKs first so we can pick an anchor for the
+            # audit annotation BEFORE the source is deleted.
+            moved_jobposts = list(
+                JobPost.objects.filter(company_id=source.id).values_list("id", flat=True)
+            )
+            JobPost.objects.filter(company_id=source.id).update(company_id=target.id)
+
+            # Move Scrape + JobApplication FKs the same way — staff
+            # would otherwise have orphans pointing at a deleted
+            # Company once we delete the source.
+            Scrape.objects.filter(company_id=source.id).update(company_id=target.id)
+            JobApplication.objects.filter(company_id=source.id).update(
+                company_id=target.id
+            )
+
+            # Move alias rows. Any source alias whose name_slug
+            # collides with an existing alias on the target (because
+            # both Companies carried the same slug variant) is dropped
+            # — the target's row remains. Without the collision check
+            # the UPDATE would hit the global UNIQUE on name_slug and
+            # 500 the whole merge.
+            target_alias_slugs = set(
+                CompanyAlias.objects.filter(company_id=target.id)
+                .values_list("name_slug", flat=True)
+            )
+            source_aliases = list(CompanyAlias.objects.filter(company_id=source.id))
+            moved_alias_count = 0
+            for alias in source_aliases:
+                if alias.name_slug in target_alias_slugs:
+                    alias.delete()
+                else:
+                    alias.company_id = target.id
+                    alias.save(update_fields=["company"])
+                    moved_alias_count += 1
+
+            signal_state = {
+                "source_company_id": source.id,
+                "source_company_name": source.name,
+                "target_company_id": target.id,
+                "moved_jobpost_count": len(moved_jobposts),
+                "moved_alias_count": moved_alias_count,
+            }
+
+            # Audit annotation. ``from_jp`` is non-nullable on the
+            # model so we anchor on the first moved JP when one exists.
+            # Zero-JP merges (Company minted by a typo-only path) skip
+            # the annotation row — the merge is still observable via
+            # the deletion + the response payload.
+            if moved_jobposts:
+                anchor_jp_id = moved_jobposts[0]
+                DuplicateAnnotation.objects.create(
+                    from_jp_id=anchor_jp_id,
+                    to_jp_id=anchor_jp_id,
+                    previous_to=None,
+                    action="company_merge",
+                    set_by=request.user if request.user.is_authenticated else None,
+                    signal_state=signal_state,
+                )
+
+            source.delete()
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(target)}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _extract_target_id(payload):
+        """Pull ``target_id`` from plain-JSON or JSON:API body shapes."""
+        if not isinstance(payload, dict):
+            return None
+        if "target_id" in payload:
+            return payload["target_id"]
+        data = payload.get("data")
+        if isinstance(data, dict):
+            attrs = data.get("attributes") or {}
+            if isinstance(attrs, dict) and "target_id" in attrs:
+                return attrs["target_id"]
+        return None
 
