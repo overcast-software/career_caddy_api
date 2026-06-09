@@ -1050,19 +1050,66 @@ class JobPostViewSet(BaseViewSet):
         ser = self.get_serializer()
         return Response({"data": [ser.to_resource(r) for r in rows]})
 
+    # Phase C field-override allowlist. Operators can ask the verb to
+    # carry a specific field's value from the caller's JP ("from") into
+    # the target ("to") BEFORE the duplicate-link is set, so the
+    # canonical row picks up the better title / description / apply_url
+    # surfaced on the dupe. Keep this list small and explicit — only
+    # user-visible content fields, never ownership, never timestamps,
+    # never dedupe-pipeline columns (canonical_link, fingerprints).
+    _FIELD_OVERRIDE_ALLOWLIST = (
+        "title",
+        "description",
+        "apply_url",
+        "location",
+        "company",
+    )
+
+    # Phase C — relation values the verb accepts. ``duplicate`` (default)
+    # writes ``duplicate_of`` (collapse). ``repost`` writes
+    # ``reposted_from`` (keep both rows queryable, link them).
+    _RELATION_DUPLICATE = "duplicate"
+    _RELATION_REPOST = "repost"
+    _VALID_RELATIONS = (_RELATION_DUPLICATE, _RELATION_REPOST)
+
     @extend_schema(
         tags=["Job Posts"],
-        summary="Mark this job post as a duplicate of another",
+        summary="Mark this job post as a duplicate or repost of another",
         request={"application/json": {"type": "object", "properties": {
-            "target_id": {"type": "integer"}
+            "target_id": {"type": "integer"},
+            "relation": {
+                "type": "string",
+                "enum": ["duplicate", "repost"],
+            },
+            "field_overrides": {
+                "type": "object",
+                "additionalProperties": {"type": "string", "enum": ["A", "B"]},
+            },
         }}},
         responses={200: _JSONAPI_ITEM, 400: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
     )
     @action(detail=True, methods=["post"], url_path="mark-duplicate-of")
     def mark_duplicate_of(self, request, pk=None):
-        """Set this post's duplicate_of to `target_id`. Caller must have
-        BOTH posts in their visibility set (staff bypass). Rejects self-
-        target and any chain that would form a cycle."""
+        """Link this post (A = ``from``) to ``target_id`` (B = ``to``).
+
+        Default relation ``duplicate`` writes ``duplicate_of`` and
+        collapses the cluster. Relation ``repost`` writes
+        ``reposted_from`` instead — both rows remain queryable
+        independently (Phase C).
+
+        ``field_overrides`` is an optional map of
+        ``{field: "A"|"B"}`` over the allowlist
+        (title/description/apply_url/location/company). For each entry,
+        the target's value is overwritten with the chosen JP's value
+        BEFORE the relation is set, so the canonical row carries the
+        operator's preferred content. Saved before the relation write
+        so a partial failure doesn't leave the link in place with stale
+        target content.
+
+        Caller must have BOTH posts in their visibility set (staff
+        bypass). Rejects self-target. Duplicate relation also rejects
+        any chain that would form a cycle (repost can't cycle since it
+        doesn't participate in the canonical walk)."""
         visible = self._visible_jobpost_qs(request)
         post = visible.filter(pk=pk).first()
         if not post:
@@ -1088,27 +1135,119 @@ class JobPostViewSet(BaseViewSet):
                 status=404,
             )
 
-        # Cycle check: walk target.canonical chain; if we encounter `post`,
-        # the assignment would create a loop.
-        seen, cur = {post.id}, target
-        while cur is not None:
-            if cur.id in seen:
+        relation = data.get("relation") or self._RELATION_DUPLICATE
+        if relation not in self._VALID_RELATIONS:
+            return Response(
+                {"errors": [{
+                    "detail": (
+                        "relation must be 'duplicate' or 'repost'"
+                    ),
+                }]},
+                status=400,
+            )
+
+        # Field overrides: caller-supplied map of {field: "A" | "B"}
+        # over the allowlist. Reject unknown fields up-front so a
+        # typo doesn't silently become a no-op; the operator deserves
+        # an immediate 400 with the bad key called out.
+        raw_overrides = data.get("field_overrides") or {}
+        if not isinstance(raw_overrides, dict):
+            return Response(
+                {"errors": [{
+                    "detail": "field_overrides must be an object",
+                }]},
+                status=400,
+            )
+        normalized_overrides = {}
+        for field, choice in raw_overrides.items():
+            if field not in self._FIELD_OVERRIDE_ALLOWLIST:
                 return Response(
-                    {"errors": [{"detail": "Would create a duplicate cycle"}]},
+                    {"errors": [{
+                        "detail": (
+                            f"field_overrides[{field}] is not in the "
+                            "allowlist (title, description, apply_url, "
+                            "location, company)"
+                        ),
+                    }]},
                     status=400,
                 )
-            seen.add(cur.id)
-            cur = cur.duplicate_of
+            if choice not in ("A", "B"):
+                return Response(
+                    {"errors": [{
+                        "detail": (
+                            f"field_overrides[{field}] must be 'A' or 'B'"
+                        ),
+                    }]},
+                    status=400,
+                )
+            normalized_overrides[field] = choice
 
-        previous_to_id = post.duplicate_of_id
+        # Cycle check only applies to the duplicate relation — repost
+        # doesn't participate in the canonical walk, so it can't loop.
+        if relation == self._RELATION_DUPLICATE:
+            seen, cur = {post.id}, target
+            while cur is not None:
+                if cur.id in seen:
+                    return Response(
+                        {"errors": [{"detail": "Would create a duplicate cycle"}]},
+                        status=400,
+                    )
+                seen.add(cur.id)
+                cur = cur.duplicate_of
+
+        # Field overrides apply BEFORE the relation write so a partial
+        # failure can't leave the target carrying stale content with
+        # the link already in place. The chosen-from-A path copies the
+        # caller's value onto the target; chosen-from-B is a no-op
+        # (target already has its own value). Persist with
+        # update_fields so we don't accidentally overwrite unrelated
+        # fields touched between read and save.
+        target_updates = []
+        for field, choice in normalized_overrides.items():
+            if choice != "A":
+                continue
+            if field == "company":
+                # FK override copies the relation id, not the model
+                # instance, so we don't drag an attached company object
+                # along and we don't need to refresh ``target.company``.
+                new_value = post.company_id
+                if target.company_id != new_value:
+                    target.company_id = new_value
+                    target_updates.append("company")
+            else:
+                new_value = getattr(post, field)
+                if getattr(target, field) != new_value:
+                    setattr(target, field, new_value)
+                    target_updates.append(field)
+        if target_updates:
+            target.save(update_fields=target_updates)
+
+        previous_to_id = (
+            post.duplicate_of_id
+            if relation == self._RELATION_DUPLICATE
+            else post.reposted_from_id
+        )
         signals = self._snapshot_duplicate_signals(post, request)
-        post.duplicate_of_id = target.id
-        post.save(update_fields=["duplicate_of_id"])
+        # Stash override + relation into the audit payload so the
+        # dedupe-feedback report can analyze override patterns and
+        # repost cadence without re-deriving from the bare action enum.
+        signals["field_overrides"] = normalized_overrides
+        signals["relation"] = relation
+
+        if relation == self._RELATION_REPOST:
+            post.reposted_from_id = target.id
+            post.save(update_fields=["reposted_from_id"])
+            action_value = "mark_repost"
+        else:
+            post.duplicate_of_id = target.id
+            post.save(update_fields=["duplicate_of_id"])
+            action_value = "mark"
+
         self._record_duplicate_annotation(
             from_jp=post,
             to_jp_id=target.id,
             previous_to_id=previous_to_id,
-            action="mark",
+            action=action_value,
             request=request,
             signal_state=signals,
         )

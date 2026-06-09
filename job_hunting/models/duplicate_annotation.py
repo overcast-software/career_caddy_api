@@ -34,6 +34,15 @@ class DuplicateAnnotation(models.Model):
     # source_company_name, target_company_id, moved counts). Merges
     # of zero-JP Companies skip this row entirely.
     COMPANY_MERGE = "company_merge"
+    # Phase C dedupe redesign — written by ``mark_duplicate_of`` when
+    # the caller passes ``relation: "repost"``. Distinguishes "same
+    # hiring cycle, collapse" (action="mark", writes
+    # ``duplicate_of``) from "different hiring cycle, link but keep
+    # both queryable" (action="mark_repost", writes
+    # ``reposted_from``). ``to_jp`` is the upstream row both flavors;
+    # the disambiguation is in the action enum + ``signal_state``
+    # carrying ``{"relation": "repost"}`` for redundancy.
+    MARK_REPOST = "mark_repost"
 
     ACTIONS = [
         (MARK, "mark"),
@@ -42,6 +51,7 @@ class DuplicateAnnotation(models.Model):
         (HISTORICAL, "historical"),
         (FEDERATED_MERGE, "federated_merge"),
         (COMPANY_MERGE, "company_merge"),
+        (MARK_REPOST, "mark_repost"),
     ]
 
     from_jp = models.ForeignKey(

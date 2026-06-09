@@ -423,6 +423,25 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:4200")
 # JobPost.source_instance against this value.
 CAREER_CADDY_INSTANCE = os.environ.get("CAREER_CADDY_INSTANCE", "localhost")
 
+# Phase C dedupe redesign — repost threshold (days). When two
+# JobPosts share a ``normalized_fingerprint`` and the candidate is
+# this many days older than ``now()``, ``compute_duplicate_candidates``
+# emits the ``"repost"`` reason code instead of
+# ``"normalized_fingerprint"``. The intuition: a slug-fold match
+# inside the active hiring window is almost always the same role
+# being re-listed for cross-platform dedupe; a slug-fold match across
+# a multi-week gap is the company posting the same role in a NEW
+# hiring cycle (same role, different cycle — operator should keep
+# both rows linked but independently queryable).
+#
+# 14 days is the default tuning point — short enough to bias toward
+# "same cycle" for normal cross-posting noise, long enough that the
+# typical 2-3 week re-listing rhythm crosses it. Per-deployment
+# tunable via the env var of the same name.
+DEDUPE_REPOST_THRESHOLD_DAYS = int(
+    os.environ.get("DEDUPE_REPOST_THRESHOLD_DAYS", "14")
+)
+
 # INSTANCE_ORIGIN — full origin (scheme + host[+port]) used to mint
 # every ActivityPub URI this instance emits: actor IDs, object IDs,
 # WebFinger ``links.href``, future Outbox / Inbox URIs. Splitting this

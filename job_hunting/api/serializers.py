@@ -717,11 +717,31 @@ def compute_duplicate_candidates(post, request):
     # misses. Emitted as a separate signal code so the frontend can
     # surface BOTH reasons when both columns coincidentally agree
     # (the common case — _add stacks signals on the same candidate).
+    #
+    # Phase C upgrade — when the slug-fold matches but the candidate is
+    # OLDER than ``settings.DEDUPE_REPOST_THRESHOLD_DAYS``, this is
+    # almost certainly a repost (same role, new hiring cycle) rather
+    # than the same active listing seen on a sibling channel. Emit the
+    # ``"repost"`` reason code so the frontend duplicate-candidates
+    # panel can route the user to the repost-link verb rather than the
+    # collapse-duplicate verb. The threshold is configurable per
+    # deployment via the env var of the same name; default 14 days.
     if post.normalized_fingerprint:
+        from django.conf import settings as _dj_settings
+        from datetime import timedelta
+        from django.utils import timezone as _dj_tz
+        threshold_days = getattr(
+            _dj_settings, "DEDUPE_REPOST_THRESHOLD_DAYS", 14
+        )
+        repost_cutoff = _dj_tz.now() - timedelta(days=threshold_days)
         for hit in visible.filter(
             normalized_fingerprint=post.normalized_fingerprint
         ):
-            _add(hit, "normalized_fingerprint", "high")
+            hit_created = getattr(hit, "created_at", None)
+            if hit_created is not None and hit_created < repost_cutoff:
+                _add(hit, "repost", "high")
+            else:
+                _add(hit, "normalized_fingerprint", "high")
 
     # Cross-platform dedup via apply_url reciprocity. Shared primitive
     # with find_duplicate — see job_post_dedupe.find_apply_url_matches.
@@ -852,6 +872,12 @@ class JobPostSerializer(BaseSerializer):
         "posting_status",
         "complete",
         "duplicate_of_id",
+        # Phase C dedupe redesign — repost relation. Distinct from
+        # ``duplicate_of`` (collapse) — both rows stay queryable
+        # independently. Frontend reads this on jp.edit/show to surface
+        # "this role has been listed before"; writes happen via the
+        # mark-duplicate-of verb with ``relation: "repost"``.
+        "reposted_from_id",
         # ActivityPub-aligned per-post visibility (Phase 3.5 prep for
         # Phase 4 ActivityPub readiness). JSON list of AS2 audience URIs;
         # the frontend mirrors this via JobPost#isPublic for the Edit
@@ -886,6 +912,15 @@ class JobPostSerializer(BaseSerializer):
         # promote-canonical verb endpoints, not via JSON:API PATCH.
         "duplicate-of": {
             "attr": "duplicate_of",
+            "type": "job-post",
+            "uselist": False,
+        },
+        # Phase C — self-FK to the original posting when ``relation:
+        # "repost"`` was used on the mark-duplicate-of verb. Like
+        # ``duplicate-of`` this is read-only on the JSON:API surface;
+        # writes go through the verb endpoint, not PATCH.
+        "reposted-from": {
+            "attr": "reposted_from",
             "type": "job-post",
             "uselist": False,
         },
