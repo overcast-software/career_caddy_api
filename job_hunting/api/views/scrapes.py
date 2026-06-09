@@ -16,6 +16,8 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers as drf_serializers
 
+from django_q.tasks import async_task
+
 from .base import BaseViewSet
 from ._schema import (
     _PAGE_PARAMS,
@@ -1700,6 +1702,84 @@ class ScrapeProfileViewSet(BaseViewSet):
                     },
                 }
             }
+        )
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="sharpen",
+    )
+    def sharpen(self, request, pk=None):
+        """Enqueue a sharpen pass against this ScrapeProfile.
+
+        Staff-only (inherits IsAdminUser from the viewset). Finds the
+        most-recent successful Scrape for this profile's hostname and
+        enqueues ``sharpen_scrape_profile`` against it. Returns 202
+        Accepted with the profile JSON and a ``meta.job_id`` for client
+        polling.
+
+        422 when no successful scrape exists for the hostname — the
+        enhancer needs a captured page to analyze; capture one via the
+        normal scrape flow first.
+        """
+        profile = ScrapeProfile.objects.filter(pk=pk).first()
+        if not profile:
+            return Response(
+                {"errors": [{"detail": "Not found"}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Find the most-recent successful scrape for the profile's
+        # hostname. The Scrape model carries a `host` property derived
+        # from urlparse(url).netloc; match on the same normalized form
+        # used elsewhere in the codebase (strip leading www.).
+        # Note: Scrape has no created_at — order by scraped_at (the
+        # completion timestamp) per the convention at the top of this
+        # file (see line ~115).
+        target_host = profile.hostname
+        candidates = Scrape.objects.filter(
+            status="completed",
+        ).filter(
+            Q(url__icontains=f"//{target_host}/")
+            | Q(url__icontains=f".{target_host}/")
+            | Q(url__icontains=f"//{target_host}")
+            | Q(url__icontains=f".{target_host}")
+        ).order_by("-scraped_at")
+
+        source_scrape = candidates.first()
+        if source_scrape is None:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": (
+                                "No successful scrape found for hostname; "
+                                "capture one first."
+                            ),
+                            "status": "422",
+                        }
+                    ]
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        job_id = async_task(
+            "job_hunting.lib.tasks.sharpen_scrape_profile",
+            profile.id,
+            source_scrape_id=source_scrape.id,
+            requested_by_id=getattr(request.user, "id", None),
+        )
+
+        ser = self.get_serializer()
+        return Response(
+            {
+                "data": ser.to_resource(profile),
+                "meta": {
+                    "job_id": job_id,
+                    "source_scrape_id": source_scrape.id,
+                },
+            },
+            status=status.HTTP_202_ACCEPTED,
         )
 
     @action(
