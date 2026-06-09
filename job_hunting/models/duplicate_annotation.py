@@ -26,6 +26,14 @@ class DuplicateAnnotation(models.Model):
     # remote actor + activity id so the dedupe-feedback report can pivot
     # on federated-origin merges.
     FEDERATED_MERGE = "federated_merge"
+    # Phase A dedupe redesign — written by the Company merge-into
+    # endpoint when staff consolidates duplicate Company rows. The
+    # ``from_jp`` / ``to_jp`` columns anchor on the first moved
+    # JobPost (the model enforces non-null from_jp); the company-side
+    # provenance lives in ``signal_state`` (source_company_id,
+    # source_company_name, target_company_id, moved counts). Merges
+    # of zero-JP Companies skip this row entirely.
+    COMPANY_MERGE = "company_merge"
 
     ACTIONS = [
         (MARK, "mark"),
@@ -33,6 +41,7 @@ class DuplicateAnnotation(models.Model):
         (PROMOTE, "promote"),
         (HISTORICAL, "historical"),
         (FEDERATED_MERGE, "federated_merge"),
+        (COMPANY_MERGE, "company_merge"),
     ]
 
     from_jp = models.ForeignKey(

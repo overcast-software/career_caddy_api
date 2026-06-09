@@ -77,6 +77,19 @@ class Scrape(GetMixin, models.Model):
     #     "tag": "a", "score": 0.8, "reason": "href contains 'apply'"}]
     # Capture-only — promotion is a separate manual/automated step.
     apply_candidates = models.JSONField(null=True, blank=True)
+    # Phase A of the dedupe redesign — top-3 trigram-similar Companies
+    # to whatever name the extractor saw, stashed at extraction time
+    # for staff review. Written ONLY when no exact ``CompanyAlias`` hit
+    # exists (i.e. the extractor minted a new Company). Frontend
+    # surfaces this as a "Suggested companies" callout on Scrape show
+    # so a curator can hit Merge-into and consolidate. Shape:
+    #   [{"company_id": int, "name": str, "similarity": float}, ...]
+    # Never auto-applied — Doug's option (b) gate: fuzzy similarity
+    # never reaches Company.find_by_alias; only exact ``name_slug``
+    # match auto-attaches. See plan
+    # ``go-over-this-plan-staged-sutherland.md`` Phase A and api
+    # notes.org ``Architecture/Dedupe pipeline contract``.
+    company_suggestions = models.JSONField(null=True, blank=True)
     # Closed-state detection result from the scrape-graph
     # DetectClosedState node. Written by the agents-side graph PATCH on
     # PersistScrape; read by JobPostExtractor as the priority-1 channel
