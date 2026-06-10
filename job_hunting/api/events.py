@@ -170,31 +170,68 @@ def _should_forward(payload: dict, user_id: int) -> bool:
         return False
 
 
+class _ClientDisconnected(Exception):
+    """Internal sentinel raised when a yield/write to the client fails.
+
+    WSGI does not raise ``GeneratorExit`` on the streaming generator until
+    gunicorn next tries to write to the (closed) socket. If the loop is
+    sitting in ``select.select`` for the keepalive interval, the client
+    can be gone for up to ``_KEEPALIVE_INTERVAL_S`` seconds before we
+    notice — but the moment we try to write a keepalive comment, the
+    underlying socket raises ``BrokenPipeError`` / ``ConnectionResetError``.
+    We catch those, log a clean lifecycle line, and exit. This prevents
+    the loop from continuing to pop from ``conn.notifies`` and yielding
+    bytes into a dead socket — the root cause of the 2026-06-09/06-10
+    gunicorn OOM cascades.
+    """
+
+
 def _event_stream(user_id: int) -> Iterator[bytes]:
     """Yield SSE-formatted bytes for ``user_id`` until disconnect.
 
     Format (per the SSE spec):
         data: {"type":"score","id":42,"status":"completed","user_id":7}\\n\\n
         : keepalive 1730000000\\n\\n
+
+    Lifecycle: emits one ``events.stream.start`` INFO line on entry and
+    one ``events.stream.end`` INFO line on exit (with ``closed_by`` set
+    to ``client``, ``error``, or ``unknown``). The end-line carries the
+    session duration so logfire can surface long-lived SSE sessions.
     """
     conn = _open_listen_connection()
-    # Initial comment line establishes the channel — EventSource fires
-    # `open` on the client, lets the frontend distinguish "connected
-    # but no events yet" from "still connecting."
-    yield b":connected\n\n"
+    started_at = time.monotonic()
+    closed_by = "unknown"
+    logger.info("events.stream.start user_id=%s", user_id)
+
     try:
+        # Initial comment line establishes the channel — EventSource
+        # fires `open` on the client, lets the frontend distinguish
+        # "connected but no events yet" from "still connecting."
+        try:
+            yield b":connected\n\n"
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            raise _ClientDisconnected from exc
+
         while True:
             # select() blocks until the postgres connection has data
             # OR the keep-alive timer fires. The 3-tuple return is
             # (readable, writable, exceptional); empty readable means
-            # timeout.
+            # timeout. Bounded by _KEEPALIVE_INTERVAL_S so we revisit
+            # the yield site at least that often and notice disconnects.
             readable, _, _ = select.select(
                 [conn], [], [], _KEEPALIVE_INTERVAL_S
             )
             if not readable:
                 # Idle keep-alive. Comment line — EventSource silently
                 # ignores; reverse proxies see traffic and don't time out.
-                yield f": keepalive {int(time.time())}\n\n".encode("utf-8")
+                # This is also our disconnect detector: the next write
+                # raises BrokenPipeError if the client is gone.
+                try:
+                    yield (
+                        f": keepalive {int(time.time())}\n\n".encode("utf-8")
+                    )
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    raise _ClientDisconnected from exc
                 continue
 
             conn.poll()
@@ -212,17 +249,34 @@ def _event_stream(user_id: int) -> Iterator[bytes]:
                 if not _should_forward(payload, user_id):
                     continue
 
-                yield f"data: {notif.payload}\n\n".encode("utf-8")
+                try:
+                    yield f"data: {notif.payload}\n\n".encode("utf-8")
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    raise _ClientDisconnected from exc
+    except _ClientDisconnected:
+        closed_by = "client"
     except GeneratorExit:
-        # Client disconnected. Normal path.
-        pass
+        # gunicorn / WSGI server closed the generator cleanly — usually
+        # because it noticed the client disconnect on a prior write.
+        closed_by = "client"
+        raise
     except Exception:
-        logger.exception("events: stream loop terminated")
+        closed_by = "error"
+        logger.exception("events.stream.error user_id=%s", user_id)
     finally:
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        logger.info(
+            "events.stream.end user_id=%s duration_ms=%s closed_by=%s",
+            user_id,
+            duration_ms,
+            closed_by,
+        )
         try:
             conn.close()
         except Exception:
-            logger.exception("events: failed to close LISTEN connection")
+            logger.exception(
+                "events.stream.cleanup_failed user_id=%s", user_id
+            )
 
 
 @csrf_exempt
