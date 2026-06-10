@@ -161,3 +161,168 @@ def _make_fake_listen_conn():
     # never get there.
     conn.poll.return_value = None
     return conn
+
+
+class TestEventStreamDisconnectAndLifecycle(TestCase):
+    """The 2026-06-09/06-10 gunicorn OOM cascades were rooted in this
+    generator failing to notice a client disconnect, then accreting
+    notifies + yielded bytes until the worker hit the memory cap.
+
+    The fix bounds ``select.select`` at ``_KEEPALIVE_INTERVAL_S`` (so
+    the loop revisits a yield site at least that often) and translates
+    a ``BrokenPipeError`` / ``ConnectionResetError`` raised by the WSGI
+    server's write into a clean exit with structured lifecycle logs.
+
+    These tests drive ``_event_stream`` as a raw generator — bypassing
+    StreamingHttpResponse — so we can inject the disconnect via
+    ``gen.throw(...)`` exactly the way gunicorn does in production.
+    """
+
+    def setUp(self):
+        # The generator opens a real psycopg2 connection by default;
+        # patch it to a MagicMock for every test in this class.
+        self.fake_conn = _make_fake_listen_conn()
+        self.conn_patcher = patch(
+            "job_hunting.api.events._open_listen_connection",
+            return_value=self.fake_conn,
+        )
+        self.conn_patcher.start()
+        self.addCleanup(self.conn_patcher.stop)
+
+    def test_select_timeout_yields_keepalive_then_loops(self):
+        """When ``select.select`` returns no readable connections (the
+        keepalive timeout path), the generator MUST yield a keepalive
+        comment line and continue. Without the bounded timeout the loop
+        would block indefinitely and the disconnect-detection write
+        below would never happen."""
+        with patch(
+            "job_hunting.api.events.select.select",
+            return_value=([], [], []),
+        ) as mock_select:
+            gen = events_view._event_stream(user_id=7)
+            # First yield is the :connected handshake.
+            self.assertEqual(next(gen), b":connected\n\n")
+            # Second yield is the keepalive (select returned empty).
+            chunk = next(gen)
+            self.assertTrue(chunk.startswith(b": keepalive "))
+            # Verify the bounded timeout was passed to select.
+            args, _kwargs = mock_select.call_args
+            self.assertEqual(
+                args[3], events_view._KEEPALIVE_INTERVAL_S
+            )
+            # Drain so the finally runs.
+            gen.close()
+
+    def test_broken_pipe_on_keepalive_exits_cleanly(self):
+        """When the WSGI server raises ``BrokenPipeError`` on a write
+        (the canonical signal that the client has disconnected), the
+        generator MUST translate it to ``_ClientDisconnected``, log
+        a structured ``events.stream.end`` line with ``closed_by=client``,
+        close the LISTEN connection, and raise ``StopIteration``."""
+        with patch(
+            "job_hunting.api.events.select.select",
+            return_value=([], [], []),
+        ):
+            gen = events_view._event_stream(user_id=7)
+            # Drive past the :connected handshake.
+            self.assertEqual(next(gen), b":connected\n\n")
+            with self.assertLogs(
+                "job_hunting.api.events", level="INFO"
+            ) as captured:
+                with self.assertRaises(StopIteration):
+                    # gen.throw injects the exception at the yield site,
+                    # exactly mirroring how WSGI signals a dead socket
+                    # during a write.
+                    gen.throw(BrokenPipeError())
+            joined = "\n".join(captured.output)
+            self.assertIn("events.stream.end", joined)
+            self.assertIn("closed_by=client", joined)
+            self.assertIn("user_id=7", joined)
+            self.assertIn("duration_ms=", joined)
+            # The LISTEN connection MUST be released in the finally
+            # block — leaking these is what caused the cascade.
+            self.fake_conn.close.assert_called_once()
+
+    def test_connection_reset_on_data_yield_exits_cleanly(self):
+        """Same contract as broken-pipe, but at the data yield site
+        (after a pg notify) and with ``ConnectionResetError`` — the
+        other kernel-level signal we may see from gunicorn's write."""
+        with patch(
+            "job_hunting.api.events.select.select",
+            return_value=([], [], []),
+        ):
+            gen = events_view._event_stream(user_id=7)
+            next(gen)  # :connected
+            with self.assertLogs(
+                "job_hunting.api.events", level="INFO"
+            ) as captured:
+                with self.assertRaises(StopIteration):
+                    gen.throw(ConnectionResetError())
+            self.assertIn(
+                "closed_by=client",
+                "\n".join(captured.output),
+            )
+            self.fake_conn.close.assert_called_once()
+
+    def test_generator_exit_logs_lifecycle_end(self):
+        """``GeneratorExit`` is the gunicorn-noticed-disconnect path
+        (vs. the BrokenPipe path which is yield-side detection). Both
+        must produce a clean ``events.stream.end`` line — that's how
+        Doug sees session duration in logfire."""
+        with patch(
+            "job_hunting.api.events.select.select",
+            return_value=([], [], []),
+        ):
+            gen = events_view._event_stream(user_id=42)
+            next(gen)
+            with self.assertLogs(
+                "job_hunting.api.events", level="INFO"
+            ) as captured:
+                gen.close()
+            joined = "\n".join(captured.output)
+            self.assertIn("events.stream.end", joined)
+            self.assertIn("closed_by=client", joined)
+            self.assertIn("user_id=42", joined)
+            self.fake_conn.close.assert_called_once()
+
+    def test_start_log_line_fires_on_entry(self):
+        """Symmetric to the end-log line — the ``events.stream.start``
+        INFO line lets us pair start/end events in logfire and reason
+        about session counts."""
+        with patch(
+            "job_hunting.api.events.select.select",
+            return_value=([], [], []),
+        ):
+            with self.assertLogs(
+                "job_hunting.api.events", level="INFO"
+            ) as captured:
+                gen = events_view._event_stream(user_id=99)
+                next(gen)  # force the generator to enter
+                gen.close()
+            joined = "\n".join(captured.output)
+            self.assertIn("events.stream.start", joined)
+            self.assertIn("user_id=99", joined)
+
+    def test_unexpected_exception_logs_error_and_cleans_up(self):
+        """An unexpected exception inside the loop (NOT a disconnect)
+        MUST be logged at ERROR level (so logfire surfaces it) AND
+        still release the LISTEN connection. Without the finally, the
+        leak that caused the OOM stays."""
+        with patch(
+            "job_hunting.api.events.select.select",
+            side_effect=RuntimeError("simulated kernel error"),
+        ):
+            gen = events_view._event_stream(user_id=7)
+            with self.assertLogs(
+                "job_hunting.api.events", level="INFO"
+            ) as captured:
+                # First next() runs the :connected yield. The next one
+                # enters the while loop and trips the simulated error.
+                with self.assertRaises(StopIteration):
+                    next(gen)
+                    next(gen)
+            joined = "\n".join(captured.output)
+            self.assertIn("events.stream.error", joined)
+            self.assertIn("events.stream.end", joined)
+            self.assertIn("closed_by=error", joined)
+            self.fake_conn.close.assert_called_once()
