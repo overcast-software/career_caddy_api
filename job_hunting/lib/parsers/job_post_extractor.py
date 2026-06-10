@@ -1038,7 +1038,24 @@ class JobPostExtractor:
         return str(model)
 
     def _get_profile_hints(self, scrape: Scrape) -> str:
-        """Look up ScrapeProfile for this scrape's hostname and return hint text."""
+        """Look up ScrapeProfile for this scrape's hostname and return hint text.
+
+        Extension-source bypass: when ``scrape.source == 'extension'``, the
+        job_content came from the cc_sender extension's live-DOM capture
+        — the user's browser actually rendered the page and the extension
+        read the post-hydration text. Partial-render heuristics (the
+        load-bearing reason ScrapeProfile.extraction_hints exists for
+        linkedin.com) are therefore meaningless and actively harmful on
+        this path: the LinkedIn linkedin.com hint dutifully written by
+        the LLM emits "[DESCRIPTION NOT CAPTURED ...]" whenever it sees
+        the top-card + footer sentinel pair, but those sentinels appear
+        in EVERY healthy extension capture too. Bypassing the hint block
+        on this path lets the LLM extract the real body verbatim.
+        Belt-and-suspenders alongside the 0101 migration that tightens
+        the linkedin.com hint itself.
+        """
+        if getattr(scrape, "source", None) == "extension":
+            return ""
         try:
             from job_hunting.models import ScrapeProfile
             hostname = urlparse(scrape.url or "").hostname or ""
