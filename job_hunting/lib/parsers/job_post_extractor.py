@@ -477,11 +477,20 @@ class JobPostExtractor:
         self.last_outcome = "created"
         if self._is_placeholder(validated_data.title):
             logger.warning("Scrape %s: extracted title is a placeholder (%r), skipping", scrape.id, validated_data.title)
+            # Diagnostic surface for the operator — the extension popup
+            # and scrapes.show read this field so a placeholder rejection
+            # is visible without reading container logs.
+            scrape.failure_reason = (
+                f"Extraction returned placeholder title: {validated_data.title!r}"
+            )[:2000]
             scrape.status = "failed"
             scrape.save()
             return False
         if self._is_placeholder(validated_data.company_name):
             logger.warning("Scrape %s: extracted company is a placeholder (%r), skipping", scrape.id, validated_data.company_name)
+            scrape.failure_reason = (
+                f"Extraction returned placeholder company: {validated_data.company_name!r}"
+            )[:2000]
             scrape.status = "failed"
             scrape.save()
             return False
@@ -1340,6 +1349,11 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
         # Companion: management command sweep_stuck_extracting cleans up
         # the rare cases where finally itself can't run (SIGKILL).
         reached_terminal = False
+        # Threaded through the outer except into the finally — the
+        # failure_reason persisted on the Scrape row when the safety
+        # net trips. Initialized here so both branches read the same
+        # name regardless of whether the except fired.
+        outer_failure_reason = None
         try:
             scrape = ScrapeModel.objects.filter(pk=scrape_id).first()
             if not scrape:
@@ -1366,9 +1380,16 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
 
             parser = JobPostExtractor()
             success = False
+            # Capture the parser exception (if any) so the terminal
+            # failed-status write can carry it through to
+            # Scrape.failure_reason. Without this the operator-facing
+            # surface stays generic ("Extraction failed") while the
+            # actual exception only lives in the api container log.
+            parse_exc = None
             try:
                 success = bool(parser.parse(scrape, user=user, force=force))
-            except Exception:
+            except Exception as exc:
+                parse_exc = exc
                 logger.exception("parse_scrape failed scrape_id=%s", scrape_id)
 
             _log_scrape_status(scrape_id, "updating_profile", note="Updating scrape profile")
@@ -1423,28 +1444,54 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
                             jp_id,
                         )
                 if review_rejected:
+                    review_msg = review_reason or "review rejected output"
                     _log_scrape_status(
                         scrape_id, "failed",
-                        note=f"incomplete_output: {review_reason or 'review rejected output'}",
+                        note=f"incomplete_output: {review_msg}",
+                        failure_reason=f"CompletenessReviewer rejected output: {review_msg}",
                     )
                     reached_terminal = True
                 else:
                     _log_scrape_status(scrape_id, "completed", note=note)
                     reached_terminal = True
             else:
+                # Two shapes for the failed branch:
+                #   1. parser.parse raised — thread the exception repr
+                #      into failure_reason so the operator sees it.
+                #   2. parser.parse returned falsy (placeholder rejection
+                #      in process_evaluation already wrote a richer
+                #      reason directly on the Scrape row). DO NOT
+                #      overwrite that with a generic string — pass
+                #      failure_reason=None so _log_scrape_status leaves
+                #      the existing column alone.
+                if parse_exc is not None:
+                    fr = f"parse_scrape exception: {parse_exc!r}"
+                else:
+                    fr = None
                 try:
-                    _log_scrape_status(scrape_id, "failed", note="Extraction failed")
+                    _log_scrape_status(
+                        scrape_id, "failed",
+                        note="Extraction failed",
+                        failure_reason=fr,
+                    )
                 except Exception:
                     pass
                 reached_terminal = True
-        except Exception:
+        except Exception as outer_exc:
             logger.exception("parse_scrape: unhandled in _run scrape_id=%s", scrape_id)
+            # Thread the unhandled exception through so the finally
+            # branch below can surface it to the operator.
+            outer_failure_reason = f"parse_scrape unhandled exception: {outer_exc!r}"
         finally:
             if not reached_terminal:
+                fr = outer_failure_reason or (
+                    "parse_scrape died before terminal — see api logs"
+                )
                 try:
                     _log_scrape_status(
                         scrape_id, "failed",
                         note="parse_scrape died before terminal — see api logs",
+                        failure_reason=fr,
                     )
                 except Exception:
                     logger.exception(

@@ -163,6 +163,16 @@ class Scrape(GetMixin, models.Model):
     # so a paste path can't echo a stale field). Phase B's SkipBrowserTier
     # node reads this and feeds the fields into PersistJobPost.
     captured_payload = models.JSONField(null=True, blank=True, default=None)
+    # Human-readable summary of why this scrape didn't produce a
+    # JobPost. Written at every ``status="failed"`` write site (the
+    # placeholder rejections in ``JobPostExtractor.process_evaluation``,
+    # the exception paths in ``parse_scrape._run``, and any caller of
+    # ``_log_scrape_status(... status_label="failed", failure_reason=…)``)
+    # so the operator has a diagnostic surface — extension popup,
+    # scrapes.show, dedupe report all read this field. Truncated to
+    # 2000 chars at write time. NULL for non-failed rows; existing
+    # pre-feature failed rows stay NULL (no backfill).
+    failure_reason = models.TextField(null=True, blank=True, max_length=2000)
 
     class Meta:
         db_table = "scrape"

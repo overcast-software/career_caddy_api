@@ -1039,11 +1039,20 @@ class ScrapeSerializer(BaseSerializer):
         # 'extension-direct'. See Scrape model docstrings for shape.
         "source_mode",
         "captured_payload",
+        # Operator-facing diagnostic populated by the failed-status
+        # write sites (placeholder rejection, parse_scrape exception,
+        # CompletenessReviewer rejection, sweep). Read-only on the
+        # wire so client-side echoes can't poison it; mutation only
+        # happens through the documented write paths in lib/scraper.py
+        # and lib/parsers/job_post_extractor.py.
+        "failure_reason",
     ]
     # latest_status_note is a derived @property on Scrape with no setter —
     # output it but reject it on PATCH so frontend round-trips don't 500
-    # with "property has no setter".
-    read_only_attributes = ["latest_status_note"]
+    # with "property has no setter". failure_reason has a real column
+    # but is operator-diagnostic state — clients must never overwrite
+    # it via PATCH.
+    read_only_attributes = ["latest_status_note", "failure_reason"]
     relationships = {
         "job-post": {"attr": "job_post", "type": "job-post", "uselist": False},
         "company": {"attr": "company", "type": "company", "uselist": False},

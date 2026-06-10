@@ -55,6 +55,7 @@ def _log_scrape_status(
     graph_node: str = None,
     graph_payload: dict = None,
     update_scrape_status: bool = True,
+    failure_reason: str = None,
 ) -> None:
     """Append a ScrapeStatus audit record (and optionally bump Scrape.status).
 
@@ -66,6 +67,15 @@ def _log_scrape_status(
     legacy terminal status ('completed' / 'failed') that the frontend
     polls on. Otherwise the shadow-mode pipeline lands on
     'resolveapplyurl' and UI spinners never terminate.
+
+    failure_reason: human-readable summary of why this scrape didn't
+    produce a JobPost. Only meaningful when status_label='failed';
+    silently ignored otherwise. Persisted on the Scrape row (not the
+    ScrapeStatus audit row) so the operator-facing surfaces — extension
+    popup, scrapes.show, dedupe report — can read it via the
+    ScrapeSerializer without sideloading the full scrape_statuses
+    collection. Truncated to the model's max_length (2000) so a
+    runaway traceback can't blow the column.
     """
     try:
         from job_hunting.models.scrape import Scrape
@@ -87,6 +97,12 @@ def _log_scrape_status(
                 update_fields["claimed_by"] = None
             else:
                 update_fields["claimed_at"] = timezone.now()
+            # Persist the operator-facing diagnostic on terminal
+            # failures only — truncated to fit the column. Non-failed
+            # status transitions silently ignore the kwarg so a stray
+            # caller can't poison the column on a 'completed' write.
+            if status_label == "failed" and failure_reason:
+                update_fields["failure_reason"] = str(failure_reason)[:2000]
             Scrape.objects.filter(pk=scrape_id).update(**update_fields)
             # Emit a terminal-status notification when the Scrape lands
             # on completed/failed so frontend SSE subscribers can update
