@@ -711,17 +711,81 @@ class JobPostViewSet(BaseViewSet):
             )
 
         if attrs.get("link"):
-            existing = JobPost.objects.filter(link=attrs["link"]).first()
+            # Canonicalize-first lookup mirrors POST /scrapes/from-text/
+            # (see scrapes.py:829-835). Without the canonical leg, a
+            # /comm/jobs/view/ POST against an existing /jobs/view/ row
+            # silently mints a duplicate (JP 1315 ↔ JP 1550 — LinkedIn
+            # /comm/ ingestion incident, 2026-06-10).
+            #
+            # Order matters: `link` is unique but `canonical_link` is
+            # not — when a stub and a complete row both canonicalize to
+            # the same URL, an unordered .first() picks the stub and
+            # the 409 gate misses. Order `complete=True` first so the
+            # gate sees the row the user cares about. Same precaution
+            # as the from-text gate (JP 1532 / scrape 414).
+            from job_hunting.models.job_post_dedupe import (
+                canonicalize_link,
+                source_trust,
+            )
+            link = attrs["link"]
+            canonical = canonicalize_link(link)
+            existing = (
+                JobPost.objects
+                .filter(Q(link=link) | Q(canonical_link=canonical))
+                .order_by("-complete", "id")
+                .first()
+            )
             if existing:
-                # Backfill empty fields from the incoming POST. JobPost is
-                # universal: cc_auto's email path commonly hits a row that
-                # an earlier scrape created as a stub (link known, company
-                # NULL, title thin). Without this merge the new association
-                # is silently dropped — the post stays off
-                # /companies/<id>/job-posts even though we now know the
-                # company. Only ever fills NULLs; never overwrites an
-                # existing value (a wrong cc_auto guess shouldn't clobber
-                # a good prior association).
+                # 409 gate: fires only on a canonical-collision (the
+                # incoming link is NOT identical to the existing row's
+                # link) against a complete row where the new push does
+                # not outrank it. Same-link repeat-POSTs fall through
+                # to the merge path below — that's the email-pipeline
+                # contract (cc_auto re-POSTs the same link as it
+                # backfills company / title / description, and the
+                # merge path is how those NULLs get filled in).
+                new_source = attrs.get("source") or "manual"
+                if (
+                    existing.link != link
+                    and existing.complete
+                    and source_trust(new_source) <= source_trust(existing.source)
+                ):
+                    return Response(
+                        {
+                            "errors": [
+                                {
+                                    "status": "409",
+                                    "code": "duplicate_job_post",
+                                    "detail": (
+                                        "A job post with this link already exists. "
+                                        "Open the existing post or re-submit from a "
+                                        "higher-trust source."
+                                    ),
+                                    "meta": {
+                                        "job_post_id": existing.id,
+                                        "title": existing.title,
+                                        "company_name": (
+                                            existing.company.name
+                                            if existing.company_id
+                                            else None
+                                        ),
+                                        "link": existing.link,
+                                    },
+                                }
+                            ]
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                # Merge path: backfill empty fields from the incoming
+                # POST. JobPost is universal: cc_auto's email path
+                # commonly hits a row that an earlier scrape created
+                # as a stub (link known, company NULL, title thin).
+                # Without this merge the new association is silently
+                # dropped — the post stays off /companies/<id>/job-posts
+                # even though we now know the company. Only ever fills
+                # NULLs; never overwrites an existing value (a wrong
+                # cc_auto guess shouldn't clobber a good prior
+                # association).
                 merge_empty_fields_from_attrs(existing, attrs)
                 _record_discovery(existing)
                 return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
