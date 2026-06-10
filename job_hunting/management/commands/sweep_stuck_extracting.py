@@ -55,6 +55,10 @@ class Command(BaseCommand):
                     s.id,
                     "failed",
                     note=f"swept: stuck in {s.status} > {min_age_minutes}m",
+                    failure_reason=(
+                        f"Swept by sweep_stuck_extracting: stuck in "
+                        f"{s.status!r} > {min_age_minutes}m without progress"
+                    ),
                 )
                 flipped += 1
         verb = "would flip" if dry_run else "flipped"

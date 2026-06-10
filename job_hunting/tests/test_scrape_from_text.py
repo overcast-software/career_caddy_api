@@ -1050,3 +1050,165 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
         self.assertIsNone(scrape.extension_prefill)
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextFailureReason(TestCase):
+    """Operator-facing diagnostic on post-extract failures.
+
+    Before this change, /scrapes/from-text/ swallowed failures into a
+    bare status='failed' badge: the extension popup said "could not
+    parse" and the only real surface was the api container log. Add a
+    failure_reason column on Scrape, populated at every failed-status
+    write site (placeholder rejection in process_evaluation, parser
+    exception path in parse_scrape, the safety-net die-before-terminal
+    branch). Serializer exposes it read-only.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="diaguser", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_placeholder_title_writes_failure_reason(self, mock_analyze):
+        """Stubbed extractor returns a placeholder title — process_evaluation
+        sets failure_reason on the row before flipping status=failed."""
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+
+        mock_analyze.return_value = ParsedJobData(
+            title="N/A",
+            company_name="AcmeCorp",
+            description="A real-looking description. " * 20,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Senior Engineer at AcmeCorp. " * 30, "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.status, "failed")
+        self.assertIsNotNone(scrape.failure_reason)
+        self.assertIn("placeholder title", scrape.failure_reason)
+        self.assertIn("N/A", scrape.failure_reason)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_placeholder_company_writes_failure_reason(self, mock_analyze):
+        """Placeholder company branch — symmetric to the title branch."""
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+
+        mock_analyze.return_value = ParsedJobData(
+            title="Staff Engineer",
+            company_name="unknown",
+            description="A real-looking description. " * 20,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Staff Engineer at SomePlace. " * 30, "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.status, "failed")
+        self.assertIsNotNone(scrape.failure_reason)
+        self.assertIn("placeholder company", scrape.failure_reason)
+        self.assertIn("unknown", scrape.failure_reason)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_extractor_exception_writes_failure_reason(self, mock_analyze):
+        """When parser.parse raises, the caught exception is threaded
+        into _log_scrape_status as failure_reason so the operator sees
+        the exception repr without reading container logs."""
+        mock_analyze.side_effect = RuntimeError("LLM provider exploded")
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Senior Engineer at AcmeCorp. " * 30, "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.status, "failed")
+        self.assertIsNotNone(scrape.failure_reason)
+        self.assertIn("parse_scrape exception", scrape.failure_reason)
+        self.assertIn("LLM provider exploded", scrape.failure_reason)
+
+    @patch("job_hunting.lib.parsers.completeness_reviewer.maybe_review_and_persist")
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_success_path_leaves_failure_reason_null(self, mock_analyze, mock_review):
+        """The happy path doesn't touch failure_reason — column stays NULL.
+        CompletenessReviewer is mocked out so the test stays focused on the
+        failure_reason write semantics, not LLM scoring."""
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+        from job_hunting.models import Company
+
+        Company.objects.create(name="AutoCorp")
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer",
+            company_name="AutoCorp",
+            description=(
+                "Senior backend engineer wanted to design and ship a "
+                "distributed event-sourcing platform on Kafka and Postgres. "
+                "You'll own service boundaries, schema evolution, and the "
+                "on-call rotation. Requirements: 5+ years Python or Go, "
+                "production experience with streaming systems, comfort "
+                "leading code reviews and architectural decisions. We pay "
+                "competitively and offer remote work across US time zones."
+            ),
+        )
+        mock_review.return_value = None  # skip the LLM-side rejection
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Engineer at AutoCorp. " * 20, "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        self.assertEqual(scrape.status, "completed")
+        self.assertIsNone(scrape.failure_reason)
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_serializer_exposes_failure_reason(self, mock_analyze):
+        """GET /scrapes/:id/ returns failure_reason as a JSON:API attribute."""
+        mock_analyze.side_effect = RuntimeError("downstream timeout")
+        post = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Senior Engineer at AcmeCorp. " * 30, "source": "extension"},
+            format="json",
+        )
+        scrape_id = int(post.json()["data"]["id"])
+
+        resp = self.client.get(f"/api/v1/scrapes/{scrape_id}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        attrs = resp.json()["data"]["attributes"]
+        self.assertIn("failure_reason", attrs)
+        self.assertIsNotNone(attrs["failure_reason"])
+        self.assertIn("downstream timeout", attrs["failure_reason"])
+
+    def test_failure_reason_rejected_on_patch(self):
+        """failure_reason is read-only on the wire — clients must not be
+        able to overwrite the diagnostic via PATCH."""
+        scrape = Scrape.objects.create(
+            created_by=self.user,
+            status="failed",
+            failure_reason="real diagnostic",
+        )
+        resp = self.client.patch(
+            f"/api/v1/scrapes/{scrape.id}/",
+            data={
+                "data": {
+                    "type": "scrape",
+                    "id": str(scrape.id),
+                    "attributes": {"failure_reason": "client-injected lie"},
+                }
+            },
+            format="json",
+        )
+        # Either accepted-but-ignored or rejected — both are fine; what
+        # matters is the persisted value is unchanged.
+        scrape.refresh_from_db()
+        self.assertEqual(scrape.failure_reason, "real diagnostic")
+        # Document the observed behavior so a future framework upgrade
+        # that changes the response code from accepted-but-ignored to
+        # rejected surfaces here for review.
+        self.assertIn(resp.status_code, (200, 400, 422))
