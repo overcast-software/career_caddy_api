@@ -3,7 +3,7 @@ import os
 import re
 
 from django_q.tasks import async_task
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -75,6 +75,44 @@ def _strip_closed_banner_prefix(text: str) -> str:
     prefixes, not mid-sentence). Idempotent.
     """
     return _CLOSED_BANNER_PREFIX.sub("", text)
+
+
+# Per-unit pay tokens that signal an hourly / daily / weekly / monthly
+# figure in the source content. When any of these match scrape.job_content
+# AND the LLM also returned salary_min / salary_max, the salary fields are
+# almost certainly hallucinated annualizations (e.g. $60/hr → "salary_min:
+# 124800"). Coerce both fields to None and keep the per-unit token in the
+# description so the user can still read what the page actually said.
+#
+# Range form is matched explicitly (`$60-65/hr`, `$60 - $65 per hour`)
+# because the leading `$\d` anchor would otherwise miss the second figure
+# in a hyphenated range when the unit token appears only after the second
+# number. Case-insensitive.
+_PER_UNIT_PAY_TOKEN = re.compile(
+    r"\$\s?\d[\d,.\s\-–$]*?"
+    r"(?:/\s?hr|/\s?hour|per\s+hour|hourly"
+    r"|/\s?day|per\s+day|daily"
+    r"|/\s?wk|/\s?week|per\s+week|weekly"
+    r"|/\s?mo|/\s?month|per\s+month|monthly)",
+    flags=re.IGNORECASE,
+)
+
+# LinkedIn renders an "Estimated pay" chip on roles that did NOT disclose
+# salary on the page; the LLM regularly mistakes that chip's number for an
+# advertised band. The phrase alone is the signal — there's no real number
+# attached.
+_ESTIMATED_PAY_TOKEN = re.compile(
+    r"estimated\s+pay",
+    flags=re.IGNORECASE,
+)
+
+# extraction_date drift threshold. The LLM is asked for today's date but
+# sometimes returns a hardcoded value from its training data (commonly
+# 2023-10-06 / 2024-01 / a year-ago shadow), or echoes a posted_date
+# field. If the returned extraction_date is more than this many days
+# behind now() it's hallucinated — coerce to None rather than guessing a
+# replacement. The model layer treats None as "unknown".
+_EXTRACTION_DATE_DRIFT_DAYS = 30
 
 
 class ParsedJobData(BaseModel):
@@ -257,6 +295,69 @@ class JobPostExtractor:
     def _is_placeholder(self, value: str) -> bool:
         return (value or "").strip().lower() in self._PLACEHOLDER_NAMES
 
+    def _coerce_implausible_fields(self, validated_data: "ParsedJobData", scrape: Scrape) -> None:
+        """Drop fields the LLM almost certainly hallucinated.
+
+        Called from the top of ``process_evaluation`` (after the
+        placeholder rejection guard, before company resolution) so the
+        coercion sits on every extraction pathway — prefill, Tier 0,
+        Tier1+ analyze_with_ai, and direct ``process_evaluation`` calls.
+        Two gates today:
+
+        1. **Salary unit mismatch.** Per-unit pay tokens (``$60/hr``,
+           ``$60 per hour``, LinkedIn "Estimated pay" chips, etc.) in
+           ``scrape.job_content`` paired with non-None ``salary_min`` /
+           ``salary_max`` mean the LLM annualized a non-annual figure
+           (the canonical jp 1850-era incident: ``$60-65/hr`` → "salary
+           band $124,800 - $135,200"). Drop both salary fields. The
+           per-unit string survives in ``description`` for the user.
+        2. **Extraction date drift.** ``extraction_date`` more than
+           ``_EXTRACTION_DATE_DRIFT_DAYS`` behind ``datetime.now()`` is
+           hallucinated (training-data echo, or LLM grabbed
+           ``posted_date``). Coerce to None — don't guess today's date.
+
+        Mutates ``validated_data`` in place. Mirrors the shape of the
+        ``closed_evidence`` two-gate validator: when the source
+        contradicts the LLM output, drop the value rather than persisting
+        it.
+        """
+        raw_source = scrape.job_content or ""
+
+        if validated_data.salary_min is not None or validated_data.salary_max is not None:
+            per_unit_match = _PER_UNIT_PAY_TOKEN.search(raw_source)
+            estimated_match = _ESTIMATED_PAY_TOKEN.search(raw_source)
+            if per_unit_match or estimated_match:
+                matched = (per_unit_match or estimated_match).group(0)
+                logger.info(
+                    "JobPostExtractor: coercing salary_min/salary_max to None "
+                    "for scrape=%s — per-unit pay token in source "
+                    "(matched=%r, original_min=%s, original_max=%s)",
+                    scrape.id,
+                    matched[:80],
+                    validated_data.salary_min,
+                    validated_data.salary_max,
+                )
+                validated_data.salary_min = None
+                validated_data.salary_max = None
+
+        if validated_data.extraction_date is not None:
+            try:
+                drift = datetime.now() - validated_data.extraction_date
+            except TypeError:
+                # Mixed tz-aware/naive — treat as drifted, the LLM has no
+                # business returning a tz-aware value when our pydantic
+                # model is naive.
+                drift = timedelta(days=_EXTRACTION_DATE_DRIFT_DAYS + 1)
+            if drift > timedelta(days=_EXTRACTION_DATE_DRIFT_DAYS):
+                logger.info(
+                    "JobPostExtractor: coercing extraction_date to None for "
+                    "scrape=%s — value %s is %s days behind now()",
+                    scrape.id,
+                    validated_data.extraction_date,
+                    drift.days,
+                )
+                validated_data.extraction_date = None
+
     def _resolve_company(self, scrape: Scrape, validated_data) -> Company:
         """Find or mint the Company for ``validated_data.company_name``.
 
@@ -384,6 +485,13 @@ class JobPostExtractor:
             scrape.status = "failed"
             scrape.save()
             return False
+
+        # Field-tolerant coercion — drop values the LLM almost certainly
+        # hallucinated (per-unit pay annualized to a salary band, ancient
+        # extraction_date echo). Placed here so it sits on every pathway
+        # into process_evaluation: prefill, Tier 0, Tier1+ analyze_with_ai,
+        # and direct callers. See _coerce_implausible_fields docstring.
+        self._coerce_implausible_fields(validated_data, scrape)
 
         # Find or create company — Company is a shared resource (no user scoping).
         #

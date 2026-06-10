@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -1505,3 +1506,276 @@ class TestTrustAwareOverwrite(TestCase):
         self.assertEqual(
             JobPostOverwriteDecision.objects.filter(job_post=existing).count(), 1
         )
+
+
+class TestFieldTolerantCoercion(TestCase):
+    """Drop salary / extraction_date values the LLM almost certainly
+    hallucinated.
+
+    Two coercion rules in ``_coerce_implausible_fields``:
+      1. Per-unit pay tokens (``$60/hr``, ``$60-65/hr``, ``$60 per hour``,
+         LinkedIn "Estimated pay" chip) in source content → drop
+         ``salary_min`` / ``salary_max``. Annualization of an hourly rate
+         is the canonical hallucination shape; the per-unit string is
+         left in ``description`` so the user can still read it.
+      2. ``extraction_date`` more than ``_EXTRACTION_DATE_DRIFT_DAYS``
+         behind now() → drop to None (don't guess today).
+
+    Coercion lives at the top of ``process_evaluation`` (after the
+    placeholder rejection guard) so it covers every extraction pathway:
+    prefill, Tier 0, Tier1+ analyze_with_ai, and direct
+    ``process_evaluation`` callers.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="coercer", password="pass")
+
+    def _hourly_page(self) -> str:
+        return (
+            "Senior Engineer at Acme. Pay: $60-65/hr depending on experience. "
+            "Five years of experience required. Remote-friendly."
+        )
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_hourly_range_drops_hallucinated_salary_band(self, mock_analyze):
+        """``$60-65/hr`` in content + LLM-returned annual band → both
+        salary fields coerced to None. The hourly token survives in
+        ``description`` so the user can still read what the page said.
+        """
+        page = self._hourly_page()
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Acme",
+            description=page,
+            salary_min=124800.0,
+            salary_max=135200.0,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/hourly-1",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNone(job.salary_min)
+        self.assertIsNone(job.salary_max)
+        # Hourly token survives in description for the user.
+        self.assertIn("$60-65/hr", job.description)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_per_hour_phrase_variant_drops_salary(self, mock_analyze):
+        """`$60 per hour` phrasing matches the same per-unit guard."""
+        page = "Software Engineer. Compensation is $60 per hour, contract role."
+        mock_analyze.return_value = ParsedJobData(
+            title="Software Engineer",
+            company_name="Acme",
+            description=page,
+            salary_min=124800.0,
+            salary_max=None,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/hourly-2",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNone(job.salary_min)
+        self.assertIsNone(job.salary_max)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_estimated_pay_chip_drops_salary(self, mock_analyze):
+        """LinkedIn "Estimated pay" chip — page never disclosed salary;
+        LLM grabbed the speculative chip and emitted a band. Coerce."""
+        page = (
+            "Senior Engineer. About this role. "
+            "Estimated pay: $180,000 - $210,000. "
+            "Save Apply Reposted 1 day ago."
+        )
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Acme",
+            description=page,
+            salary_min=180000.0,
+            salary_max=210000.0,
+        )
+        scrape = Scrape.objects.create(
+            url="https://www.linkedin.com/jobs/view/0001/",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNone(job.salary_min)
+        self.assertIsNone(job.salary_max)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_real_annual_band_passes_through(self, mock_analyze):
+        """``$175,000 - $205,000`` with no /hr token — a real annual band.
+        Coercion must NOT fire."""
+        page = (
+            "Staff Engineer at Acme. Compensation: $175,000 - $205,000 base. "
+            "Remote-friendly, full-time."
+        )
+        mock_analyze.return_value = ParsedJobData(
+            title="Staff Engineer",
+            company_name="Acme",
+            description=page,
+            salary_min=175000.0,
+            salary_max=205000.0,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/annual-1",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNotNone(job.salary_min)
+        self.assertIsNotNone(job.salary_max)
+        self.assertEqual(int(job.salary_min), 175000)
+        self.assertEqual(int(job.salary_max), 205000)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_ancient_extraction_date_coerced_to_none(self, mock_analyze):
+        """``datetime(2023, 10, 6)`` is the canonical training-data echo
+        shape — the LLM grabbed a frozen date instead of today's. Coerce
+        to None rather than guessing today's date (the model layer treats
+        None as "unknown")."""
+        page = "Engineer at Acme. Build things."
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer",
+            company_name="Acme",
+            description=page,
+            extraction_date=datetime(2023, 10, 6),
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/ancient-1",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNone(job.extraction_date)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_recent_extraction_date_passes_through(self, mock_analyze):
+        """``datetime.now()`` — well inside the drift threshold. Must
+        survive coercion and land on the JobPost."""
+        page = "Engineer at Acme. Build things."
+        recent = datetime.now()
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer",
+            company_name="Acme",
+            description=page,
+            extraction_date=recent,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/recent-1",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNotNone(job.extraction_date)
+        # JobPost.extraction_date is a DateField — Django coerces the
+        # datetime to date on save. Compare on the date component.
+        self.assertEqual(job.extraction_date, recent.date())
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_combined_hourly_and_ancient_date(self, mock_analyze):
+        """Belt-and-suspenders: both rules fire in the same parse, and
+        the JobPost still persists cleanly with both fields nulled."""
+        page = self._hourly_page()
+        mock_analyze.return_value = ParsedJobData(
+            title="Senior Engineer",
+            company_name="Acme",
+            description=page,
+            salary_min=124800.0,
+            salary_max=135200.0,
+            extraction_date=datetime(2023, 10, 6),
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/combined-1",
+            status="completed",
+            job_content=page,
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        job = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertIsNone(job.salary_min)
+        self.assertIsNone(job.salary_max)
+        self.assertIsNone(job.extraction_date)
+        self.assertEqual(job.title, "Senior Engineer")
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_placeholder_title_still_rejects(self, mock_analyze):
+        """Regression: the new coercion call runs AFTER the placeholder
+        rejection guard. A placeholder title must still short-circuit
+        without ever reaching the coercion path."""
+        mock_analyze.return_value = ParsedJobData(
+            title="N/A",
+            company_name="Acme",
+            description="some content",
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/placeholder-title",
+            status="completed",
+            job_content="some content",
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        self.assertEqual(scrape.status, "failed")
+        self.assertIsNone(scrape.job_post_id)
+
+    @patch.object(JobPostExtractor, "analyze_with_ai")
+    def test_placeholder_company_still_rejects(self, mock_analyze):
+        """Regression: placeholder company also still short-circuits
+        before coercion runs."""
+        mock_analyze.return_value = ParsedJobData(
+            title="Engineer",
+            company_name="Unknown",
+            description="some content",
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/placeholder-company",
+            status="completed",
+            job_content="some content",
+            source="scrape",
+            created_by=self.user,
+        )
+        parse_scrape(scrape.id, user_id=self.user.id, sync=True)
+
+        scrape.refresh_from_db()
+        self.assertEqual(scrape.status, "failed")
+        self.assertIsNone(scrape.job_post_id)
