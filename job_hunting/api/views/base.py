@@ -286,6 +286,42 @@ class BaseViewSet(viewsets.ViewSet):
                         ):
                             continue
 
+                        # Privacy invariant for sideloaded JobPosts: the
+                        # JobPost row is shared across users, but
+                        # `top_score` (and the `top-score` relationship)
+                        # are PER-USER. JobPostViewSet.list/retrieve
+                        # attach `_top_score` on the primary items, but
+                        # any other endpoint that sideloads JobPosts
+                        # (companies.job_posts, job-applications include,
+                        # scores include, resumes include, etc.) reaches
+                        # here without it — and the model property's
+                        # unscoped fallback would silently leak the
+                        # highest score across ALL users on this shared
+                        # post. Hydrate `_top_score` filtered by the
+                        # requesting user before to_resource() runs so
+                        # the serializer's null-emit guard finds it.
+                        if (
+                            effective_type == "job-post"
+                            and not hasattr(t, "_top_score")
+                            and request
+                            and hasattr(request, "user")
+                            and request.user.is_authenticated
+                        ):
+                            try:
+                                from job_hunting.models import Score
+                                t._top_score = (
+                                    Score.objects
+                                    .filter(job_post_id=t.id, user_id=request.user.id)
+                                    .order_by("-score")
+                                    .first()
+                                )
+                            except Exception:
+                                # Defensive: never let hydration crash
+                                # the sideload pipeline. The serializer
+                                # will still emit null (hasattr remains
+                                # False) which is the safe outcome.
+                                pass
+
                         seen.add(key)
                         included.append(rel_ser.to_resource(t))
 
@@ -509,6 +545,27 @@ class BaseViewSet(viewsets.ViewSet):
         if uselist:
             if hasattr(target, "all"):
                 target = target.all()
+            # Privacy invariant: if the target serializer declares a
+            # `user_fk` (e.g. ScoreSerializer.user_fk = "user_id",
+            # CoverLetterSerializer, SummarySerializer,
+            # JobApplicationSerializer) then the target is per-user and
+            # MUST be filtered by the requesting user. The unscoped
+            # `obj.<rel>.all()` leaked every user's rows through the
+            # generic `GET /<resource>/{id}/relationships/<rel>`
+            # endpoint — the same leak surface as the JobPost
+            # `top-score` issue, one level up.
+            target_ser_cls = TYPE_TO_SERIALIZER.get(rel_type)
+            target_user_fk = getattr(target_ser_cls, "user_fk", "") if target_ser_cls else ""
+            if (
+                target_user_fk
+                and request
+                and hasattr(request, "user")
+                and request.user.is_authenticated
+                and not request.user.is_staff
+                and target is not None
+                and hasattr(target, "filter")
+            ):
+                target = target.filter(**{target_user_fk: request.user.id})
             data = [{"type": rel_type, "id": str(i.id)} for i in (target or [])]
             links = {
                 "self": f"{_resource_base_path(ser.type)}/{obj.id}/relationships/{rel}",

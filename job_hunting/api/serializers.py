@@ -1009,6 +1009,32 @@ class JobPostSerializer(BaseSerializer):
             "note": getattr(obj, "_active_reason_note", None),
         }
         res.setdefault("meta", {})["triage"] = triage
+
+        # Privacy invariant: `top_score` (and the `top-score` relationship)
+        # are PER-USER values on a shared JobPost row. The model property
+        # has an unscoped fallback for non-request contexts (shell,
+        # fixtures); the serializer must NEVER let that fallback surface
+        # in an API response. The only way to emit a non-null top_score
+        # is for the caller's view to attach `_top_score` filtered by
+        # `request.user`. When `_top_score` is missing on the row we got
+        # here, force-null both the attribute and the relationship —
+        # this defends every sideload path (companies / job-applications
+        # / score-include / etc.) the same way `_build_included` does
+        # on the way in.
+        #
+        # Note: hasattr() is the right gate (not truthiness) because the
+        # caller may have legitimately attached `None` (no Score row for
+        # this user on this post) — that case must emit null, not fall
+        # through to the unscoped `obj.scores.order_by("-score").first()`.
+        if not hasattr(obj, "_top_score"):
+            if "attributes" in res and "top_score" in res["attributes"]:
+                res["attributes"]["top_score"] = None
+            rels = res.setdefault("relationships", {})
+            existing = rels.get("top-score") or {}
+            existing_links = existing.get("links") or {
+                "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/top-score",
+            }
+            rels["top-score"] = {"data": None, "links": existing_links}
         return res
 
 
