@@ -13,11 +13,16 @@ Coverage:
 
 The django-q enqueue is mocked at the view import site so tests don't
 require a live qcluster process.
+
+This file also covers GET /api/v1/scrape-profiles/:id/sharpen-status/
+— the polling target frontend uses to check on an enqueued sharpen
+task. See ``ScrapeProfileSharpenStatusTests`` below.
 """
 from unittest.mock import patch
 
 from django.test import TestCase
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 
@@ -237,3 +242,193 @@ class SharpenTaskTests(TestCase):
             source_scrape_id=999999,
         )
         self.assertEqual(result["status"], "source_missing")
+
+
+class ScrapeProfileSharpenStatusTests(TestCase):
+    """Tests for GET /api/v1/scrape-profiles/:id/sharpen-status/?job_id=...
+
+    The endpoint inspects django-q's Task table (Success / Failure
+    proxy managers) and the OrmQ queued-rows table to report one of
+    completed / failed / pending / unknown. Always 200 for valid
+    requests — the status string carries the meaning.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.profile = ScrapeProfile.objects.create(
+            hostname="example.com",
+            enabled=True,
+        )
+
+    def _url(self, profile_id=None, job_id=None):
+        pid = profile_id if profile_id is not None else self.profile.id
+        base = f"/api/v1/scrape-profiles/{pid}/sharpen-status/"
+        if job_id is not None:
+            return f"{base}?job_id={job_id}"
+        return base
+
+    def _staff_client(self):
+        user = User.objects.create_user(
+            username="staff", password="pw", is_staff=True
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def _make_task_row(self, *, task_id, success, result, name="t"):
+        """Create a row in the django-q Task table. Success / Failure
+        are proxy managers on Task discriminated by the ``success``
+        boolean, so we insert through Task and let the view's proxy
+        queries pick it up."""
+        from django_q.models import Task
+
+        now = timezone.now()
+        return Task.objects.create(
+            id=task_id,
+            name=name,
+            func="job_hunting.lib.tasks.sharpen_scrape_profile",
+            started=now,
+            stopped=now,
+            success=success,
+            result=result,
+            attempt_count=1,
+        )
+
+    def test_unauthenticated_returns_401(self):
+        client = APIClient()
+        resp = client.get(self._url(job_id="anything"))
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_non_staff_returns_403(self):
+        user = User.objects.create_user(
+            username="nonstaff", password="pw", is_staff=False
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(self._url(job_id="anything"))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_missing_job_id_returns_400(self):
+        client = self._staff_client()
+        resp = client.get(self._url())  # no ?job_id=
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        body = resp.json()
+        self.assertIn("job_id", body["errors"][0]["detail"])
+
+    def test_empty_job_id_returns_400(self):
+        client = self._staff_client()
+        resp = client.get(self._url(job_id=""))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unknown_profile_returns_404(self):
+        client = self._staff_client()
+        resp = client.get(self._url(profile_id=999999, job_id="anything"))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_success_returns_completed(self):
+        """A Task row with success=True → status=completed, result
+        comes through, timestamps present."""
+        client = self._staff_client()
+        job_id = "a" * 32
+        self._make_task_row(
+            task_id=job_id,
+            success=True,
+            result={"status": "requested", "hostname": "example.com"},
+        )
+
+        resp = client.get(self._url(job_id=job_id))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        attrs = body["data"]["attributes"]
+        self.assertEqual(body["data"]["type"], "scrape-profile-sharpen-status")
+        self.assertEqual(body["data"]["id"], job_id)
+        self.assertEqual(attrs["status"], "completed")
+        self.assertEqual(
+            attrs["result"],
+            {"status": "requested", "hostname": "example.com"},
+        )
+        self.assertIsNone(attrs["error"])
+        self.assertIsNotNone(attrs["started_at"])
+        self.assertIsNotNone(attrs["stopped_at"])
+
+    def test_failure_returns_failed(self):
+        """A Task row with success=False → status=failed, error text
+        comes through."""
+        client = self._staff_client()
+        job_id = "b" * 32
+        self._make_task_row(
+            task_id=job_id,
+            success=False,
+            result="Traceback (most recent call last): ... RuntimeError: boom",
+        )
+
+        resp = client.get(self._url(job_id=job_id))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        attrs = resp.json()["data"]["attributes"]
+        self.assertEqual(attrs["status"], "failed")
+        self.assertIn("RuntimeError: boom", attrs["error"])
+        self.assertIsNone(attrs["result"])
+        self.assertIsNotNone(attrs["stopped_at"])
+
+    def test_pending_returns_pending(self):
+        """A job id that only appears in OrmQ (queued, not yet
+        executed) → status=pending. The view walks OrmQ rows because
+        OrmQ.key is the cluster name, not the task id; the id lives
+        inside the signed payload. Patch OrmQ to control what it
+        sees without depending on django-q's signing internals."""
+        client = self._staff_client()
+        job_id = "c" * 32
+
+        class _FakeQueued:
+            def __init__(self, tid):
+                self._tid = tid
+
+            def task_id(self):
+                return self._tid
+
+        with patch(
+            "django_q.models.OrmQ.objects.all",
+            return_value=[_FakeQueued(job_id)],
+        ):
+            resp = client.get(self._url(job_id=job_id))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        attrs = resp.json()["data"]["attributes"]
+        self.assertEqual(attrs["status"], "pending")
+        self.assertIsNone(attrs["result"])
+        self.assertIsNone(attrs["error"])
+        self.assertIsNone(attrs["started_at"])
+        self.assertIsNone(attrs["stopped_at"])
+
+    def test_unknown_returns_unknown(self):
+        """A job id not in Success, Failure, or OrmQ → status=unknown
+        (job was never enqueued OR records have been pruned)."""
+        client = self._staff_client()
+        resp = client.get(self._url(job_id="d" * 32))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        attrs = resp.json()["data"]["attributes"]
+        self.assertEqual(attrs["status"], "unknown")
+        self.assertIsNone(attrs["result"])
+        self.assertIsNone(attrs["error"])
+
+    def test_malformed_ormq_row_does_not_500(self):
+        """A queued row whose payload can't be decoded must not crash
+        the status endpoint — the view treats it as not-this-job and
+        moves on."""
+        client = self._staff_client()
+        job_id = "e" * 32
+
+        class _BrokenQueued:
+            def task_id(self):
+                raise ValueError("signed-package decode error")
+
+        with patch(
+            "django_q.models.OrmQ.objects.all",
+            return_value=[_BrokenQueued()],
+        ):
+            resp = client.get(self._url(job_id=job_id))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            resp.json()["data"]["attributes"]["status"], "unknown"
+        )
