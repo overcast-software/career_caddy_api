@@ -599,7 +599,10 @@ if TESTING:
 # daemon-thread spawn points + 2 polling daemons.
 Q_CLUSTER = {
     "name": "career_caddy",
-    "workers": 2,
+    # Env-driven so each host can be tuned independently (rn at 1 for
+    # breathing room, off-rn workers at 2). Default 2 preserves the
+    # Phase 1 baseline.
+    "workers": int(os.environ.get("Q_WORKERS", 2)),
     "recycle": 500,
     "timeout": 300,
     "retry": 360,  # Higher than timeout so timed-out tasks don't re-queue immediately
