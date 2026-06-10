@@ -196,6 +196,21 @@ class CompanyViewSet(BaseViewSet):
                 Q(discoveries__user_id=request.user.id)
             ).distinct()
         posts = list(qs)
+        # Pre-attach user-scoped `_top_score` to each JobPost so the
+        # serializer reports the requesting user's highest score, not
+        # the cross-user max. Without this the model property falls
+        # through to the unscoped query and leaks other users' scores
+        # via this shared JobPost row (the same leak the serializer's
+        # null-emit guard catches when `_top_score` is absent).
+        if posts:
+            post_ids = [j.id for j in posts]
+            top_score_map = {}
+            for s in Score.objects.filter(
+                job_post_id__in=post_ids, user_id=request.user.id,
+            ).order_by("job_post_id", "-score"):
+                top_score_map.setdefault(s.job_post_id, s)
+            for j in posts:
+                j._top_score = top_score_map.get(j.id)
         data = [JobPostSerializer().to_resource(j) for j in posts]
         return Response({"data": data})
 
@@ -221,7 +236,16 @@ class CompanyViewSet(BaseViewSet):
     def scrapes(self, request, pk=None):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        scrapes_list = list(Scrape.objects.filter(company_id=int(pk)))
+        # Scope to the requesting user's own scrapes. Staff bypasses the
+        # filter (admin tools surface every scrape on the company; mirrors
+        # the staff bypass on `.job_posts`). Without this filter the
+        # endpoint leaked every other user's scrape rows for the shared
+        # Company — same tenancy boundary as `Score`, `JobApplication`,
+        # `CoverLetter`.
+        qs = Scrape.objects.filter(company_id=int(pk))
+        if not request.user.is_staff:
+            qs = qs.filter(created_by_id=request.user.id)
+        scrapes_list = list(qs)
         data = [ScrapeSerializer().to_resource(s) for s in scrapes_list]
         return Response({"data": data})
 

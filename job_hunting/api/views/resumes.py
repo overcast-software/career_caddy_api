@@ -943,7 +943,16 @@ class ResumeViewSet(BaseViewSet):
         obj = Resume.objects.filter(pk=int(pk)).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        data = [ScoreSerializer().to_resource(s) for s in obj.scores.all()]
+        # Resume + Score are both per-user. A request for another user's
+        # resume's scores must 404 — not 200 with an empty list (that
+        # discloses existence) and not 200 with leaked rows (which is
+        # what the unscoped `obj.scores.all()` did). Two defenses:
+        # ownership 404 + user_id filter on the listing itself, so even
+        # a malformed shared-resume future doesn't silently leak.
+        if obj.user_id != request.user.id and not request.user.is_staff:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        scores = obj.scores.filter(user_id=request.user.id) if not request.user.is_staff else obj.scores.all()
+        data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
     @action(
