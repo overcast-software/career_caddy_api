@@ -95,7 +95,13 @@ def _log_scrape_status(
             if status_label in ("completed", "failed"):
                 update_fields["claimed_at"] = None
                 update_fields["claimed_by"] = None
-            else:
+            elif status_label != "hold":
+                # `hold` is the pre-claim queue state — no runner owns the
+                # row yet, so heartbeating claimed_at here would cause
+                # claim-next (filter: claimed_at IS NULL) to skip it
+                # forever. Only bump for in-flight non-terminal states
+                # (running, extracting, updating_profile, …) that an
+                # active runner owns and needs to keep the lease on.
                 update_fields["claimed_at"] = timezone.now()
             # Persist the operator-facing diagnostic on terminal
             # failures only — truncated to fit the column. Non-failed
