@@ -95,8 +95,15 @@ class JSONAPITests(APITransactionTestCase):
         self.assertEqual(resp.data["data"][0]["type"], "job-post")
         self.assertEqual(resp.data["data"][0]["id"], str(job.id))
 
-        # Add score to job post and check linkage endpoint
-        score = Score.objects.create(score=88, explanation="Good fit", job_post_id=job.id)
+        # Add score to job post and check linkage endpoint. Score.user
+        # must be the authenticated user — the generic
+        # /relationships/<rel>/ endpoint user-scopes targets when the
+        # target serializer declares user_fk (see fix #170: the
+        # privacy commit that closed the cross-user Score sideload
+        # leak). An unowned (user=NULL) Score would be filtered out.
+        score = Score.objects.create(
+            score=88, explanation="Good fit", job_post_id=job.id, user_id=self.user.id,
+        )
 
         # Relationship linkage: /job-posts/{id}/relationships/scores
         resp = self.client.get(f"/api/v1/job-posts/{job.id}/relationships/scores/")
