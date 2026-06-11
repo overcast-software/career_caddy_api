@@ -929,13 +929,33 @@ class ScrapeViewSet(BaseViewSet):
         )
 
         scr_ser = self.get_serializer()
+        resource = scr_ser.to_resource(scrape)
+        # Observability for the 2026-06-10 cc_sender popup bug
+        # ("Sent, but no scrape id returned"). The serializer always
+        # populates `id`, but if the wire shape ever regresses to a
+        # body without it, the operator-facing log line here pins the
+        # corresponding Scrape row so we can correlate prod evidence.
+        # Costs one structured log per from-text call; cheap insurance.
+        logger.info(
+            "from_text: returning scrape id=%s job_post_id=%s status=%s "
+            "wire_id=%r source=%s",
+            scrape.id, scrape.job_post_id, scrape.status,
+            resource.get("id"), source,
+        )
         return Response(
             {
-                "data": scr_ser.to_resource(scrape),
+                "data": resource,
                 "meta": {
                     "apply_match": apply_match_id,
                     "referrer_match": referrer_match_id,
                     "canonical_redirect": canonical_redirect,
+                    # Mirror scrape_id into meta as a fallback channel.
+                    # The popup's primary read remains data.id; this is
+                    # the safety net for the case where the body parser
+                    # fails (e.g. proxy strips body, or future renderer
+                    # bug nukes id). Cheap to add, makes the failure
+                    # mode self-recovering rather than user-visible.
+                    "scrape_id": scrape.id,
                 },
             },
             status=status.HTTP_202_ACCEPTED,

@@ -94,6 +94,186 @@ class TestScrapeFromText(TestCase):
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
+class TestScrapeFromTextResponseShape(TestCase):
+    """Pin the JSON:API response envelope on every 2xx return path.
+
+    The cc_sender browser extension popup reads ``body.data.id`` (the
+    scrape id) and ``body.data.relationships['job-post'].data.id``
+    immediately after a 202. Both must be present even on the
+    no-hints / no-existing-JP path Doug hit on 2026-06-10 — the popup
+    surfaces the misleading "Sent, but no scrape id returned." error
+    when either is missing, with no actionable detail in the log.
+    Regression guard: every 2xx envelope must carry ``data.id`` (a
+    non-empty digit string), ``data.type == 'scrape'``, and a
+    ``data.relationships['job-post']`` linkage block (even when the
+    linkage data is ``None``, the key + ``links`` MUST be present so
+    the popup's optional-chaining lookup doesn't fall off the cliff).
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="shape", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    def _assert_envelope(self, body, *, expect_meta=True):
+        """Single source of truth for the popup-side contract."""
+        self.assertIn("data", body, "envelope missing top-level 'data' key")
+        self.assertIsInstance(body["data"], dict, "'data' must be an object, not null/array")
+        data = body["data"]
+        self.assertEqual(data.get("type"), "scrape", "data.type must be 'scrape'")
+        scrape_id = data.get("id")
+        self.assertIsInstance(scrape_id, str, "data.id must be a string per JSON:API")
+        self.assertTrue(scrape_id, "data.id must be non-empty (popup reads body.data.id)")
+        self.assertTrue(
+            scrape_id.isdigit(),
+            f"data.id must be a numeric string, got {scrape_id!r}",
+        )
+        self.assertIn("attributes", data, "data.attributes block required")
+        self.assertIn("relationships", data, "data.relationships block required")
+        rels = data["relationships"]
+        # The popup reads body.data.relationships['job-post'].data.id —
+        # even when no JP is linked yet, the linkage block (data=None +
+        # links) MUST exist so optional-chaining returns null instead of
+        # throwing on a missing key path.
+        self.assertIn(
+            "job-post", rels,
+            "data.relationships['job-post'] block required (cc_sender popup contract)",
+        )
+        jp_rel = rels["job-post"]
+        self.assertIsInstance(jp_rel, dict, "job-post relationship must be an object")
+        # data may be None when no JP linked; the KEY must be present.
+        self.assertIn(
+            "data", jp_rel,
+            "data.relationships['job-post'].data key required even when None",
+        )
+        if expect_meta:
+            self.assertIn("meta", body, "from-text 2xx must carry meta envelope")
+            meta = body["meta"]
+            self.assertIn("apply_match", meta)
+            self.assertIn("referrer_match", meta)
+            self.assertIn("canonical_redirect", meta)
+            # Fallback channel for the 2026-06-10 popup bug. If the
+            # primary data.id read ever fails (proxy strips body,
+            # serializer regression, etc.), the popup can read
+            # body.meta.scrape_id and still recover. The contract is
+            # that BOTH must agree; the test below pins that.
+            self.assertIn(
+                "scrape_id", meta,
+                "from-text meta must mirror scrape_id (popup fallback channel)",
+            )
+            self.assertEqual(
+                str(meta["scrape_id"]), scrape_id,
+                "meta.scrape_id must equal data.id",
+            )
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_envelope_has_data_id_on_minimal_paste(self, _mock_parse):
+        """No link, no hints — Doug's failure shape. body.data.id required."""
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Senior Engineer at Acme. Remote."},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self._assert_envelope(resp.json())
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_envelope_matches_cc_sender_popup_submission(self, _mock_parse):
+        """Exact wire shape the cc_sender popup posts on the from-text
+        fall-through path (useDirectPost=false): link present, source=
+        'extension', auto_score=true, all hint fields explicitly null
+        and structured_prefill null. This is the path Doug hit when the
+        popup reported 'Sent, but no scrape id returned' against a page
+        whose ScrapeProfile selectors yielded no structured prefill.
+        """
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={
+                "text": "Senior Backend Engineer at Acme. Remote-friendly.",
+                "link": "https://jobs.example.com/postings/abc-123",
+                "source": "extension",
+                "auto_score": True,
+                "apply_url": None,
+                "canonical_link_hint": None,
+                "referrer_url": None,
+                "structured_prefill": None,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self._assert_envelope(resp.json())
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_envelope_intact_when_parse_creates_no_job_post(self, _mock_parse):
+        """When parse_scrape no-ops (mock leaves job_post_id None), the
+        scrape envelope must still carry data.id. The bug scenario:
+        parse fails silently to create a JP, but the wire response must
+        still pin the scrape so the popup can show 'Added' and the user
+        can navigate to the in-flight scrape.
+        """
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Some content the extractor can't parse."},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        body = resp.json()
+        self._assert_envelope(body)
+        # Confirm the JP linkage is the empty form (data=None) — NOT
+        # missing the relationships block entirely.
+        self.assertIsNone(
+            body["data"]["relationships"]["job-post"]["data"],
+            "job-post linkage data should be None when no JP linked",
+        )
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
+    def test_envelope_includes_jp_linkage_after_successful_parse(self, mock_analyze):
+        """End-to-end through real parse_scrape with mocked LLM: confirm
+        the JP linkage data carries the new JobPost id so the popup can
+        route the user via body.data.relationships['job-post'].data.id.
+        """
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+
+        mock_analyze.return_value = ParsedJobData(
+            title="Staff Engineer",
+            company_name="ShapeCorp",
+            description="Build reliable distributed systems. " * 5,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Staff Engineer at ShapeCorp. " * 20, "source": "extension"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        body = resp.json()
+        self._assert_envelope(body)
+        scrape_id = int(body["data"]["id"])
+        scrape = Scrape.objects.get(pk=scrape_id)
+        jp_linkage = body["data"]["relationships"]["job-post"]["data"]
+        self.assertIsNotNone(jp_linkage, "JP linkage data must be populated after successful parse")
+        self.assertEqual(jp_linkage["type"], "job-post")
+        self.assertEqual(jp_linkage["id"], str(scrape.job_post_id))
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_envelope_id_matches_db_row(self, _mock_parse):
+        """body.data.id must be the actual Scrape pk, not some serializer
+        artifact. Pins the contract that the popup can round-trip the id
+        back through GET /scrapes/:id/ without translation.
+        """
+        resp = self.client.post(
+            "/api/v1/scrapes/from-text/",
+            data={"text": "Round-trip content."},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        body = resp.json()
+        scrape_id_str = body["data"]["id"]
+        # Round-trip: the wire id must be parsable back to an existing pk.
+        scrape = Scrape.objects.get(pk=int(scrape_id_str))
+        self.assertEqual(str(scrape.pk), scrape_id_str)
+
+
+@patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
 class TestScrapeFromTextDuplicateLink(TestCase):
     """Inbox bug: pasting a URL whose JobPost already exists used to create
     a Scrape and run the full LLM extraction before the dedup check fired —
