@@ -348,8 +348,51 @@ class DjangoUserSerializer:
     type = "user"
     model = get_user_model()
 
+    # Declared relationships drive both the per-rel links block and the
+    # `?include=` gate. Mirrors the (rel_name, rel_type, url_segment)
+    # tuple used by the old eager-linkage loop, so get_related() and the
+    # view's _build_included() keep working unchanged.
+    _REL_DEFS = [
+        ("resumes", "resume", "resumes"),
+        ("scores", "score", "scores"),
+        ("cover-letters", "cover-letter", "cover-letters"),
+        ("job-applications", "job-application", "job-applications"),
+        ("summaries", "summary", "summaries"),
+    ]
+
     def accepted_types(self):
         return {self.type, _pluralize_type(self.type)}
+
+    def _requested_includes(self) -> set:
+        """Parse the request's ?include= (and ?includes=) into the set
+        of relationship names this serializer should emit `data`
+        linkage for. Tolerates dasherized/underscored variants. Returns
+        the empty set when no include is requested OR when no request
+        is attached — the latter is the read-time default that keeps
+        /me/ JSON:API-compliant (links-only relationships).
+        """
+        request = getattr(self, "request", None)
+        if request is None:
+            return set()
+        raw_parts = []
+        for key in ("include", "includes"):
+            val = request.query_params.get(key)
+            if val:
+                raw_parts.extend(
+                    s.strip() for s in str(val).split(",") if s.strip()
+                )
+        if not raw_parts:
+            return set()
+        rel_keys = {name for name, _t, _u in self._REL_DEFS}
+        out = set()
+        for name in raw_parts:
+            if name in rel_keys:
+                out.add(name)
+                continue
+            dasher = name.replace("_", "-")
+            if dasher in rel_keys:
+                out.add(dasher)
+        return out
 
     def to_resource(self, obj) -> Dict[str, Any]:
         # Fetch profile fields from Django Profile
@@ -414,28 +457,29 @@ class DjangoUserSerializer:
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
 
-        # Build relationships with resource linkage so clients can resolve sideloaded records.
-        rel_defs = [
-            ("resumes", "resume", "resumes"),
-            ("scores", "score", "scores"),
-            ("cover-letters", "cover-letter", "cover-letters"),
-            ("job-applications", "job-application", "job-applications"),
-            ("summaries", "summary", "summaries"),
-        ]
+        # JSON:API: relationships objects hold `links` by default. The
+        # `data` linkage array is only emitted when the client asked for
+        # the relationship via `?include=`. Without this gate the /me/
+        # response was hundreds of KB for power users (280+ scores,
+        # 250+ job-applications, etc) and violated the spec.
+        included_rels = self._requested_includes()
         relationships = {}
-        for rel_name, rel_type, url_segment in rel_defs:
-            try:
-                _, items = self.get_related(obj, rel_name)
-                linkage_data = [{"type": rel_type, "id": str(item.id)} for item in items]
-            except Exception:
-                linkage_data = []
-            relationships[rel_name] = {
-                "data": linkage_data,
+        for rel_name, rel_type, url_segment in self._REL_DEFS:
+            rel_payload: Dict[str, Any] = {
                 "links": {
                     "self": f"{_resource_base_path(self.type)}/{obj.id}/relationships/{rel_name}",
                     "related": f"{_resource_base_path(self.type)}/{obj.id}/{url_segment}",
                 },
             }
+            if rel_name in included_rels:
+                try:
+                    _, items = self.get_related(obj, rel_name)
+                    rel_payload["data"] = [
+                        {"type": rel_type, "id": str(item.id)} for item in items
+                    ]
+                except Exception:
+                    rel_payload["data"] = []
+            relationships[rel_name] = rel_payload
         res["relationships"] = relationships
         return res
 
