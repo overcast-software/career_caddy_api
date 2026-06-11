@@ -132,7 +132,15 @@ class DjangoUserViewSet(viewsets.ViewSet):
         return super().get_throttles()
 
     def get_serializer(self, *args, **kwargs):
-        return DjangoUserSerializer()
+        ser = DjangoUserSerializer()
+        # Attach the request so DjangoUserSerializer can gate per-rel
+        # `data` linkage on ?include=, matching BaseSerializer's
+        # JSON:API-compliant behavior. Falls back to None for codepaths
+        # (tests, internal callers) that build a serializer without a
+        # request — in that mode no relationships emit `data`, which
+        # is the spec default.
+        ser.request = getattr(self, "request", None)
+        return ser
 
     def _parse_include(self, request):
         raw = []
