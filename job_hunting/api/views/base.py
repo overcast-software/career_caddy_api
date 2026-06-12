@@ -1,3 +1,4 @@
+import logging
 import os
 
 from django.conf import settings
@@ -25,6 +26,8 @@ from ._schema import (
     _JSONAPI_ITEM,
     _JSONAPI_WRITE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BaseViewSet(viewsets.ViewSet):
@@ -101,7 +104,26 @@ class BaseViewSet(viewsets.ViewSet):
         return ser
 
     def _is_slim_request(self, request) -> bool:
-        return bool(request.query_params.get("slim"))
+        """Legacy `?slim=true` flag — translated to the equivalent
+        sparse-fieldset emission via BaseSerializer.slim_attributes.
+        Being retired in favor of explicit
+        `?fields[<type>]=...` + `?meta=counts` (Resume only). Emits a
+        structured deprecation log line on every consumption so we
+        can watch frontend callers migrate.
+        """
+        raw = request.query_params.get("slim")
+        if not raw:
+            return False
+        try:
+            user_id = getattr(getattr(request, "user", None), "id", None)
+            route = getattr(request, "path", "")
+            logger.info(
+                "serializer.slim.deprecated route=%s user_id=%s value=%r",
+                route, user_id, raw,
+            )
+        except Exception:
+            pass
+        return True
 
     def pre_save_payload(self, request, attrs: dict, creating: bool) -> dict:
         """Hook for subclasses to adjust/force attributes before persistence."""

@@ -95,8 +95,16 @@ class BaseSerializer:
     read_only_attributes: List[str] = []
     relationships: Dict[str, Dict[str, Any]] = {}
     relationship_fks: Dict[str, str] = {}
-    # Subclasses can declare which attributes to expose when slim=True.
-    # Defaults to ["name"] — override per serializer as needed.
+    # Legacy slim translation table. The wire `?slim=true` flag is
+    # being retired in favor of JSON:API sparse-fieldsets
+    # (`?fields[<type>]=...`). For the deprecation window, this list
+    # is the equivalence map: when a request arrives with
+    # `?slim=true`, `to_resource` emits exactly these attributes
+    # (i.e. as if the client had asked
+    # `?fields[<type>]=<slim_attributes joined>`). Subclasses still
+    # override this list to declare their legacy slim shape.
+    # Removal lands once every documented caller migrates; see the
+    # follow-up todo on the parent for the cc-frontend half.
     slim_attributes: List[str] = ["name"]
     slim: bool = False
     # Set to a FK field name (e.g. "user_id", "created_by_id") to auto-inject
@@ -115,16 +123,6 @@ class BaseSerializer:
 
     def accepted_types(self):
         return {self.type, _pluralize_type(self.type)}
-
-    def to_slim_resource(self, obj) -> Dict[str, Any]:
-        """Return a minimal representation suitable for dropdown lists."""
-        return {
-            "type": self.type,
-            "id": str(obj.id),
-            "attributes": {
-                k: _to_primitive(getattr(obj, k, None)) for k in self.slim_attributes
-            },
-        }
 
     def _requested_fieldset(self):
         """Return the explicit attribute list from `fields[<type>]`, or None
@@ -181,9 +179,22 @@ class BaseSerializer:
         return name in {s.strip() for s in str(raw).split(",") if s.strip()}
 
     def to_resource(self, obj) -> Dict[str, Any]:
-        if self.slim:
-            return self.to_slim_resource(obj)
+        # Legacy slim alias: `?slim=true` is equivalent to
+        # `?fields[<type>]=<slim_attributes>` for the deprecation
+        # window. Keep relationships/links emission consistent with the
+        # JSON:API spec path by routing both through the same fieldset
+        # filter; only the *source* of the requested attribute list
+        # differs. Subclasses that consume `self.slim` for additional
+        # side-effects (Resume's meta.counts, gated linked_relationships)
+        # continue to do so explicitly.
         fieldset = self._requested_fieldset()
+        if self.slim and fieldset is None:
+            # Intersect with declared `attributes` so derived properties
+            # named in slim_attributes but absent from `attributes` don't
+            # crash getattr below. Existing behavior held: every entry in
+            # ResumeSerializer.slim_attributes is already in attributes.
+            declared = set(self.attributes)
+            fieldset = [a for a in self.slim_attributes if a in declared]
         attrs_to_emit = self.attributes if fieldset is None else fieldset
         res = {
             "type": self.type,
@@ -394,6 +405,23 @@ class DjangoUserSerializer:
                 out.add(dasher)
         return out
 
+    def _requested_fieldset(self, declared):
+        """JSON:API `?fields[user]=...` parse. Returns a list of declared
+        attribute names in the requested set, or None when no fieldset
+        filter is in effect. Mirrors BaseSerializer._requested_fieldset
+        but takes the declared set as an argument (the User serializer
+        builds its attributes inline rather than from an `attributes`
+        class var).
+        """
+        request = getattr(self, "request", None)
+        if request is None:
+            return None
+        raw = request.query_params.get(f"fields[{self.type}]")
+        if raw is None:
+            return None
+        requested = {s.strip() for s in str(raw).split(",") if s.strip()}
+        return [a for a in declared if a in requested]
+
     def to_resource(self, obj) -> Dict[str, Any]:
         # Fetch profile fields from Django Profile
         phone = ""
@@ -435,25 +463,31 @@ class DjangoUserSerializer:
                 obj.first_name and obj.last_name and (obj.email or "")
             )
 
+        all_attrs = {
+            "username": obj.username,
+            "email": obj.email or "",
+            "first_name": obj.first_name or "",
+            "last_name": obj.last_name or "",
+            "phone": phone or "",
+            "is_guest": is_guest,
+            "is_staff": bool(obj.is_staff),
+            "is_active": bool(obj.is_active),
+            "linkedin": linkedin,
+            "github": github,
+            "address": address,
+            "links": links,
+            "onboarding": onboarding,
+            "auto_score": auto_score,
+        }
+        # JSON:API sparse-fieldsets: `?fields[user]=username,email`. Unknown
+        # keys are silently dropped, matching the BaseSerializer behavior.
+        fieldset = self._requested_fieldset(set(all_attrs.keys()))
+        if fieldset is not None:
+            all_attrs = {k: all_attrs[k] for k in fieldset}
         res = {
             "type": self.type,
             "id": str(obj.id),
-            "attributes": {
-                "username": obj.username,
-                "email": obj.email or "",
-                "first_name": obj.first_name or "",
-                "last_name": obj.last_name or "",
-                "phone": phone or "",
-                "is_guest": is_guest,
-                "is_staff": bool(obj.is_staff),
-                "is_active": bool(obj.is_active),
-                "linkedin": linkedin,
-                "github": github,
-                "address": address,
-                "links": links,
-                "onboarding": onboarding,
-                "auto_score": auto_score,
-            },
+            "attributes": all_attrs,
         }
         res["links"] = {"self": f"{_resource_base_path(self.type)}/{obj.id}"}
 
@@ -584,9 +618,17 @@ class ResumeSerializer(BaseSerializer):
 
     def to_resource(self, obj):
         res = super().to_resource(obj)
-        if self.slim:
+        # `meta.counts` is the historical slim-mode side-channel for
+        # dropdown lists that need badge counts. Today it ships on
+        # `?slim=true`. Forward path: `?meta=counts` is the explicit
+        # opt-in that survives the slim retirement; the slim alias
+        # implies it too during the deprecation window.
+        if self.slim or self._meta_counts_requested():
             res["meta"] = self._build_counts(obj)
-            return res
+            if self.slim:
+                # Existing slim contract: no `summary` convenience
+                # attribute, no included sideloads — short-circuit.
+                return res
         # Convenience attribute: active summary content. Respect
         # fields[resume] sparse-fieldsets — only emit when not filtered out.
         if self._field_requested("summary"):
@@ -595,6 +637,18 @@ class ResumeSerializer(BaseSerializer):
             except Exception:
                 pass
         return res
+
+    def _meta_counts_requested(self) -> bool:
+        """True when the client opted into `?meta=counts` explicitly.
+        Used as the forward-compat replacement for the slim-mode
+        `meta.counts` side-channel."""
+        request = getattr(self, "request", None)
+        if request is None:
+            return False
+        raw = request.query_params.get("meta")
+        if not raw:
+            return False
+        return "counts" in {s.strip() for s in str(raw).split(",") if s.strip()}
 
     def _build_counts(self, obj):
         from job_hunting.models import ResumeExperience, ResumeSkill
