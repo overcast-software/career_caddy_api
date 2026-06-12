@@ -422,6 +422,107 @@ class CompanyViewSet(BaseViewSet):
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(target)}, status=status.HTTP_200_OK)
 
+    @extend_schema(
+        tags=["Companies"],
+        summary="Mark this company as an alias of another (staff only)",
+        responses={
+            200: _JSONAPI_LIST,
+            400: None,
+            403: None,
+            404: None,
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="mark-as-alias-of")
+    def mark_as_alias_of(self, request, pk=None):
+        """Soft-alias verb — set ``self.canonical_id = target_id``.
+
+        Distinct from ``merge-into`` (destructive cut). This action
+        leaves both Company rows in place; the source row simply
+        gains a ``canonical_id`` pointer to the target. Phase B work
+        will switch JobPost / Scrape ingestion to consult the
+        canonical pointer; Phase C drops the legacy ``CompanyAlias``
+        model.
+
+        Body shape (plain JSON or JSON:API both accepted):
+
+            {"target_id": <int>}
+            {"data": {"attributes": {"target_id": <int>}}}
+
+        Side effects (all in ``Company.mark_as_alias_of``):
+        - ``self.canonical_id = target_id``.
+        - Re-points every Company currently aliased AT self at the
+          new canonical root (one-level invariant).
+        - If target is itself an alias, walks to the root canonical.
+
+        Errors:
+        - 400 ``target_id`` missing / non-int / equal to self.id.
+        - 400 cycle (target.canonical chain loops back to self).
+        - 403 caller is not staff.
+        - 404 self or target Company id not found.
+        """
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Only staff may alias companies."}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        source = Company.objects.filter(pk=pk).first()
+        if not source:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        target_id = self._extract_target_id(request.data)
+        if target_id is None:
+            return Response(
+                {"errors": [{"detail": "target_id is required."}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            target_id = int(target_id)
+        except (TypeError, ValueError):
+            return Response(
+                {"errors": [{"detail": "target_id must be an integer."}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not Company.objects.filter(pk=target_id).exists():
+            return Response(
+                {"errors": [{"detail": "target Company not found."}]},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            source.mark_as_alias_of(target_id)
+        except ValueError as exc:
+            return Response(
+                {"errors": [{"detail": str(exc)}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(source)}, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=["Companies"],
+        summary="List Company aliases (rows whose canonical_id == this id)",
+        responses={200: _JSONAPI_LIST},
+    )
+    @action(detail=True, methods=["get"], url_path="aliases")
+    def aliases(self, request, pk=None):
+        """Sub-collection: every Company whose ``canonical_id = pk``.
+
+        Returns Company resources (same type as the parent). The
+        frontend's ``Companies::AliasesPanel`` (cf-frontend territory)
+        consumes this via a sub-collection adapter analogous to
+        ``frontend/app/adapters/job-post-duplicate-candidate.js``.
+        """
+        if not Company.objects.filter(pk=pk).exists():
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        aliases_qs = list(Company.objects.filter(canonical_id=int(pk)))
+        ser = self.get_serializer()
+        return Response(
+            {"data": [ser.to_resource(c) for c in aliases_qs]}
+        )
+
     @staticmethod
     def _extract_target_id(payload):
         """Pull ``target_id`` from plain-JSON or JSON:API body shapes."""
