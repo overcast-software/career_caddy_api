@@ -1305,7 +1305,7 @@ class ScrapeStatusSerializer(BaseSerializer):
 class CompanySerializer(BaseSerializer):
     type = "company"
     model = Company
-    attributes = ["name", "display_name", "notes"]
+    attributes = ["name", "display_name", "notes", "source", "name_slug"]
     relationships = {
         "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
         "job-applications": {
@@ -1316,7 +1316,17 @@ class CompanySerializer(BaseSerializer):
         "scrapes": {"attr": "scrapes", "type": "scrape", "uselist": True},
         "questions": {"attr": "questions", "type": "question", "uselist": True},
         "scores": {"attr": "scores", "type": "score", "uselist": True},
+        # Phase A self-FK alias relationships.
+        # `canonical` (to-one) is the forward FK — NULL when this
+        # row IS canonical. `aliases` (to-many) is the reverse —
+        # every Company whose canonical_id == self.id.
+        # Both follow the spec's links-only-by-default rule. The
+        # `data` linkage emits only when the client passes
+        # `?include=canonical` / `?include=aliases`.
+        "canonical": {"attr": "canonical", "type": "company", "uselist": False},
+        "aliases": {"attr": "aliases", "type": "company", "uselist": True},
     }
+    relationship_fks = {"canonical": "canonical_id"}
 
     def get_related(self, obj, rel_name):
         request = getattr(self, "request", None)
@@ -1342,6 +1352,13 @@ class CompanySerializer(BaseSerializer):
             if user_id:
                 qs = qs.filter(user_id=user_id)
             return "job-application", list(qs)
+        elif rel_name == "aliases":
+            return "company", list(Company.objects.filter(canonical_id=obj.id))
+        elif rel_name == "canonical":
+            if obj.canonical_id is None:
+                return "company", []
+            target = Company.objects.filter(pk=obj.canonical_id).first()
+            return "company", [target] if target else []
         return None, []
 
 

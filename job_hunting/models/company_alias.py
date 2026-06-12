@@ -36,10 +36,16 @@ class CompanyAlias(models.Model):
         (SOURCE_BACKFILL, "backfill"),
     ]
 
+    # Phase A self-FK on Company claimed the `aliases` reverse
+    # accessor (canonical→aliases on Company itself). This legacy
+    # reverse renames to `legacy_aliases` so the two don't collide.
+    # The model + table goes away in Phase C; no live caller uses
+    # this reverse accessor today (only the alias.company forward
+    # FK is read), so renaming is safe.
     company = models.ForeignKey(
         "Company",
         on_delete=models.CASCADE,
-        related_name="aliases",
+        related_name="legacy_aliases",
     )
     name = models.CharField(max_length=255)
     name_slug = models.CharField(max_length=255, db_index=True, unique=True)
