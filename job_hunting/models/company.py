@@ -54,7 +54,7 @@ class Company(GetMixin, models.Model):
             # any future write path (admin, shell, migration) from
             # corrupting the graph with a self-loop.
             models.CheckConstraint(
-                check=Q(canonical__isnull=True) | ~Q(canonical=F("id")),
+                condition=Q(canonical__isnull=True) | ~Q(canonical=F("id")),
                 name="company_canonical_not_self",
             ),
         ]

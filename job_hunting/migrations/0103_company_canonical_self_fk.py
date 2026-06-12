@@ -72,7 +72,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="company",
             constraint=models.CheckConstraint(
-                check=models.Q(canonical__isnull=True)
+                condition=models.Q(canonical__isnull=True)
                 | ~models.Q(canonical=models.F("id")),
                 name="company_canonical_not_self",
             ),
