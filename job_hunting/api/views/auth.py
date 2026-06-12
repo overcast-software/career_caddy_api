@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 def profile(request):
     """Get the current user's profile information."""
     ser = DjangoUserSerializer()
+    # Propagate the request so the serializer honors JSON:API
+    # `?fields[user]=...` sparse-fieldsets and `?include=...`.
+    ser.request = request
     resource = ser.to_resource(request.user)
     return Response({"data": resource})
 
