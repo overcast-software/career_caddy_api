@@ -985,8 +985,16 @@ class JobPostSerializer(BaseSerializer):
         # this row. Read-only to clients — the API sets it from settings
         # on create, federation pull paths set it from the remote actor.
         "source_instance",
+        # Phase 4 tombstone: timestamp at which the originating instance
+        # broadcast an ActivityPub ``Delete`` for this row. NULL for
+        # local-origin rows + any federated row whose origin hasn't
+        # retracted it. Read-only — the inbound Delete handler is the
+        # only write path. Surfaces to the frontend so the show / list
+        # views can render the retraction banner without keeping a
+        # second concept of "deleted" client-side.
+        "source_deleted_at",
     ]
-    read_only_attributes = ["source_instance"]
+    read_only_attributes = ["source_instance", "source_deleted_at"]
     relationships = {
         "company": {"attr": "company", "type": "company", "uselist": False},
         "cover-letters": {

@@ -222,6 +222,20 @@ class JobPost(GetMixin, models.Model):
         db_index=True,
     )
 
+    # Tombstone for federated rows whose originating instance has
+    # broadcast a `Delete` activity for this object. Set by the inbound
+    # `Delete` handler (api/views/federation.py::_handle_delete) to
+    # `timezone.now()` when the sender's instance host matches
+    # ``source_instance`` and the target URI resolves to this row. We
+    # never remove the JobPost on remote authority — the column is
+    # purely metadata so the visibility layer (and a forthcoming
+    # frontend banner) can surface "the origin retracted this post"
+    # without losing the row's local relationships (scores, applications,
+    # cover letters). Re-delivery of the same `Delete` is idempotent —
+    # the handler skips overwriting an existing tombstone time so the
+    # audit trail records the first known retraction.
+    source_deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
     class Meta:
         db_table = "job_post"
         indexes = [

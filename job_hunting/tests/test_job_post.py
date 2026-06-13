@@ -29,6 +29,13 @@ class TestJobPostModel(TestCase):
         with self.assertRaises(Exception):
             JobPost.objects.create(link="https://example.com/job/1")
 
+    def test_source_deleted_at_default_null(self):
+        # Phase 4 federation tombstone: freshly-created rows carry a
+        # NULL tombstone time. Only the inbound Delete handler writes
+        # it; ordinary create paths leave it alone.
+        jp = JobPost.objects.create(title="T")
+        self.assertIsNone(jp.source_deleted_at)
+
     def test_apply_url_status_none_coerces_to_unknown(self):
         # Ember Data sends apply_url_status=null on createRecord; the
         # column is NOT NULL with no DB default, so save() must coerce.
