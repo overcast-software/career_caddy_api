@@ -352,6 +352,7 @@ def sign_outbound_post(
     local_actor: Any,
     *,
     now: str | None = None,
+    actor_uri: str | None = None,
 ) -> dict[str, str]:
     """Build signed headers for an outbound AP POST.
 
@@ -359,6 +360,12 @@ def sign_outbound_post(
     ``preferred_username`` we can mint the actor URI from. Returns the
     headers dict (Date, Digest, Host, Content-Type, Signature) ready to
     attach to a request.
+
+    ``actor_uri`` overrides the default ``{origin}/actors/<u>`` URI —
+    Phase 6b Company actors live at ``{origin}/companies/<slug>`` so
+    the keyId + audit-trail actor identity must point at that URI,
+    not the Person-actor path. Caller passes the explicit URI; falls
+    back to the Person-actor builder for Phase 5c parity.
 
     ``now`` is an injection seam for tests that want a stable Date.
     """
@@ -370,7 +377,8 @@ def sign_outbound_post(
     date = now or _http_date_now()
     digest = compute_digest_header(body)
 
-    actor_uri = _local_actor_uri(local_actor)
+    if actor_uri is None:
+        actor_uri = _local_actor_uri(local_actor)
     key_id = f"{actor_uri}#main-key"
     headers_list = ["(request-target)", "host", "date", "digest"]
 
@@ -428,6 +436,7 @@ def deliver(
     local_actor: Any,
     *,
     timeout: float | None = None,
+    actor_uri: str | None = None,
 ) -> tuple[int, str]:
     """POST a signed activity to ``url``.
 
@@ -436,13 +445,17 @@ def deliver(
     in that case. Caller decides retry policy — Phase 5c V1 is
     one-shot, 5d's dispatcher will layer retries on top.
 
+    ``actor_uri`` is forwarded to :func:`sign_outbound_post` so the
+    Company-actor (``/companies/<slug>``) outbound path can sign with
+    its non-Person URI. Default behavior is unchanged.
+
     Body snippet capped at 512 chars so the audit log doesn't bloat
     on a hostile peer that returns an HTML error page.
     """
     timeout = timeout if timeout is not None else getattr(
         settings, "ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT", 10
     )
-    headers = sign_outbound_post(url, body, local_actor)
+    headers = sign_outbound_post(url, body, local_actor, actor_uri=actor_uri)
     try:
         response = requests.post(url, data=body, headers=headers, timeout=timeout)
     except requests.RequestException as exc:

@@ -395,14 +395,15 @@ def _create_discoveries_for_company_actor(
 
     The targeted Company actor URI shape is ``{origin}/companies/<slug>``
     (Phase 6a). When the inbound Note's ``attributedTo`` matches one,
-    we look up the FederationFollower rows where that local Company is
-    the followee and mint discoveries for the local user(s) tied to
-    each. Today FederationFollower keys on ``local_user``, not
-    ``company`` — the Company-actor inbox + Follow handler is a
-    deferred 6b follow-up, so this lookup returns an empty set in
-    practice until that wiring lands. Coded defensively so the lookup
-    can be exercised in tests by constructing the relationship
-    manually.
+    we resolve the local Company by slug and look up active
+    ``FederationFollower`` rows keyed off that ``company_id`` with a
+    ``local_user`` also set — the Phase 6b "local user subscribing to
+    a Company actor" shape. Discoveries need a local User to attribute
+    against; remote-only follower rows (``local_user=NULL``,
+    ``company=set``) carry no local owner so they don't materialize a
+    discovery here. Once 6d (employer self-claim) lands, the
+    Company → claiming-user link can be backfilled into existing
+    rows and the discoveries will flow.
 
     Idempotent — uses ``get_or_create`` with the unique constraint on
     (job_post, user).
@@ -423,28 +424,23 @@ def _create_discoveries_for_company_actor(
     if company is None:
         return 0
 
-    # FederationFollower rows whose local_user maps to a follower of this
-    # company actor. The current schema doesn't carry company on the
-    # follower row (Phase 6a only added the actor itself, not the
-    # Follow handler against it). Bridge via Actor: a follower row
-    # whose local_user_id matches the user_id of an Actor pointing at
-    # this company. That's empty until the Company-inbox Follow handler
-    # ships, but the structure here keeps the wire intact.
-    from job_hunting.models import Actor as _Actor, FederationFollower as _FF
-    actor_ids = _Actor.objects.filter(company_id=company.id).values_list("id", flat=True)
-    if not actor_ids:
-        return 0
-    # Today FederationFollower.local_user is the followee identity, not
-    # the actor row. For Company actors, there is no associated User —
-    # so a Follow against a Company actor today would need a follower
-    # row keyed off the Company. Until that lands, surface no
-    # discoveries automatically; tests construct the rows directly.
-    follower_user_ids = _FF.objects.filter(
-        local_user_id__in=_Actor.objects.filter(
-            company_id=company.id
-        ).values_list("user_id", flat=True),
-        unfollowed_at__isnull=True,
-    ).values_list("local_user_id", flat=True).distinct()
+    from job_hunting.models import FederationFollower as _FF
+
+    # Phase 6b — active followers keyed off the Company FK. Remote
+    # followers carry no local_user (they're remote accounts); the
+    # discovery write only fires for the legacy shape where a local
+    # user followed the Company actor (a path that doesn't exist in
+    # production yet but is wired here so 6d can land without
+    # re-touching this code).
+    follower_user_ids = (
+        _FF.objects.filter(
+            company_id=company.id,
+            unfollowed_at__isnull=True,
+            local_user_id__isnull=False,
+        )
+        .values_list("local_user_id", flat=True)
+        .distinct()
+    )
 
     created = 0
     for user_id in follower_user_ids:
