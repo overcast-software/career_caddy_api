@@ -189,6 +189,89 @@ class TestMarkAsAliasOfEndpoint(TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
 
 
+class TestUnmarkAsAliasOfEndpoint(TestCase):
+    """Inverse verb — promote an alias Company back to canonical.
+
+    Closes the Phase A loop: ``mark-as-alias-of`` sets the FK,
+    ``unmark-as-alias-of`` clears it. Behavior parity with the
+    mark verb: staff-only, 400 on no-op (already canonical), 404
+    on unknown id.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="u_unmark", password="pw")
+        self.staff = User.objects.create_user(
+            username="staff_unmark", password="pw", is_staff=True
+        )
+        self.canonical = Company.objects.create(name="Unmark Canonical")
+        self.alias = Company.objects.create(name="Unmark Alias")
+        self.alias.canonical_id = self.canonical.id
+        self.alias.save(update_fields=["canonical"])
+
+    def test_forbidden_for_non_staff(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post(
+            f"/api/v1/companies/{self.alias.id}/unmark-as-alias-of/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.alias.refresh_from_db()
+        # canonical_id unchanged.
+        self.assertEqual(self.alias.canonical_id, self.canonical.id)
+
+    def test_ok_for_staff_clears_canonical(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post(
+            f"/api/v1/companies/{self.alias.id}/unmark-as-alias-of/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.alias.refresh_from_db()
+        self.assertIsNone(self.alias.canonical_id)
+
+        # Response carries the updated Company resource.
+        body = resp.json()
+        self.assertEqual(body["data"]["id"], str(self.alias.id))
+        self.assertEqual(body["data"]["type"], "company")
+
+    def test_already_canonical_is_400(self):
+        """A canonical Company (canonical_id IS NULL) is not a valid
+        unmark target — explicit 400 so staff don't silently click
+        the wrong row in the AliasesPanel."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post(
+            f"/api/v1/companies/{self.canonical.id}/unmark-as-alias-of/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.canonical.refresh_from_db()
+        self.assertIsNone(self.canonical.canonical_id)
+
+    def test_unknown_id_is_404(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post(
+            "/api/v1/companies/9999999/unmark-as-alias-of/",
+            data={},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_no_payload_required(self):
+        """Verb takes no body — both empty dict and empty string post
+        should be accepted as long as the row is currently an alias."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post(
+            f"/api/v1/companies/{self.alias.id}/unmark-as-alias-of/",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.alias.refresh_from_db()
+        self.assertIsNone(self.alias.canonical_id)
+
+
 class TestAliasesSubCollection(TestCase):
     def setUp(self):
         self.client = APIClient()

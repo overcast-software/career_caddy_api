@@ -510,6 +510,71 @@ class CompanyViewSet(BaseViewSet):
 
     @extend_schema(
         tags=["Companies"],
+        summary="Promote a Company alias back to canonical (staff only)",
+        responses={
+            200: _JSONAPI_LIST,
+            400: None,
+            403: None,
+            404: None,
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="unmark-as-alias-of")
+    def unmark_as_alias_of(self, request, pk=None):
+        """Inverse of ``mark-as-alias-of`` — clear ``self.canonical_id``.
+
+        Closes the Phase A staff-curation loop: promotes an alias Company
+        back to a canonical (``canonical_id = NULL``). Used by the
+        frontend ``Companies::AliasesPanel`` to undo a misapplied alias.
+
+        No request body required.
+
+        Behavior:
+        - 200 with the updated Company resource on success.
+        - 400 when the Company is already canonical (``canonical_id IS
+          NULL``). A no-op silently succeeding would let staff click
+          the wrong row without feedback; explicit 400 surfaces the
+          mistake.
+        - 403 for non-staff (mirrors ``mark-as-alias-of``).
+        - 404 when the Company id is not found.
+
+        Aliases that previously pointed AT this row (during the time it
+        was itself an alias) were already re-pointed at the root by
+        ``mark_as_alias_of``'s one-hop invariant, so unmarking does not
+        need to traverse the reverse relation.
+        """
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"detail": "Only staff may unmark Company aliases."}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        company = Company.objects.filter(pk=pk).first()
+        if not company:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+
+        if company.canonical_id is None:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": (
+                                "Company is already canonical "
+                                "(canonical_id is NULL)."
+                            )
+                        }
+                    ]
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        company.canonical = None
+        company.save(update_fields=["canonical"])
+
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(company)}, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=["Companies"],
         summary="List Company aliases (rows whose canonical_id == this id)",
         responses={200: _JSONAPI_LIST},
     )
