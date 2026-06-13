@@ -74,13 +74,14 @@ class Command(BaseCommand):
         rejected = inbound.filter(delivery_status="rejected").count()
         accepted = inbound.filter(delivery_status="accepted").count()
 
-        # Created: a JobPost row with source="activitypub" was created
+        # Created: a JobPost row with source="federation" was created
         # inside the window. We don't have a direct FK back to the
         # activity row, so we count by JobPost; this is approximate
         # (multi-activity-per-jp doesn't double-count, which is the
-        # desired behavior anyway).
+        # desired behavior anyway). Phase 6b standardised the source
+        # label (was ``"activitypub"`` under 5e — see migration 0107).
         created = JobPost.objects.filter(
-            source="activitypub",
+            source="federation",
             created_at__gte=cutoff,
         ).count()
 

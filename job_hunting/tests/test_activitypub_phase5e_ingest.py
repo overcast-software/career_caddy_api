@@ -119,7 +119,7 @@ class TestIngestCreate(TestCase):
         self.assertEqual(result.outcome, OUTCOME_CREATED)
         self.assertIsNotNone(result.job_post)
         jp = result.job_post
-        self.assertEqual(jp.source, "activitypub")
+        self.assertEqual(jp.source, "federation")
         self.assertEqual(jp.source_instance, "peer.example")
         self.assertEqual(jp.audience, [AS2_PUBLIC])
         self.assertIsNone(jp.created_by_id)
@@ -247,7 +247,7 @@ class TestIngestMerge(TestCase):
         result2 = ingest_create_note(activity2, federation_activity=row2)
         self.assertEqual(result2.outcome, OUTCOME_MERGED)
         self.assertEqual(
-            JobPost.objects.filter(source="activitypub").count(), 1
+            JobPost.objects.filter(source="federation").count(), 1
         )
 
 
@@ -262,7 +262,7 @@ class TestIngestSkipped(TestCase):
         row = _audit_row(activity)
         result = ingest_create_note(activity, federation_activity=row)
         self.assertEqual(result.outcome, OUTCOME_SKIPPED)
-        self.assertEqual(JobPost.objects.filter(source="activitypub").count(), 0)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
 
     def test_skipped_does_not_demote_audit_row(self):
         activity = _activity(note_type="Audio")
@@ -448,7 +448,7 @@ class TestIngestDisabled(TestCase):
         result = ingest_create_note(activity, federation_activity=row)
         self.assertEqual(result.outcome, OUTCOME_SKIPPED)
         self.assertEqual(result.reason, "ingest_disabled")
-        self.assertEqual(JobPost.objects.filter(source="activitypub").count(), 0)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
 
 
 class TestReplayTool(TestCase):
@@ -466,7 +466,7 @@ class TestReplayTool(TestCase):
             _audit_row(activity)
         tally = replay_inbound_creates(limit=10)
         self.assertEqual(tally[OUTCOME_CREATED], 3)
-        self.assertEqual(JobPost.objects.filter(source="activitypub").count(), 3)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 3)
 
 
 # ---------------------------------------------------------------------------
@@ -524,8 +524,8 @@ class TestInboxCallsIngest(TestCase):
         body = self._create_note_payload()
         response = self._post(body)
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(JobPost.objects.filter(source="activitypub").count(), 1)
-        jp = JobPost.objects.get(source="activitypub")
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 1)
+        jp = JobPost.objects.get(source="federation")
         # Source instance taken from the peer actor's host.
         from urllib.parse import urlparse
         self.assertEqual(
@@ -560,7 +560,7 @@ class TestInboxCallsIngest(TestCase):
         )
         self.assertEqual(row.delivery_status, "rejected")
         self.assertIn("not_public", row.delivery_error)
-        self.assertEqual(JobPost.objects.filter(source="activitypub").count(), 0)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
 
     @override_settings(ACTIVITYPUB_INGEST_ENABLED=False)
     def test_inbox_create_with_ingest_disabled_logs_but_no_jobpost(self):
@@ -572,7 +572,7 @@ class TestInboxCallsIngest(TestCase):
                 direction="inbound", activity_type="Create",
             ).exists()
         )
-        self.assertEqual(JobPost.objects.filter(source="activitypub").count(), 0)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
 
 
 # ---------------------------------------------------------------------------

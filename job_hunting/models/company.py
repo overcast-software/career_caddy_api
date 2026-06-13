@@ -7,11 +7,19 @@ class Company(GetMixin, models.Model):
     SOURCE_EXTRACTION = "extraction"
     SOURCE_MANUAL = "manual"
     SOURCE_BACKFILL = "backfill"
+    # Phase 6b — Companies minted on inbound federated JP ingest when
+    # ``careercaddy:extension.company`` doesn't resolve to an existing
+    # row by ``name_slug``. Distinct from ``extraction`` (LLM-derived,
+    # trustworthy enough to auto-merge on later collisions) so the
+    # federation-introduced rows can be filtered out of staff curation
+    # surfaces if they prove noisy.
+    SOURCE_FEDERATION = "federation"
 
     SOURCES = [
         (SOURCE_EXTRACTION, "extraction"),
         (SOURCE_MANUAL, "manual"),
         (SOURCE_BACKFILL, "backfill"),
+        (SOURCE_FEDERATION, "federation"),
     ]
 
     name = models.CharField(max_length=255, unique=True)
