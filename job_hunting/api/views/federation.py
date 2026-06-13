@@ -52,6 +52,7 @@ from job_hunting.models.federation_activity import (
     ACTIVITY_TYPE_FOLLOW,
     ACTIVITY_TYPE_OTHER,
     ACTIVITY_TYPE_UNDO,
+    ACTIVITY_TYPE_UPDATE,
     DELIVERY_ACCEPTED,
     DELIVERY_FAILED,
     DIRECTION_INBOUND,
@@ -1158,11 +1159,46 @@ def _handle_delete(activity: dict, actor: Actor,
 
     # Idempotency — preserve the first-known tombstone time so the
     # audit story doesn't get rewritten by a replay or a re-delivery
-    # weeks later.
+    # weeks later. Phase 6b extends the tombstone with explicit
+    # ``posting_status=closed`` + ``complete=False`` flips so the
+    # closed-row visibility rules + thin-stub gates respond to the
+    # remote retraction without the operator having to flip them by
+    # hand. Only fire on the first known tombstone — subsequent
+    # replays preserve whatever state the user / staff have since
+    # adjusted.
     if job_post.source_deleted_at is None:
         JobPost.objects.filter(pk=job_post.pk).update(
-            source_deleted_at=timezone.now()
+            source_deleted_at=timezone.now(),
+            posting_status="closed",
+            complete=False,
         )
+
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _handle_update(activity: dict, actor: Actor,
+                   verified: federation_signing.VerifiedSignature) -> JsonResponse:
+    """Process an inbound ``Update(Note)`` — merge empty fields only.
+
+    Phase 6b — when the origin instance updates a JobPost we previously
+    ingested via federation, merge new values into local fields that
+    are currently empty. Never clobber local non-empty values (a staff
+    edit must outrank stale upstream data). Cross-instance authority
+    guard mirrors ``_handle_delete``: only the source instance can
+    update its own row.
+
+    Returns 202 in every outcome (matches every other inbox handler);
+    the audit row's ``delivery_status`` carries the merge / reject
+    decision for operator visibility.
+    """
+    inner = activity.get("object")
+    target_uri = inner.get("id") if isinstance(inner, dict) else None
+    audit_row = _log_inbound(activity, actor, verified, ACTIVITY_TYPE_UPDATE, target_uri)
+
+    if getattr(settings, "ACTIVITYPUB_INGEST_ENABLED", True) and audit_row is not None:
+        federation_ingest.ingest_update_note(activity, federation_activity=audit_row)
 
     return JsonResponse(
         {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
@@ -1256,6 +1292,8 @@ def actor_inbox(request, username: str):
         return _handle_undo(activity, actor, verified)
     if activity_type == "Create":
         return _handle_create(activity, actor, verified)
+    if activity_type == "Update":
+        return _handle_update(activity, actor, verified)
     if activity_type == "Delete":
         return _handle_delete(activity, actor, verified)
 

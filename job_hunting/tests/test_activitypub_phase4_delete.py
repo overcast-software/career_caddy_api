@@ -113,7 +113,7 @@ class TestInboxDelete(TestCase):
         return JobPost.objects.create(
             title="Federated role",
             link=f"https://{source_instance}/jobs/abc",
-            source="activitypub",
+            source="federation",
             source_instance=source_instance,
         )
 
