@@ -1302,3 +1302,415 @@ def actor_inbox(request, username: str):
     return JsonResponse(
         {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6b — Company-actor inbox + Follow handshake.
+#
+# Mirrors the Phase 5c Person-actor inbox shape (pre-flight order, audit
+# log, replay protection, rate limit) but keys follower rows off the
+# Company FK so the Phase 6b ingest helper (which resolves followers by
+# ``company_id``) can materialize discoveries on inbound Create(Note)s
+# attributed to a local Company actor.
+#
+# The Person-actor handlers (``_handle_follow``, ``_handle_undo``,
+# ``_deliver_accept``) are kept intact; the Company-actor flow gets its
+# own handlers below so the Phase 5c test surface stays unchanged.
+#
+# Acceptance contract:
+# - Follow → Accept dispatched to the remote actor's inbox, follower row
+#   keyed off (company, actor_uri) persisted, listed on
+#   ``/companies/<slug>/followers``.
+# - Undo(Follow) → unfollowed_at set on the matching row.
+# - Other / Create / Update / Delete → forwarded to the existing Phase
+#   5c/6b handlers; Create + Update + Delete reuse the Person-actor
+#   dispatch because their resolution keys off canonical_link /
+#   source_instance, not the inbox the activity arrived on.
+# - Activity-id replay dedupe is shared with the Person-actor inbox via
+#   the same FederationActivity unique constraint; a peer can't replay a
+#   Follow against both inboxes to bypass it.
+
+
+def _log_company_inbound(
+    activity: dict,
+    company: Company,
+    verified: federation_signing.VerifiedSignature,
+    activity_type: str,
+    target_uri: str | None,
+) -> FederationActivity | None:
+    """Idempotent inbound log writer for Company-actor inboxes.
+
+    Mirrors :func:`_log_inbound` but leaves ``local_user`` NULL —
+    Company-actor activities don't tie to a single User. The
+    ``(direction, activity_id, target_uri)`` unique constraint still
+    short-circuits duplicate POSTs the same way.
+    """
+    activity_id = activity.get("id", "")
+    try:
+        return FederationActivity.objects.create(
+            direction=DIRECTION_INBOUND,
+            activity_type=activity_type,
+            activity_id=activity_id,
+            actor_uri=verified.actor_uri,
+            target_uri=target_uri,
+            local_user_id=None,
+            body=json.dumps(activity),
+            signature_payload=verified.signature_header,
+            received_at=timezone.now(),
+            delivery_status=DELIVERY_ACCEPTED,
+        )
+    except IntegrityError:
+        logger.info(
+            "ap.company_inbox.duplicate_activity_id activity_id=%s actor=%s",
+            activity_id, verified.actor_uri,
+        )
+        return None
+
+
+def _deliver_company_accept(
+    follow_activity: dict,
+    follower: FederationFollower,
+    company: Company,
+    actor: Actor,
+) -> FederationActivity:
+    """Build, sign, and POST Accept(Follow) from a Company actor.
+
+    Mirrors :func:`_deliver_accept` but signs with the Company-actor's
+    ``/companies/<slug>`` URI (passed through ``federation_signing.deliver``
+    via the ``actor_uri`` override) so the peer's signature verifier
+    fetches the Company actor's public key, not a Person-actor key.
+    """
+    actor_uri_str = _company_actor_uri(company.slug)
+    accept_id = f"{_origin()}/activities/{uuid.uuid4()}"
+    accept_body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": accept_id,
+        "type": "Accept",
+        "actor": actor_uri_str,
+        "object": follow_activity,
+    }
+    body_bytes = json.dumps(accept_body, separators=(",", ":")).encode("utf-8")
+
+    outbound = FederationActivity.objects.create(
+        direction=DIRECTION_OUTBOUND,
+        activity_type=ACTIVITY_TYPE_ACCEPT,
+        activity_id=accept_id,
+        actor_uri=actor_uri_str,
+        target_uri=follower.actor_uri,
+        local_user_id=None,
+        body=json.dumps(accept_body),
+        delivery_status="pending",
+    )
+
+    status_code, snippet = federation_signing.deliver(
+        follower.inbox_uri, body_bytes, actor, actor_uri=actor_uri_str,
+    )
+    if 200 <= status_code < 300:
+        now = timezone.now()
+        outbound.delivery_status = DELIVERY_ACCEPTED
+        outbound.delivered_at = now
+        outbound.save(update_fields=["delivery_status", "delivered_at"])
+        FederationFollower.objects.filter(pk=follower.pk).update(accepted_at=now)
+    else:
+        outbound.delivery_status = DELIVERY_FAILED
+        outbound.delivery_error = f"status={status_code} body={snippet}"
+        outbound.save(update_fields=["delivery_status", "delivery_error"])
+    return outbound
+
+
+def _handle_company_follow(
+    activity: dict,
+    company: Company,
+    actor: Actor,
+    verified: federation_signing.VerifiedSignature,
+) -> JsonResponse:
+    """Process a Follow targeting a local Company actor."""
+    actor_uri_local = _company_actor_uri(company.slug)
+    target = activity.get("object")
+    if target != actor_uri_local:
+        return _inbox_error("follow_target_mismatch", 422)
+
+    follower_actor_uri = activity.get("actor") or verified.actor_uri
+    if not follower_actor_uri:
+        return _inbox_error("missing_actor", 422)
+
+    inbox_uri, shared_inbox_uri = _peer_actor_endpoints(follower_actor_uri)
+    host = FederationFollower.host_for_uri(follower_actor_uri)
+
+    follower, _ = FederationFollower.objects.update_or_create(
+        company_id=company.id,
+        actor_uri=follower_actor_uri,
+        defaults={
+            "inbox_uri": inbox_uri,
+            "shared_inbox_uri": shared_inbox_uri,
+            "instance_host": host,
+            "unfollowed_at": None,  # re-follow case: clear any prior Undo
+            "local_user": None,
+        },
+    )
+
+    _log_company_inbound(activity, company, verified, ACTIVITY_TYPE_FOLLOW, target)
+
+    _deliver_company_accept(activity, follower, company, actor)
+
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _handle_company_undo(
+    activity: dict,
+    company: Company,
+    actor: Actor,
+    verified: federation_signing.VerifiedSignature,
+) -> JsonResponse:
+    """Process an Undo(Follow) targeting a local Company actor."""
+    inner = activity.get("object") or {}
+    if not isinstance(inner, dict):
+        return _inbox_error("undo_object_not_object", 422)
+    if inner.get("type") != "Follow":
+        # Forward-compat: forward any non-Follow Undo to the Other bucket
+        # so the audit row carries the activity without 422'ing the peer.
+        _log_company_inbound(activity, company, verified, ACTIVITY_TYPE_OTHER, None)
+        return JsonResponse(
+            {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+        )
+
+    actor_uri_local = _company_actor_uri(company.slug)
+    if inner.get("object") != actor_uri_local:
+        return _inbox_error("undo_target_mismatch", 422)
+
+    follower_actor_uri = inner.get("actor") or verified.actor_uri
+    row = FederationFollower.objects.filter(
+        company_id=company.id,
+        actor_uri=follower_actor_uri,
+    ).first()
+    if row is None:
+        _log_company_inbound(
+            activity, company, verified, ACTIVITY_TYPE_UNDO, actor_uri_local
+        )
+        return _inbox_error("not_following", 404)
+
+    FederationFollower.objects.filter(pk=row.pk).update(unfollowed_at=timezone.now())
+    _log_company_inbound(
+        activity, company, verified, ACTIVITY_TYPE_UNDO, actor_uri_local
+    )
+
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _handle_company_create(
+    activity: dict,
+    company: Company,
+    actor: Actor,
+    verified: federation_signing.VerifiedSignature,
+) -> JsonResponse:
+    """Process a Create activity arriving on a Company-actor inbox.
+
+    Mirrors the Person-actor :func:`_handle_create` semantics — log
+    the activity, then hand off to the Phase 6b ingest helper which
+    resolves discoveries via ``attributedTo``. Audit row carries the
+    Company-actor target URI for traceability.
+    """
+    inner = activity.get("object") or {}
+    target = inner.get("id") if isinstance(inner, dict) else None
+    audit_row = _log_company_inbound(
+        activity, company, verified, ACTIVITY_TYPE_CREATE, target
+    )
+
+    if getattr(settings, "ACTIVITYPUB_INGEST_ENABLED", True):
+        if audit_row is not None:
+            federation_ingest.ingest_create_note(
+                activity, federation_activity=audit_row
+            )
+
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def company_actor_inbox(request, slug: str):
+    """Authenticated AP inbox for a Company actor.
+
+    Pre-flight order mirrors the Phase 5c Person-actor inbox: body parse
+    → signature verify → rate limit (per-instance) → replay dedupe →
+    dispatch. The Company actor row is lazily created + keypair-minted
+    on first hit so a peer can Follow a Company that hasn't received any
+    AS2 traffic yet.
+    """
+    company = Company.objects.filter(slug=slug).first()
+    if company is None:
+        return _inbox_error("company_not_found", 404)
+    actor = _ensure_company_actor(company)
+    actor = _ensure_keypair(actor)
+
+    max_bytes = getattr(settings, "ACTIVITYPUB_BODY_MAX_BYTES", 1_048_576)
+    body = request.body
+    if len(body) > max_bytes:
+        return _inbox_error("body_too_large", 400)
+
+    try:
+        activity = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _inbox_error("malformed_json", 400)
+    if not isinstance(activity, dict):
+        return _inbox_error("activity_not_object", 400)
+
+    try:
+        verified = federation_signing.verify_inbound_signature(request, body)
+    except federation_signing.SignatureVerificationError as exc:
+        return _inbox_error(exc.verdict, 401)
+
+    host = urlparse(verified.actor_uri).netloc.lower()
+    if not _rate_limit_check(host):
+        return _inbox_error("rate_limited", 429)
+
+    activity_id = activity.get("id") or ""
+    if activity_id and FederationActivity.objects.filter(
+        direction=DIRECTION_INBOUND, activity_id=activity_id,
+    ).exists():
+        return JsonResponse(
+            {"status": "duplicate"},
+            status=202,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    activity_type = activity.get("type")
+    if activity_type == "Follow":
+        return _handle_company_follow(activity, company, actor, verified)
+    if activity_type == "Undo":
+        return _handle_company_undo(activity, company, actor, verified)
+    if activity_type == "Create":
+        return _handle_company_create(activity, company, actor, verified)
+    # Update / Delete on a Company inbox reuse the Person-actor handlers:
+    # they resolve targets by canonical_link / source_instance, not by
+    # the inbox they arrived on, so the dispatch shape is identical. The
+    # ``actor`` arg is used for the audit row's ``local_user`` link only;
+    # passing the synthetic Company actor leaves local_user NULL because
+    # actor.user_id is None for Organization actors.
+    if activity_type == "Update":
+        return _handle_update(activity, actor, verified)
+    if activity_type == "Delete":
+        return _handle_delete(activity, actor, verified)
+
+    _log_company_inbound(activity, company, verified, ACTIVITY_TYPE_OTHER, None)
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
+def _company_followers_queryset(company: Company):
+    """Active ``FederationFollower`` rows targeting ``company``.
+
+    Mirrors :func:`_followers_queryset` but keys off the ``company`` FK
+    so the Phase 6b Company-actor followers collection enumerates the
+    correct set. Sort: ``-accepted_at, -created_at, -id`` matches the
+    Person-actor shape so peer UIs see confirmed followers first.
+    """
+    return (
+        FederationFollower.objects.filter(
+            company_id=company.id,
+            unfollowed_at__isnull=True,
+        )
+        .order_by("-accepted_at", "-created_at", "-id")
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def company_followers(request, slug: str):
+    """Paginated ``OrderedCollection`` of a Company actor's followers."""
+    company = Company.objects.filter(slug=slug).first()
+    if company is None:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+
+    collection_id = f"{_company_actor_uri(company.slug)}/followers"
+    page_size = getattr(settings, "ACTIVITYPUB_OUTBOX_PAGE_SIZE", 20)
+    queryset = _company_followers_queryset(company)
+    total = queryset.count()
+    last_page = _outbox_page_count(total, page_size)
+
+    page_param = request.GET.get("page")
+    if page_param is None:
+        body = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": collection_id,
+            "type": "OrderedCollection",
+            "totalItems": total,
+        }
+        if last_page > 0:
+            body["first"] = f"{collection_id}?page=1"
+            body["last"] = f"{collection_id}?page={last_page}"
+        return HttpResponse(
+            content=JsonResponse(body).content,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    try:
+        page = int(page_param)
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"error": "invalid page"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    if page < 1 or page > last_page:
+        return JsonResponse(
+            {"error": "page out of range"},
+            status=404,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    offset = (page - 1) * page_size
+    items = [
+        follower.actor_uri
+        for follower in queryset[offset : offset + page_size]
+    ]
+
+    body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": f"{collection_id}?page={page}",
+        "type": "OrderedCollectionPage",
+        "partOf": collection_id,
+        "orderedItems": items,
+    }
+    if page < last_page:
+        body["next"] = f"{collection_id}?page={page + 1}"
+    if page > 1:
+        body["prev"] = f"{collection_id}?page={page - 1}"
+
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def company_following(request, slug: str):
+    """Empty ``OrderedCollection`` stub for the Company actor's following list.
+
+    Company actors don't follow remote actors in V1; the empty collection
+    keeps peer enumeration succeeding rather than 404'ing.
+    """
+    company = Company.objects.filter(slug=slug).first()
+    if company is None:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    collection_id = f"{_company_actor_uri(company.slug)}/following"
+    body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": collection_id,
+        "type": "OrderedCollection",
+        "totalItems": 0,
+        "orderedItems": [],
+    }
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )

@@ -33,7 +33,10 @@ from job_hunting.api.views.federation import (
     actor_inbox,
     actor_outbox,
     actor_view,
+    company_actor_inbox,
     company_actor_view,
+    company_followers,
+    company_following,
     company_outbox,
     webfinger,
 )
@@ -163,6 +166,37 @@ urlpatterns = [
     path("companies/<slug:slug>/outbox", company_outbox, name="company-outbox"),
     path(
         "companies/<slug:slug>/outbox/", company_outbox, name="company-outbox-slash"
+    ),
+    # Phase 6b — Company-actor inbox + Follow handshake.
+    path(
+        "companies/<slug:slug>/inbox",
+        company_actor_inbox,
+        name="company-actor-inbox",
+    ),
+    path(
+        "companies/<slug:slug>/inbox/",
+        company_actor_inbox,
+        name="company-actor-inbox-slash",
+    ),
+    path(
+        "companies/<slug:slug>/followers",
+        company_followers,
+        name="company-followers",
+    ),
+    path(
+        "companies/<slug:slug>/followers/",
+        company_followers,
+        name="company-followers-slash",
+    ),
+    path(
+        "companies/<slug:slug>/following",
+        company_following,
+        name="company-following",
+    ),
+    path(
+        "companies/<slug:slug>/following/",
+        company_following,
+        name="company-following-slash",
     ),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/healthcheck$", healthcheck, name="healthcheck-noslash"),
