@@ -1590,6 +1590,12 @@ class ScrapeProfileViewSet(BaseViewSet):
         hostname = request.query_params.get("filter[hostname]")
         if hostname:
             qs = qs.filter(hostname=hostname)
+        # Free-text search across hostname (icontains). Drives the admin
+        # /admin/scrape-profiles/index infinite-scroll search box.
+        # Combines with filter[hostname] via intersect when both are set.
+        query_filter = request.query_params.get("filter[query]")
+        if query_filter:
+            qs = qs.filter(hostname__icontains=query_filter)
         total = qs.count()
         page_number, page_size = self._page_params()
         total_pages = math.ceil(total / page_size) if page_size else 1
