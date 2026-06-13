@@ -303,6 +303,50 @@ class TestEventStreamDisconnectAndLifecycle(TestCase):
             self.assertIn("events.stream.start", joined)
             self.assertIn("user_id=99", joined)
 
+    def test_stream_duration_cap_emits_reconnect_and_exits(self):
+        """gunicorn sync workers SIGKILL at ``GUNICORN_TIMEOUT`` (120s
+        in prod). The 2026-06-10 incident showed an SSE session running
+        exactly 120129ms before ``WORKER TIMEOUT`` fired and the end
+        line logged ``closed_by=unknown``. The cap must:
+
+        - Emit a ``reconnect`` SSE event so the frontend logs it.
+        - Exit the loop cleanly (no exception).
+        - Run the ``finally`` with ``closed_by=duration_cap``.
+        - Close the LISTEN connection.
+
+        EventSource on the browser side reconnects within ~3s of a
+        clean close — no frontend change required.
+        """
+        with patch(
+            "job_hunting.api.events._STREAM_MAX_DURATION_S", 0.0
+        ), patch(
+            "job_hunting.api.events.select.select",
+            return_value=([], [], []),
+        ):
+            gen = events_view._event_stream(user_id=11)
+            # :connected handshake fires before the duration check.
+            self.assertEqual(next(gen), b":connected\n\n")
+            with self.assertLogs(
+                "job_hunting.api.events", level="INFO"
+            ) as captured:
+                # The next iteration trips the duration cap (started_at
+                # is already >0s in the past, _STREAM_MAX_DURATION_S=0)
+                # and yields the reconnect event.
+                reconnect_chunk = next(gen)
+                self.assertEqual(
+                    reconnect_chunk,
+                    b'event: reconnect\n'
+                    b'data: {"reason": "stream-max-duration"}\n\n',
+                )
+                # Generator exhausts cleanly after the cap-driven break.
+                with self.assertRaises(StopIteration):
+                    next(gen)
+            joined = "\n".join(captured.output)
+            self.assertIn("events.stream.end", joined)
+            self.assertIn("closed_by=duration_cap", joined)
+            self.assertIn("user_id=11", joined)
+            self.fake_conn.close.assert_called_once()
+
     def test_unexpected_exception_logs_error_and_cleans_up(self):
         """An unexpected exception inside the loop (NOT a disconnect)
         MUST be logged at ERROR level (so logfire surfaces it) AND
