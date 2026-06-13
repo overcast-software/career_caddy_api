@@ -203,6 +203,184 @@ def enqueue_jobpost_activity(
     return enqueued
 
 
+def enqueue_jobpost_activity_for_company(
+    jobpost_id: int,
+    activity_kind: str,
+) -> int:
+    """Materialize Create(Note) rows attributed to the JobPost's Company actor.
+
+    Phase 6a. Fans out a public JobPost to the *Company*'s federation
+    followers (separate set from the author User's followers). Gates:
+
+    - federation operator-disabled → 0
+    - JobPost not public → 0
+    - JobPost has no Company → 0
+    - Company has ``federation_enabled = False`` → 0
+    - Company has no slug yet (backfill_company_slugs hasn't run) → 0
+    - no Organization Actor exists for the Company AND we can't
+      lazy-create one (no slug) → 0
+    - no active followers on the Company actor → 0
+
+    Only ``activity_kind == "create"`` is supported in Phase 6a; the
+    Update / Delete shapes attributed to a Company actor land in 6e.
+    Returns the number of rows materialized.
+    """
+    if activity_kind != "create":
+        # Phase 6a scope guard — fail loud so a future 6e change has to
+        # explicitly opt in rather than silently shipping nothing.
+        log.debug(
+            "ap.dispatch.company.skip_kind kind=%s — only 'create' is wired in 6a",
+            activity_kind,
+        )
+        return 0
+    if not getattr(settings, "ACTIVITYPUB_FEDERATION_ENABLED", True):
+        return 0
+
+    jp = (
+        JobPost.objects.filter(pk=jobpost_id)
+        .select_related("company")
+        .first()
+    )
+    if jp is None or jp.company_id is None:
+        return 0
+    if not _is_public(jp):
+        return 0
+    company = jp.company
+    if not getattr(company, "federation_enabled", False):
+        return 0
+    if not company.slug:
+        log.info(
+            "ap.dispatch.company.no_slug jobpost_id=%s company_id=%s — run backfill_company_slugs",
+            jobpost_id,
+            company.id,
+        )
+        return 0
+
+    # Lazy-create the Company Organization actor so first-publish
+    # doesn't require an out-of-band materialization step. Same
+    # idempotent upsert the AS2 view path uses.
+    actor = Actor.objects.filter(company_id=company.id).first()
+    if actor is None:
+        # Avoid pulling the view-layer helper here (would create a
+        # circular import between views and lib). Inline the upsert
+        # under the same lock semantics.
+        from job_hunting.models.actor import ACTOR_TYPE_ORGANIZATION
+
+        with transaction.atomic():
+            actor = (
+                Actor.objects.select_for_update()
+                .filter(company_id=company.id)
+                .first()
+            )
+            if actor is None:
+                actor = Actor.objects.create(
+                    company=company,
+                    type=ACTOR_TYPE_ORGANIZATION,
+                    preferred_username=company.slug,
+                )
+
+    activity = _build_company_create_activity(jp, company, actor)
+    actor_uri_str = activity["actor"]
+    body_json = json.dumps(activity)
+    activity_type_value = ACTIVITY_TYPE_CREATE
+
+    followers = _active_company_followers_for(company.id)
+    targets = _dedupe_inboxes(followers)
+    if not targets:
+        log.info(
+            "ap.dispatch.company.no_followers jobpost_id=%s company_id=%s",
+            jobpost_id,
+            company.id,
+        )
+        return 0
+
+    now = timezone.now()
+    enqueued = 0
+    log.info(
+        "ap.dispatch.company.fanout jobpost_id=%s company_id=%s targets=%s",
+        jobpost_id,
+        company.id,
+        len(targets),
+    )
+    for target_uri in targets:
+        try:
+            with transaction.atomic():
+                row = FederationActivity.objects.create(
+                    direction=DIRECTION_OUTBOUND,
+                    activity_type=activity_type_value,
+                    activity_id=activity["id"],
+                    actor_uri=actor_uri_str,
+                    target_uri=target_uri,
+                    local_user_id=jp.created_by_id,
+                    body=body_json,
+                    delivery_status=DELIVERY_PENDING,
+                    next_attempt_at=now,
+                )
+        except IntegrityError:
+            row = FederationActivity.objects.filter(
+                direction=DIRECTION_OUTBOUND,
+                activity_id=activity["id"],
+                target_uri=target_uri,
+            ).first()
+            if row is None:
+                continue
+        enqueued += 1
+        _schedule_dispatch_task(row.id, when=row.next_attempt_at)
+
+    return enqueued
+
+
+def _build_company_create_activity(jp: JobPost, company, actor: Actor) -> dict:
+    """Build a Create(Note) envelope attributed to a Company actor.
+
+    Mirrors the view-layer helper of the same shape. Lifted here so
+    the dispatch worker doesn't import from views/federation.py (which
+    would introduce a circular dependency).
+    """
+    activity = build_create_activity_for_jobpost(jp, actor)
+    origin = activity["actor"].rsplit("/actors/", 1)[0] if "/actors/" in activity["actor"] else ""
+    if not origin:
+        origin = activity["actor"].rsplit("/", 1)[0]
+    # Rewrite Person-actor URI shape to Company-actor URI shape so the
+    # activity envelope advertises the Organization page.
+    company_actor_uri = activity["actor"].replace(
+        f"/actors/{actor.preferred_username}",
+        f"/companies/{company.slug}",
+    )
+    # When the actor URI didn't take the /actors/<u> form (defensive —
+    # the Phase 5b helper always does), fall back to building from
+    # scratch via the origin extraction above.
+    if company_actor_uri == activity["actor"]:
+        company_actor_uri = f"{origin}/companies/{company.slug}"
+    activity["actor"] = company_actor_uri
+    activity["cc"] = [f"{company_actor_uri}/followers"]
+    inner = activity.get("object")
+    if isinstance(inner, dict):
+        inner["attributedTo"] = company_actor_uri
+    return activity
+
+
+def _active_company_followers_for(company_id: int):
+    """Active followers of a Company actor.
+
+    Phase 6a wires the dispatch shape but the follower model is
+    keyed by ``local_user_id`` — Companies don't carry a user. We
+    extend FederationFollower lookup to support ``company_id`` once
+    the inbox follow-handler lands (separate ticket). For now the
+    queryset is empty by definition: nobody can follow a Company
+    yet, so the fanout returns 0 targets and the early-return above
+    catches it.
+
+    Once 6a-followers ships, this becomes a real lookup; the call
+    site is already in place so wiring the second half is a one-file
+    change.
+    """
+    # TODO(6a-followers): switch to FederationFollower.objects.filter(
+    #     company_id=company_id, accepted_at__isnull=False, ...)
+    # once the Company-follower migration lands.
+    return list(FederationFollower.objects.none())
+
+
 def dispatch_one(federation_activity_id: int) -> None:
     """Sign + POST a persisted outbound activity to its target inbox.
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 from .base import GetMixin
 
@@ -56,6 +57,17 @@ class Actor(GetMixin, models.Model):
         blank=True,
         related_name="federation_actors",
     )
+    # Phase 6a — Organization actors. A Company-actor row carries
+    # ``company`` set + ``user`` NULL; a Person actor carries ``user``
+    # set + ``company`` NULL; the Instance Actor carries both NULL.
+    # The mutual-exclusivity check below enforces "at most one set."
+    company = models.ForeignKey(
+        "Company",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="federation_actors",
+    )
     type = models.CharField(
         max_length=32,
         choices=ACTOR_TYPE_CHOICES,
@@ -69,6 +81,9 @@ class Actor(GetMixin, models.Model):
             "User.username; Instance Actor uses 'instance'."
         ),
     )
+    # Phase 6a — optional icon (Organization logo / Person avatar) URL.
+    # Reused by Phase 7a's profile-editor UI for Person actors.
+    avatar_url = models.URLField(max_length=500, null=True, blank=True)
     public_key_pem = models.TextField(null=True, blank=True)
     # TODO(Q2): private_key_pem stored plaintext for Phase 5a. Revisit
     # before prod-grade federation rolls out — see notes.org
@@ -82,6 +97,20 @@ class Actor(GetMixin, models.Model):
 
     class Meta:
         db_table = "federation_actors"
+        constraints = [
+            # Phase 6a mutual-exclusivity: a row is at most one of
+            # (Person, Organization). Instance Actor has both NULL.
+            # Modeled as a CheckConstraint (not a partial unique) so the
+            # database refuses any future write path that sets both
+            # columns — the application code only writes one or the other,
+            # but a constraint here pins the invariant in the schema.
+            models.CheckConstraint(
+                condition=(
+                    Q(user__isnull=True) | Q(company__isnull=True)
+                ),
+                name="actor_user_company_mutually_exclusive",
+            ),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover - admin/debug only
         return f"{self.type}/{self.preferred_username}"

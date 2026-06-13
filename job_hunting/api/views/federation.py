@@ -40,6 +40,7 @@ from job_hunting.lib import federation_signing
 from job_hunting.lib import federation_ingest
 from job_hunting.models import (
     Actor,
+    Company,
     FederationActivity,
     FederationFollower,
     JobPost,
@@ -56,10 +57,40 @@ from job_hunting.models.federation_activity import (
     DIRECTION_INBOUND,
     DIRECTION_OUTBOUND,
 )
+from job_hunting.models.actor import ACTOR_TYPE_ORGANIZATION
 from job_hunting.models.job_post import AS2_PUBLIC
 
 
 logger = logging.getLogger(__name__)
+
+
+# Accept-header content type values that signal an AS2 / ActivityPub
+# client (Mastodon, Pleroma, peer Career Caddy instance). Anything
+# else falls through to the JSON:API / browser branch — drf-json-api
+# clients send ``application/vnd.api+json``; the SPA itself sends
+# either that or ``*/*``.
+_AS2_ACCEPT_TYPES = (
+    "application/activity+json",
+    "application/ld+json",
+)
+
+
+def _wants_activitypub(request) -> bool:
+    """Return True when the client asked for AS2 JSON via Accept.
+
+    Strict prefix match — ``application/activity+json`` is the canonical
+    spelling, ``application/ld+json; profile="..."`` is what Mastodon
+    sometimes sends, both count. Empty / wildcard Accept → False so the
+    JSON:API default wins for browsers + drf-json-api clients.
+    """
+    accept = request.META.get("HTTP_ACCEPT", "") or ""
+    if not accept or accept == "*/*":
+        return False
+    for chunk in accept.split(","):
+        media = chunk.split(";", 1)[0].strip().lower()
+        if media in _AS2_ACCEPT_TYPES:
+            return True
+    return False
 
 
 # RFC 7033 §10.2 — WebFinger MUST serve ``application/jrd+json``.
@@ -89,6 +120,18 @@ def _actor_uri(username: str) -> str:
     for local-origin actors but is duplicated here to avoid circular
     imports between federation views and the JobPost adapter."""
     return f"{_origin()}/actors/{username}"
+
+
+def _company_actor_uri(slug: str) -> str:
+    """Mint the Organization-actor URI for a Company.
+
+    Phase 6a — Company actors are surfaced at ``/companies/<slug>/``
+    rather than ``/actors/<username>/`` so a Mastodon user pasting
+    ``acct:acme@careercaddy.online`` lands on the Company page itself
+    (Q1 / Q2 in the Phase 6 plan — federation handle == public Company
+    page URL).
+    """
+    return f"{_origin()}/companies/{slug}"
 
 
 def _ensure_keypair(actor: Actor) -> Actor:
@@ -154,13 +197,24 @@ def webfinger(request):
     if host.lower() != _origin_host().lower():
         return JsonResponse({"error": "not found"}, status=404, content_type=JRD_CONTENT_TYPE)
 
+    # Phase 6a — resolve in two steps. Person / Service / Application
+    # actors live on ``Actor.preferred_username``; Organization actors
+    # for Companies live on ``Company.slug``. Person lookup first so
+    # the common case (Mastodon discovering a user account) stays a
+    # single index probe; Company fallback only fires on a miss.
     actor = Actor.objects.filter(preferred_username=username).first()
-    if actor is None:
-        return JsonResponse({"error": "not found"}, status=404, content_type=JRD_CONTENT_TYPE)
+    if actor is not None and actor.company_id is None:
+        actor_uri = _actor_uri(actor.preferred_username)
+    else:
+        company = Company.objects.filter(slug=username).first()
+        if company is None:
+            return JsonResponse(
+                {"error": "not found"}, status=404, content_type=JRD_CONTENT_TYPE
+            )
+        actor_uri = _company_actor_uri(company.slug)
 
-    actor_uri = _actor_uri(actor.preferred_username)
     jrd = {
-        "subject": f"acct:{actor.preferred_username}@{_origin_host()}",
+        "subject": f"acct:{username}@{_origin_host()}",
         "aliases": [actor_uri],
         "links": [
             {
@@ -502,6 +556,267 @@ def actor_following(request, username: str):
     debug page.
     """
     return _empty_collection(request, username, "following")
+
+
+# ---------------------------------------------------------------------------
+# Phase 6a — Company / Organization actors.
+#
+# A Company-actor row owns the AS2 ``Organization`` surface for a
+# Company: WebFinger resolves ``acct:<slug>@<host>`` to the row, the
+# Actor URI sits at ``/companies/<slug>/``, and the outbox lists the
+# Company's federation-enabled JobPosts as Create(Note) activities.
+#
+# Two key decisions vs Phase 5a Person actors:
+#
+# 1. URL shape. Person actors live at ``/actors/<username>/``; Company
+#    actors live at ``/companies/<slug>/`` so a Mastodon user who
+#    follows the actor and clicks through lands on the public Company
+#    page directly. The two URI families share zero routes.
+#
+# 2. Lazy materialization. Phase 5a backfilled one Actor row per User
+#    via ``generate_federation_actors``. Companies are too numerous to
+#    pre-create eagerly (thousands of scraped rows in prod). We
+#    instead create the Actor row on first AS2 hit — the
+#    ``_ensure_company_actor`` helper below upserts under SELECT FOR
+#    UPDATE so the lazy-keypair contract from 5a still holds.
+
+
+def _ensure_company_actor(company: Company) -> Actor:
+    """Return or create the Organization Actor for ``company``.
+
+    Idempotent + race-safe. The ``preferred_username == company.slug``
+    invariant lets WebFinger reuse its single index probe to find both
+    Person and Organization actors. SELECT FOR UPDATE serialises the
+    rare case where two AS2 fetches race to create the same row; the
+    second waiter sees the first one's row after acquiring the lock.
+
+    Caller must ensure ``company.slug`` is populated — Companies whose
+    backfill hasn't run yet shouldn't reach this code path; the views
+    above gate on slug presence and 404 if it's missing.
+    """
+    existing = Actor.objects.filter(company_id=company.id).first()
+    if existing is not None:
+        return existing
+    with transaction.atomic():
+        # Race-safe upsert: re-check inside the lock, then create.
+        existing = (
+            Actor.objects.select_for_update()
+            .filter(company_id=company.id)
+            .first()
+        )
+        if existing is not None:
+            return existing
+        return Actor.objects.create(
+            company=company,
+            type=ACTOR_TYPE_ORGANIZATION,
+            preferred_username=company.slug,
+        )
+
+
+def _company_actor_body(company: Company, actor: Actor) -> dict:
+    """Build the AS2 Organization JSON-LD body for ``company`` / ``actor``."""
+    actor_uri = _company_actor_uri(company.slug)
+    body = {
+        "@context": [
+            "https://www.w3.org/ns/activitystreams",
+            "https://w3id.org/security/v1",
+        ],
+        "id": actor_uri,
+        "type": actor.type,
+        "preferredUsername": company.slug,
+        "url": actor_uri,
+        "inbox": f"{actor_uri}/inbox",
+        "outbox": f"{actor_uri}/outbox",
+        "followers": f"{actor_uri}/followers",
+        "following": f"{actor_uri}/following",
+        "publicKey": {
+            "id": f"{actor_uri}#main-key",
+            "owner": actor_uri,
+            "publicKeyPem": actor.public_key_pem,
+        },
+    }
+    display = company.display_name or company.name
+    if display:
+        body["name"] = display
+    if actor.avatar_url:
+        # AS2 ``icon`` is the canonical key for a Person/Organization
+        # avatar/logo. Mastodon's UI surfaces it as the actor's badge.
+        body["icon"] = {"type": "Image", "url": actor.avatar_url}
+    return body
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def company_actor_view(request, slug: str):
+    """Content-negotiated Company page — AS2 Organization for federation
+    peers, JSON:API Company resource for SPA/browser clients.
+
+    AS2 branch (``Accept: application/activity+json`` /
+    ``application/ld+json``): mints the lazy Organization Actor row +
+    keypair, returns the AS2 JSON-LD body.
+
+    Default branch: 302 to the SPA frontend's Company detail page
+    (``/companies/<id>``). drf-json-api clients hit the existing
+    ``/api/v1/companies/<pk>/`` viewset directly; this view is the
+    public ``/companies/<slug>/`` surface aimed at humans + AP peers,
+    not the SPA's own data API.
+    """
+    company = Company.objects.filter(slug=slug).first()
+    if company is None:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+
+    if _wants_activitypub(request):
+        actor = _ensure_company_actor(company)
+        actor = _ensure_keypair(actor)
+        body = _company_actor_body(company, actor)
+        return HttpResponse(
+            content=JsonResponse(body).content,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    # Browser / default branch — JSON:API doesn't have a clean shape
+    # for "this is the slug-routed sibling of the pk-routed resource";
+    # we return a minimal JSON-API-shaped Company linkage so the SPA
+    # (or curl-from-shell) sees something useful, AND set the canonical
+    # ``Link`` header to the pk-routed CRUD endpoint for downstream
+    # tooling. The frontend will likely move to a direct
+    # ``/companies/<slug>`` route in a separate dispatch.
+    body = {
+        "data": {
+            "type": "company",
+            "id": str(company.id),
+            "attributes": {
+                "name": company.name,
+                "display-name": company.display_name,
+                "slug": company.slug,
+                "federation-enabled": company.federation_enabled,
+            },
+            "links": {
+                "self": f"{_origin()}/api/v1/companies/{company.id}/",
+            },
+        }
+    }
+    response = HttpResponse(
+        content=JsonResponse(body).content,
+        content_type="application/vnd.api+json",
+    )
+    return response
+
+
+def _company_outbox_queryset(company: Company):
+    """Public JobPosts attributed to ``company`` in outbox order.
+
+    Filter: ``audience`` contains AS2_PUBLIC AND ``company_id``
+    matches. Sort: ``-created_at, -id`` mirrors the Person-actor
+    outbox so per-Company federation pages have the same stable
+    secondary ordering once paging starts mattering.
+    """
+    return (
+        JobPost.objects.filter(
+            company_id=company.id,
+            audience__contains=[AS2_PUBLIC],
+        )
+        .order_by("-created_at", "-id")
+    )
+
+
+def _build_company_create_activity(job_post: JobPost, company: Company, actor: Actor) -> dict:
+    """Build the Create(Note) envelope attributed to a Company actor.
+
+    Parallel to ``build_create_activity_for_jobpost`` (used by Person
+    actors) but rewrites ``actor`` + ``attributedTo`` to point at the
+    Company actor's URI. Reusing the Phase 5b helper directly would
+    bake in the Person-actor URI shape via ``actor.preferred_username``;
+    we want the ``/companies/<slug>/`` URI shape on the activity here.
+    """
+    activity = build_create_activity_for_jobpost(job_post, actor)
+    company_actor_uri = _company_actor_uri(company.slug)
+    activity["actor"] = company_actor_uri
+    activity["cc"] = [f"{company_actor_uri}/followers"]
+    inner = activity.get("object")
+    if isinstance(inner, dict):
+        inner["attributedTo"] = company_actor_uri
+    return activity
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def company_outbox(request, slug: str):
+    """Paginated OrderedCollection of the Company's public JP Create activities.
+
+    Mirrors the Phase 5b Person-actor outbox: metadata-only collection
+    on no ``page``; ``?page=N`` returns an OrderedCollectionPage with
+    up to ``ACTIVITYPUB_OUTBOX_PAGE_SIZE`` Create(Note) envelopes.
+    Items are built fresh per request — Phase 6a does not persist
+    outbox-specific Activity rows (the 5d dispatch path does, and
+    those rows aren't shown in the outbox enumeration).
+    """
+    company = Company.objects.filter(slug=slug).first()
+    if company is None:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    actor = _ensure_company_actor(company)
+
+    collection_id = f"{_company_actor_uri(company.slug)}/outbox"
+    page_size = getattr(settings, "ACTIVITYPUB_OUTBOX_PAGE_SIZE", 20)
+    queryset = _company_outbox_queryset(company)
+    total = queryset.count()
+    last_page = _outbox_page_count(total, page_size)
+
+    page_param = request.GET.get("page")
+    if page_param is None:
+        body = {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": collection_id,
+            "type": "OrderedCollection",
+            "totalItems": total,
+        }
+        if last_page > 0:
+            body["first"] = f"{collection_id}?page=1"
+            body["last"] = f"{collection_id}?page={last_page}"
+        return HttpResponse(
+            content=JsonResponse(body).content,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    try:
+        page = int(page_param)
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"error": "invalid page"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    if page < 1 or page > last_page:
+        return JsonResponse(
+            {"error": "page out of range"},
+            status=404,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    offset = (page - 1) * page_size
+    items = [
+        _build_company_create_activity(job_post, company, actor)
+        for job_post in queryset[offset : offset + page_size]
+    ]
+
+    body = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": f"{collection_id}?page={page}",
+        "type": "OrderedCollectionPage",
+        "partOf": collection_id,
+        "orderedItems": items,
+    }
+    if page < last_page:
+        body["next"] = f"{collection_id}?page={page + 1}"
+    if page > 1:
+        body["prev"] = f"{collection_id}?page={page - 1}"
+
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )
 
 
 # ---------------------------------------------------------------------------
