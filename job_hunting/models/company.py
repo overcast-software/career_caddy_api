@@ -32,6 +32,19 @@ class Company(GetMixin, models.Model):
     name_slug = models.CharField(
         max_length=255, null=True, blank=True, db_index=True
     )
+    # Phase 6a — Company-actor handle. Distinct from ``name_slug``
+    # (which is the dedupe key derived from ``slug(strip_corp_suffix(name))``);
+    # ``slug`` is the WebFinger / Actor-URI handle that surfaces as
+    # ``acct:<slug>@<host>``. Unique across all Companies. Nullable so
+    # legacy rows backfill safely via ``backfill_company_slugs`` (which
+    # picks a unique form and writes it); after backfill every row that
+    # opts into federation is guaranteed to have one.
+    slug = models.SlugField(max_length=80, unique=True, null=True, blank=True)
+    # Phase 6a — opt-in federation toggle (Q2 in the Phase 6 plan).
+    # Default False so freshly-scraped Company rows don't spray their
+    # listings to the fediverse before an employer claims the page (6d).
+    # Staff toggles per row via the admin / frontend Federation panel.
+    federation_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(null=True, blank=True)
     # Phase A self-FK: an "alias" Company points its `canonical` at the
     # true Company. NULL means this row IS canonical. SET_NULL on

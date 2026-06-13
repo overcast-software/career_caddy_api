@@ -1313,7 +1313,21 @@ class ScrapeStatusSerializer(BaseSerializer):
 class CompanySerializer(BaseSerializer):
     type = "company"
     model = Company
-    attributes = ["name", "display_name", "notes", "source", "name_slug"]
+    attributes = [
+        "name",
+        "display_name",
+        "notes",
+        "source",
+        "name_slug",
+        # Phase 6a — federation handle + opt-in toggle. Both safe to
+        # surface on the read path (slug is the public WebFinger
+        # handle; federation_enabled is operator-visible state).
+        # PATCH on these flows through ``CompanyViewSet.update``,
+        # which only allows the legacy field set today — the frontend
+        # dispatch follows separately.
+        "slug",
+        "federation_enabled",
+    ]
     relationships = {
         "job-posts": {"attr": "job_posts", "type": "job-post", "uselist": True},
         "job-applications": {

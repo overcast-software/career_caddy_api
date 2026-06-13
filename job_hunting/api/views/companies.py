@@ -152,6 +152,13 @@ class CompanyViewSet(BaseViewSet):
         for field in ("name", "display_name", "notes"):
             if field in attrs:
                 setattr(obj, field, attrs[field])
+        # Phase 6a — staff-only toggle for the federation opt-in. Kept
+        # behind the staff gate (per the plan's Q2 — Companies should
+        # not auto-publish to the fediverse until an employer or
+        # operator explicitly opts the row in). The slug is read-only
+        # at the API surface; backfill / staff seeds it.
+        if "federation_enabled" in attrs and request.user.is_staff:
+            obj.federation_enabled = bool(attrs["federation_enabled"])
         obj.save()
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})

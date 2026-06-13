@@ -33,6 +33,8 @@ from job_hunting.api.views.federation import (
     actor_inbox,
     actor_outbox,
     actor_view,
+    company_actor_view,
+    company_outbox,
     webfinger,
 )
 from job_hunting.api.views import (
@@ -150,6 +152,18 @@ urlpatterns = [
     path("actors/<str:username>/followers/", actor_followers, name="actor-followers-slash"),
     path("actors/<str:username>/following", actor_following, name="actor-following"),
     path("actors/<str:username>/following/", actor_following, name="actor-following-slash"),
+    # Phase 6a — Company/Organization actors. Content-negotiated:
+    # AS2 JSON for federation peers, JSON:API stub for browsers/SPA.
+    # Slug-routed at the root so Mastodon's WebFinger handoff lands
+    # directly on the public Company page URL.
+    path("companies/<slug:slug>/", company_actor_view, name="company-actor"),
+    re_path(
+        r"^companies/(?P<slug>[-\w]+)$", company_actor_view, name="company-actor-noslash"
+    ),
+    path("companies/<slug:slug>/outbox", company_outbox, name="company-outbox"),
+    path(
+        "companies/<slug:slug>/outbox/", company_outbox, name="company-outbox-slash"
+    ),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/healthcheck$", healthcheck, name="healthcheck-noslash"),
     path("api/v1/agent-models/", agent_models, name="agent-models"),

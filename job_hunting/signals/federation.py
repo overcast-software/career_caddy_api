@@ -30,7 +30,10 @@ from django.dispatch import receiver
 from django.utils import timezone
 
 from job_hunting.lib.as_object import AS2_PUBLIC
-from job_hunting.lib.federation_dispatch import enqueue_jobpost_activity
+from job_hunting.lib.federation_dispatch import (
+    enqueue_jobpost_activity,
+    enqueue_jobpost_activity_for_company,
+)
 from job_hunting.models.job_post import JobPost
 
 
@@ -112,8 +115,10 @@ def fanout_jobpost_save(sender, instance, created, **kwargs):
         if created:
             if is_public:
                 _enqueue(instance.pk, "create")
+                _enqueue_company(instance, "create")
         elif not was_public and is_public:
             _enqueue(instance.pk, "create")
+            _enqueue_company(instance, "create")
         elif was_public and is_public:
             if prior_fields is None or _content_changed(instance, prior_fields):
                 _enqueue(instance.pk, "update", edit_marker=timezone.now())
@@ -181,6 +186,31 @@ def _enqueue(jobpost_id: int, kind: str, **kwargs) -> None:
         # re-enqueue from the dispatch_status command if needed.
         log.exception(
             "ap.signal.enqueue_failed jobpost_id=%s kind=%s", jobpost_id, kind
+        )
+
+
+def _enqueue_company(instance: JobPost, kind: str) -> None:
+    """Phase 6a — fan out to the Company actor's followers when opted in.
+
+    Cheap pre-gate on ``federation_enabled`` so the lib-layer DB hit is
+    skipped for the >99% of saves that don't federate via the Company.
+    The lib helper re-checks every gate (operator switch, audience,
+    slug presence, follower count) so this fast-path miss has no
+    correctness impact.
+    """
+    company_id = getattr(instance, "company_id", None)
+    if company_id is None:
+        return
+    company = getattr(instance, "company", None)
+    if company is None or not getattr(company, "federation_enabled", False):
+        return
+    try:
+        enqueue_jobpost_activity_for_company(instance.pk, kind)
+    except Exception:
+        log.exception(
+            "ap.signal.company_enqueue_failed jobpost_id=%s kind=%s",
+            instance.pk,
+            kind,
         )
 
 
