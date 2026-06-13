@@ -47,6 +47,7 @@ from job_hunting.models import (
 from job_hunting.models.federation_activity import (
     ACTIVITY_TYPE_ACCEPT,
     ACTIVITY_TYPE_CREATE,
+    ACTIVITY_TYPE_DELETE,
     ACTIVITY_TYPE_FOLLOW,
     ACTIVITY_TYPE_OTHER,
     ACTIVITY_TYPE_UNDO,
@@ -754,6 +755,105 @@ def _handle_create(activity: dict, actor: Actor,
     )
 
 
+def _resolve_jobpost_from_object(target: object) -> JobPost | None:
+    """Resolve a JobPost row from an inbound `Delete` activity's object.
+
+    The `Delete` envelope's ``object`` is usually a bare URI string (the
+    AS2 tombstone shape Mastodon emits) but can also be a dict carrying
+    ``id`` or ``id`` + ``type: "Tombstone"``. Both shapes resolve to the
+    same JobPost via the trailing ``/job-posts/<pk>`` segment of the
+    URI; the URI's host is checked separately against the row's
+    ``source_instance`` in ``_handle_delete``.
+
+    Returns None when the URI doesn't match a local row, has no pk
+    segment, or the pk is non-numeric. The caller treats None as a
+    silent no-op (matches ``_handle_undo``'s "row didn't exist" path).
+    """
+    if isinstance(target, dict):
+        uri = target.get("id")
+    elif isinstance(target, str):
+        uri = target
+    else:
+        return None
+    if not isinstance(uri, str) or not uri:
+        return None
+
+    path = urlparse(uri).path or ""
+    # AS2 object URIs from this codebase are minted as
+    # ``{origin}/job-posts/{pk}`` (see lib/as_object.object_uri). Pull
+    # the pk off the trailing segment; reject anything that doesn't fit
+    # rather than guessing — a malformed URI from a misbehaving peer is
+    # safer to ignore than to wildcard-match against.
+    segments = [seg for seg in path.split("/") if seg]
+    if len(segments) < 2 or segments[-2] != "job-posts":
+        return None
+    raw_pk = segments[-1]
+    if not raw_pk.isdigit():
+        return None
+    return JobPost.objects.filter(pk=int(raw_pk)).first()
+
+
+def _handle_delete(activity: dict, actor: Actor,
+                   verified: federation_signing.VerifiedSignature) -> JsonResponse:
+    """Process a `Delete` activity: tombstone the matching federated row.
+
+    Semantics:
+    * Resolve the target JobPost from the activity's ``object`` (bare
+      URI or Tombstone dict). Unknown URI → silent 202 (no-op log).
+    * The sender's instance host (the URI host of the verified actor)
+      MUST match the row's ``source_instance``. No cross-instance
+      delete authority — a peer can only retract what its own instance
+      originated. Mismatch → silent 202 (no-op log) so the audit row
+      records the rejected attempt without surfacing internal state.
+    * Idempotent: if ``source_deleted_at`` is already populated, leave
+      the original tombstone time alone. The audit row still gets
+      written (replay protection by ``activity_id`` is upstream of
+      this handler), but the column is preserved.
+    * Never deletes the row. Local relationships (Score, JobApplication,
+      CoverLetter) reference this JobPost; honoring remote delete
+      authority by cascading those out would destroy unrelated user
+      data.
+
+    The 202 status mirrors every other inbox handler: the verified
+    activity was accepted; internal disposition (applied / skipped /
+    rejected) lives on the FederationActivity audit row, not on the
+    response.
+    """
+    target = activity.get("object")
+    audit_target = target.get("id") if isinstance(target, dict) else (
+        target if isinstance(target, str) else None
+    )
+    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_DELETE, audit_target)
+
+    job_post = _resolve_jobpost_from_object(target)
+    if job_post is None:
+        return JsonResponse(
+            {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+        )
+
+    # Cross-instance authority guard: only the origin instance can
+    # retract its own row. The verified actor's host is the trust
+    # anchor (signature verification proved that identity); the
+    # row's ``source_instance`` is the trust target.
+    sender_host = urlparse(verified.actor_uri).netloc.lower()
+    if not sender_host or sender_host != (job_post.source_instance or "").lower():
+        return JsonResponse(
+            {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+        )
+
+    # Idempotency — preserve the first-known tombstone time so the
+    # audit story doesn't get rewritten by a replay or a re-delivery
+    # weeks later.
+    if job_post.source_deleted_at is None:
+        JobPost.objects.filter(pk=job_post.pk).update(
+            source_deleted_at=timezone.now()
+        )
+
+    return JsonResponse(
+        {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+    )
+
+
 def _log_inbound(activity: dict, actor: Actor,
                  verified: federation_signing.VerifiedSignature,
                  activity_type: str, target_uri: str | None) -> FederationActivity | None:
@@ -841,6 +941,8 @@ def actor_inbox(request, username: str):
         return _handle_undo(activity, actor, verified)
     if activity_type == "Create":
         return _handle_create(activity, actor, verified)
+    if activity_type == "Delete":
+        return _handle_delete(activity, actor, verified)
 
     # Forward-compat: log unknown types as Other so we don't lose them.
     _log_inbound(activity, actor, verified, ACTIVITY_TYPE_OTHER, None)
