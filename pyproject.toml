@@ -43,6 +43,12 @@ dependencies = [
     "dateparser>=1.2.2",
     # Production server
     "gunicorn>=21.2.0",
+    # Standalone ASGI SSE process — Option B of `Plans/SSE off sync
+    # gunicorn — A-B-C tradeoff`. `job_hunting.sse_asgi:app` is a small
+    # Starlette app run under uvicorn that serves ONLY /api/v1/events/,
+    # isolating the streaming endpoint off the sync gunicorn pool.
+    "starlette>=0.40.0",
+    "uvicorn[standard]>=0.30.0",
     # Async task queue — Phase 1 of the django-q2 phased rollout
     # (Plans/Job-queue integration — django-q2 phased rollout). Uses the
     # existing Postgres broker via the django_q ORM backend; the worker
