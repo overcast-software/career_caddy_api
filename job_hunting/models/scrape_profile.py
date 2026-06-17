@@ -11,6 +11,27 @@ TIER_CHOICES = [
     ("3", "Tier 3 — Sonnet"),
 ]
 
+# --- known-good readiness tunables -----------------------------------------
+# A "known-good" domain is one whose Tier-0 deterministic extraction is
+# trustworthy enough that downstream consumers (the email auto-scrape poller
+# in automation/, the browser extension in frontend/, the scrape graph in
+# agents/) can short-circuit heavier tiers / manual review for that host.
+# These are the only thresholds that define the signal — keep them here so the
+# definition lives in one place rather than scattered as inline magic numbers.
+#
+# job_data sub-keys that must all carry a non-empty selector. `company` maps
+# to the `company_name` selector key (the field name the Tier-0 BeautifulSoup
+# pass reads).
+KNOWN_GOOD_REQUIRED_JOB_DATA_FIELDS = ("title", "company_name", "description")
+# Tiers a known-good domain is allowed to run at. Tier 0 is deterministic;
+# "auto" lets Tier 0 run first and fall back. Anything else (1/2/3) means the
+# domain has been demoted off deterministic extraction → not known-good.
+KNOWN_GOOD_ALLOWED_TIERS = frozenset({"0", "auto"})
+KNOWN_GOOD_MIN_SUCCESS_RATE = 0.8
+KNOWN_GOOD_MIN_SCRAPE_COUNT = 3
+# Tier-0 miss ratio must stay strictly below this for the domain to qualify.
+KNOWN_GOOD_MAX_TIER0_MISS_RATIO = 0.5
+
 
 class ScrapeProfile(GetMixin, models.Model):
     hostname = models.CharField(max_length=255, unique=True, db_index=True)
@@ -73,3 +94,77 @@ class ScrapeProfile(GetMixin, models.Model):
 
     def __str__(self):
         return self.hostname
+
+    @property
+    def effective_tier(self) -> str:
+        """The tier this domain would actually run at.
+
+        "0" when preferred_tier is pinned to Tier 0; otherwise the stored
+        preferred_tier verbatim (so "auto" surfaces as "auto", a demoted
+        "1" surfaces as "1"). Pure/read-only.
+        """
+        return "0" if self.preferred_tier == "0" else self.preferred_tier
+
+    def readiness(self) -> dict:
+        """Debug struct describing whether this domain is known-good.
+
+        Returns ``{"known_good": bool, "tier": str, "reasons": [str, ...]}``.
+        ``reasons`` lists every failing clause (empty when known-good), which
+        powers the /admin/scrape-profiles debug panel. Pure / read-only — no
+        DB writes, no queries; reads only fields already on the row.
+        """
+        reasons: list[str] = []
+
+        if not self.enabled:
+            reasons.append("disabled")
+
+        css = self.css_selectors if isinstance(self.css_selectors, dict) else {}
+        job_data = css.get("job_data")
+        if not isinstance(job_data, dict):
+            job_data = {}
+        missing = [
+            field
+            for field in KNOWN_GOOD_REQUIRED_JOB_DATA_FIELDS
+            if not (
+                isinstance(job_data.get(field), str) and job_data[field].strip()
+            )
+        ]
+        if missing:
+            reasons.append(f"missing job_data selectors: {', '.join(missing)}")
+
+        if self.preferred_tier not in KNOWN_GOOD_ALLOWED_TIERS:
+            reasons.append(
+                f"preferred_tier={self.preferred_tier!r} not in "
+                f"{sorted(KNOWN_GOOD_ALLOWED_TIERS)}"
+            )
+
+        success_rate = self.success_rate or 0.0
+        if success_rate < KNOWN_GOOD_MIN_SUCCESS_RATE:
+            reasons.append(
+                f"success_rate={success_rate} < {KNOWN_GOOD_MIN_SUCCESS_RATE}"
+            )
+
+        scrape_count = self.scrape_count or 0
+        if scrape_count < KNOWN_GOOD_MIN_SCRAPE_COUNT:
+            reasons.append(
+                f"scrape_count={scrape_count} < {KNOWN_GOOD_MIN_SCRAPE_COUNT}"
+            )
+
+        miss_ratio = (self.tier0_miss_count or 0) / max(scrape_count, 1)
+        if miss_ratio >= KNOWN_GOOD_MAX_TIER0_MISS_RATIO:
+            reasons.append(
+                f"tier0_miss_ratio={miss_ratio:.3f} >= "
+                f"{KNOWN_GOOD_MAX_TIER0_MISS_RATIO}"
+            )
+
+        return {
+            "known_good": not reasons,
+            "tier": self.effective_tier,
+            "reasons": reasons,
+        }
+
+    @property
+    def is_known_good(self) -> bool:
+        """True when every readiness clause holds. See ``readiness()`` for the
+        per-clause breakdown. Read-only computed signal — no stored column."""
+        return self.readiness()["known_good"]

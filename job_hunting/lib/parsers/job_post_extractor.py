@@ -1583,6 +1583,12 @@ def _update_scrape_profile(scrape, user=None, success: bool = True, tier0_hit: O
         )
 
         # Auto-demote Tier 0 when selectors stop matching often enough.
+        # This also (intentionally) flips ScrapeProfile.is_known_good False —
+        # a demoted host runs at tier "1", which is outside the known-good
+        # allowed tiers. Demotion on sustained tier-0 misses wins over
+        # promotion; the counters this method maintains (scrape_count /
+        # success_rate / tier0_miss_count) are exactly what is_known_good reads,
+        # so a recovered host flips back to known-good with no extra write path.
         if (
             profile.preferred_tier == "auto"
             and profile.tier0_miss_count >= _TIER0_DEMOTE_MIN_MISSES
