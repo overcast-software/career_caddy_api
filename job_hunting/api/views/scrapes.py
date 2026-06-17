@@ -1710,6 +1710,14 @@ class ScrapeProfileViewSet(BaseViewSet):
         # reads server-side) so a single config drives both the
         # client-side prefill and the server-side BeautifulSoup pass.
         job_data = css_blob.get("job_data") if isinstance(css_blob.get("job_data"), dict) else {}
+        # Additive: surface the per-domain known-good signal + effective tier
+        # at the response top level so the extension can branch on extraction
+        # trustworthiness without a second round-trip to the staff-only
+        # ScrapeProfile resource. Computed once (read-only, no DB writes).
+        # NOTE: known_good reflects server-side Tier-0 extraction readiness
+        # (job_data selectors + success metrics), independent of whether this
+        # profile shipped apply/canonical extension_selectors.
+        readiness = profile.readiness()
         return Response(
             {
                 "data": {
@@ -1726,7 +1734,9 @@ class ScrapeProfileViewSet(BaseViewSet):
                         "apply_url_decoder": cfg.get("apply_url_decoder"),
                         "job_data_selectors": job_data,
                     },
-                }
+                },
+                "known_good": readiness["known_good"],
+                "tier": readiness["tier"],
             }
         )
 

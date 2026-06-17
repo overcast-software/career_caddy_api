@@ -1870,10 +1870,23 @@ class ScrapeProfileSerializer(BaseSerializer):
         "extension_selectors",
         "extraction_hints", "page_structure",
         "last_success_at", "scrape_count", "failure_count", "tier0_miss_count",
-        "preferred_tier", "enabled", "created_at", "updated_at",
+        "preferred_tier", "enabled", "is_known_good", "created_at", "updated_at",
     ]
+    # `is_known_good` is a computed @property with no setter; flag it read-only
+    # so any inbound payload carrying it is dropped instead of crashing setattr.
+    read_only_attributes = ["is_known_good"]
     relationships = {}
     relationship_fks = {}
+
+    def to_resource(self, obj):
+        res = super().to_resource(obj)
+        # `readiness()` is a method (returns a debug struct), so it can't ride
+        # the getattr-based attributes loop. Inject it here for the
+        # /admin/scrape-profiles debug panel, honoring sparse-fieldset opt-out
+        # (?fields[scrape-profile]=...). Cheap: pure in-memory field reads.
+        if self._field_requested("readiness"):
+            res.setdefault("attributes", {})["readiness"] = obj.readiness()
+        return res
 
 
 TYPE_TO_SERIALIZER = {
