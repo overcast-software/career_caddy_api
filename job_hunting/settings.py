@@ -97,6 +97,10 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # Required for postgres-specific model indexes (HashIndex on
+    # JobPost.apply_url); without it Django raises postgres.E005 at
+    # system-check time.
+    "django.contrib.postgres",
     "rest_framework",
     "rest_framework.authtoken",
     "corsheaders",
