@@ -49,7 +49,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 import django
 
@@ -83,7 +83,7 @@ logger = logging.getLogger("job_hunting.api.events")
 async def _async_event_stream(
     user_id: int,
     is_disconnected=None,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
     """Async equivalent of the sync view's ``_event_stream``.
 
     Opens the same dedicated psycopg2 LISTEN connection and yields
