@@ -196,9 +196,9 @@ class CompanyViewSet(BaseViewSet):
         # though the user had been notified via cc_auto. Staff bypass
         # mirrors list() — every post on the company shows.
         if request.user.is_staff:
-            qs = JobPost.objects.filter(company_id=int(pk))
+            qs = JobPost.objects.filter(company_id=pk)
         else:
-            qs = JobPost.objects.filter(company_id=int(pk)).filter(
+            qs = JobPost.objects.filter(company_id=pk).filter(
                 Q(created_by_id=request.user.id) |
                 Q(applications__user_id=request.user.id) |
                 Q(scores__user_id=request.user.id) |
@@ -233,7 +233,7 @@ class CompanyViewSet(BaseViewSet):
     def applications(self, request, pk=None):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(JobApplication.objects.filter(company_id=int(pk), user_id=request.user.id))
+        apps = list(JobApplication.objects.filter(company_id=pk, user_id=request.user.id))
         data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
@@ -252,7 +252,7 @@ class CompanyViewSet(BaseViewSet):
         # endpoint leaked every other user's scrape rows for the shared
         # Company — same tenancy boundary as `Score`, `JobApplication`,
         # `CoverLetter`.
-        qs = Scrape.objects.filter(company_id=int(pk))
+        qs = Scrape.objects.filter(company_id=pk)
         if not request.user.is_staff:
             qs = qs.filter(created_by_id=request.user.id)
         scrapes_list = list(qs)
@@ -270,7 +270,7 @@ class CompanyViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         scores_list = list(
             Score.objects.filter(
-                job_post__company_id=int(pk), user_id=request.user.id
+                job_post__company_id=pk, user_id=request.user.id
             )
         )
         data = [ScoreSerializer().to_resource(s) for s in scores_list]
@@ -286,7 +286,7 @@ class CompanyViewSet(BaseViewSet):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         questions_list = list(
-            Question.objects.filter(company_id=int(pk))
+            Question.objects.filter(company_id=pk)
         )
         data = [QuestionSerializer().to_resource(q) for q in questions_list]
         return Response({"data": data})
@@ -592,7 +592,7 @@ class CompanyViewSet(BaseViewSet):
         """
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        aliases_qs = list(Company.objects.filter(canonical_id=int(pk)))
+        aliases_qs = list(Company.objects.filter(canonical_id=pk))
         ser = self.get_serializer()
         return Response(
             {"data": [ser.to_resource(c) for c in aliases_qs]}
