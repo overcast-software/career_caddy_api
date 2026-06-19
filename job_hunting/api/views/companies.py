@@ -97,8 +97,21 @@ class CompanyViewSet(BaseViewSet):
         items = list(qs.all()[offset: offset + page_size])
 
         ser = self.get_serializer()
+        # Per-company counts are opt-in via `?meta=counts` (mirrors the
+        # resume counts-in-meta gate). Computing them unconditionally
+        # would add N×5 `.count()` queries to every list call — most
+        # callers don't need the badges, so we only pay the cost when
+        # asked. Keys are plural to match `retrieve()` + the frontend
+        # `company` model (`jobApplicationsCount`, ...).
+        want_counts = self._meta_counts_requested(request)
+        data = []
+        for obj in items:
+            resource = ser.to_resource(obj)
+            if want_counts:
+                resource["meta"] = self._build_counts(obj)
+            data.append(resource)
         payload = {
-            "data": [ser.to_resource(obj) for obj in items],
+            "data": data,
             "meta": {
                 "total": total,
                 "page": page_number,
@@ -126,17 +139,7 @@ class CompanyViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
         resource = ser.to_resource(obj)
-        resource["meta"] = {
-            "job_posts_count": obj.job_posts.count(),
-            "job_applications_count": JobApplication.objects.filter(
-                job_post__company_id=obj.id
-            ).count(),
-            "scrapes_count": obj.scrapes.count(),
-            "questions_count": obj.questions.count(),
-            "scores_count": Score.objects.filter(
-                job_post__company_id=obj.id
-            ).count(),
-        }
+        resource["meta"] = self._build_counts(obj)
         payload = {"data": resource}
         include_rels = self._parse_include(request)
         if include_rels:
@@ -594,6 +597,39 @@ class CompanyViewSet(BaseViewSet):
         return Response(
             {"data": [ser.to_resource(c) for c in aliases_qs]}
         )
+
+    @staticmethod
+    def _build_counts(obj):
+        """Per-company badge counts emitted in the resource `meta`.
+
+        Single source of truth shared by `retrieve()` (always) and
+        `list()` (gated on `?meta=counts`) so the two paths can't
+        drift. The applications count goes through the DIRECT
+        `JobApplication.company` FK (`related_name="applications"`)
+        rather than joining `job_post__company_id` — applications can
+        carry a company without a job_post, and the direct FK is the
+        cheaper, correct lookup.
+        """
+        return {
+            "job_posts_count": obj.job_posts.count(),
+            "job_applications_count": JobApplication.objects.filter(
+                company_id=obj.id
+            ).count(),
+            "scrapes_count": obj.scrapes.count(),
+            "questions_count": obj.questions.count(),
+            "scores_count": Score.objects.filter(
+                job_post__company_id=obj.id
+            ).count(),
+        }
+
+    @staticmethod
+    def _meta_counts_requested(request):
+        """True when the client opted into `?meta=counts` (comma-list
+        tolerant). Mirrors `ResumeSerializer._meta_counts_requested`."""
+        raw = request.query_params.get("meta")
+        if not raw:
+            return False
+        return "counts" in {s.strip() for s in str(raw).split(",") if s.strip()}
 
     @staticmethod
     def _extract_target_id(payload):
