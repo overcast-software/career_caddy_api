@@ -28,6 +28,7 @@ import psycopg2.extensions
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TransactionTestCase
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from job_hunting.api import events as events_view
@@ -66,6 +67,25 @@ def _fire_notify(payload: dict) -> None:
         conn.close()
 
 
+def _make_get_request(path: str, token: str) -> Request:
+    """Minimal ASGI GET request for driving the Starlette handler
+    directly. Lets us assert the StreamingResponse header contract
+    without an httpx TestClient consuming the unbounded body (which
+    would hang — the stream has no duration cap)."""
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": path,
+        "query_string": f"token={token}".encode("utf-8"),
+        "headers": [],
+    }
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request(scope, _receive)
+
+
 class TestHealthz(TransactionTestCase):
     """GET /healthz is an unauthenticated 200 with no DB access — the
     container healthcheck target."""
@@ -95,30 +115,45 @@ class TestStreamAuthGate(TransactionTestCase):
 
 class TestStreamConnectedPreamble(TransactionTestCase):
     """A valid token gets a 200 streaming response with SSE headers and
-    the ``:connected`` preamble as the first chunk."""
+    the ``:connected`` preamble as the first chunk.
+
+    Both facts are asserted WITHOUT consuming the unbounded body: the
+    handler is called directly for its StreamingResponse (status + SSE
+    headers), and the generator is driven for just the preamble, then
+    closed. Iterating the body through an httpx ``TestClient`` and
+    ``break``-ing hangs forever — the stream has no duration cap
+    (sse_asgi.py), so the early break never tears the in-process
+    transport down. The other streaming tests in this module use the
+    same direct-drive pattern for exactly this reason.
+    """
 
     def test_valid_token_streams_connected_preamble(self):
         user = User.objects.create_user(username="carol", password="pw")
         token = events_view._sign_token(user.id)
-        with TestClient(sse_asgi.app) as client:
-            with client.stream(
-                "GET", STREAM_URL, params={"token": token}
-            ) as resp:
-                self.assertEqual(resp.status_code, 200)
-                self.assertTrue(
-                    resp.headers["content-type"].startswith(
-                        "text/event-stream"
-                    )
-                )
+
+        async def _drive():
+            # Header contract — inspect the StreamingResponse the handler
+            # builds; never send/consume its (unbounded) body.
+            request = _make_get_request(STREAM_URL, token=token)
+            resp = await sse_asgi.events_stream(request)
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(
+                resp.media_type.startswith("text/event-stream")
+            )
+            self.assertEqual(resp.headers["cache-control"], "no-cache")
+            self.assertEqual(resp.headers["x-accel-buffering"], "no")
+
+            # Preamble — drive the generator for just the first chunk,
+            # then close it (never enter the uncapped keepalive loop).
+            gen = sse_asgi._async_event_stream(user.id)
+            try:
                 self.assertEqual(
-                    resp.headers["cache-control"], "no-cache"
+                    await gen.__anext__(), b":connected\n\n"
                 )
-                self.assertEqual(
-                    resp.headers["x-accel-buffering"], "no"
-                )
-                for chunk in resp.iter_raw():
-                    self.assertEqual(chunk, b":connected\n\n")
-                    break
+            finally:
+                await gen.aclose()
+
+        asyncio.run(_drive())
 
 
 class TestStreamForwarding(TransactionTestCase):
