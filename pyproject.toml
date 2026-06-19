@@ -77,3 +77,10 @@ package = false
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pyright]
+# Pyright runs on the host without the Django venv on its search path, so
+# it can't resolve django / rest_framework / drf_spectacular / etc. and
+# flags every import as missing — pure noise. ruff + the pytest suite are
+# the real gates; silence the false positives so genuine warnings stand out.
+reportMissingImports = false
