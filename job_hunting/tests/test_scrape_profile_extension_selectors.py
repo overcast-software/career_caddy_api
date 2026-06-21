@@ -91,6 +91,27 @@ class TestScrapeProfileExtensionSelectors(TestCase):
         self.assertEqual(attrs["job_data_selectors"], {"title": "h1"})
         self.assertEqual(attrs["apply_button_selectors"], [])
 
+    def test_response_carries_known_good_tier_and_reasons(self):
+        """The response root carries the readiness signal so the staff
+        extension panel can show WHY a profile is/isn't known-good without a
+        second round-trip. A fresh job_data-only profile fails several
+        readiness clauses, so `known_good` is False and `reasons` lists them
+        (e.g. the missing required job_data selectors)."""
+        ScrapeProfile.objects.create(
+            hostname="reasons.com",
+            css_selectors={"job_data": {"title": "h1"}},
+        )
+        resp = self.client.get(self.URL + "?hostname=reasons.com")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        body = resp.json()
+        self.assertIn("known_good", body)
+        self.assertIn("tier", body)
+        self.assertIn("reasons", body)
+        self.assertFalse(body["known_good"])
+        self.assertIsInstance(body["reasons"], list)
+        self.assertTrue(body["reasons"])  # fresh profile fails clauses
+        self.assertIn("job_data selectors", " ".join(body["reasons"]))
+
     def test_linkedin_response_includes_job_data_selectors(self):
         """0093 seeds linkedin.com with title + company_name job_data
         selectors; verify they round-trip through the endpoint so the

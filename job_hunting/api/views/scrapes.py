@@ -1716,7 +1716,9 @@ class ScrapeProfileViewSet(BaseViewSet):
         # ScrapeProfile resource. Computed once (read-only, no DB writes).
         # NOTE: known_good reflects server-side Tier-0 extraction readiness
         # (job_data selectors + success metrics), independent of whether this
-        # profile shipped apply/canonical extension_selectors.
+        # profile shipped apply/canonical extension_selectors. `reasons` is the
+        # per-clause breakdown (empty when known-good) so the staff extension
+        # panel can show WHY a profile is/isn't known-good.
         readiness = profile.readiness()
         return Response(
             {
@@ -1737,6 +1739,7 @@ class ScrapeProfileViewSet(BaseViewSet):
                 },
                 "known_good": readiness["known_good"],
                 "tier": readiness["tier"],
+                "reasons": readiness["reasons"],
             }
         )
 
