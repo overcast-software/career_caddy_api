@@ -256,12 +256,12 @@ class TestCompanyOutbox(TestCase):
         self.jp1 = JobPost.objects.create(
             created_by=self.user, title="Engineer",
             description="role 1", link="https://example.com/jobs/1",
-            company=self.company,
+            company=self.company, audience=[AS2_PUBLIC],
         )
         self.jp2 = JobPost.objects.create(
             created_by=self.user, title="Manager",
             description="role 2", link="https://example.com/jobs/2",
-            company=self.company,
+            company=self.company, audience=[AS2_PUBLIC],
         )
         self.jp_private = JobPost.objects.create(
             created_by=self.user, title="Private",
@@ -271,7 +271,7 @@ class TestCompanyOutbox(TestCase):
         self.jp_other = JobPost.objects.create(
             created_by=self.user, title="Other Co Role",
             description="x", link="https://example.com/jobs/4",
-            company=self.other_company,
+            company=self.other_company, audience=[AS2_PUBLIC],
         )
 
     def test_outbox_metadata_shape(self):
@@ -398,7 +398,7 @@ class TestCompanyDispatchTrigger(TestCase):
             JobPost.objects.create(
                 created_by=self.user, title="Hire",
                 description="here", link="https://example.com/jobs/1",
-                company=self.fed_company,
+                company=self.fed_company, audience=[AS2_PUBLIC],
             )
         kinds = [call.args[1] for call in enq_co.call_args_list]
         self.assertIn("create", kinds)
@@ -410,7 +410,7 @@ class TestCompanyDispatchTrigger(TestCase):
             JobPost.objects.create(
                 created_by=self.user, title="Hire",
                 description="here", link="https://example.com/jobs/2",
-                company=self.muted_company,
+                company=self.muted_company, audience=[AS2_PUBLIC],
             )
         self.assertEqual(enq_co.call_args_list, [])
 
@@ -421,6 +421,7 @@ class TestCompanyDispatchTrigger(TestCase):
             JobPost.objects.create(
                 created_by=self.user, title="Hire",
                 description="here", link="https://example.com/jobs/3",
+                audience=[AS2_PUBLIC],
             )
         self.assertEqual(enq_co.call_args_list, [])
 

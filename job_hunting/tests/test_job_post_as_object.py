@@ -73,6 +73,7 @@ class TestAsObjectAdapter(TestCase):
             location="Remote",
             apply_url="https://ats.example.com/apply/42",
             created_by=self.user,
+            audience=[AS2_PUBLIC],
         )
 
     def test_basic_shape(self):

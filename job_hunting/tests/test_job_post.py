@@ -270,30 +270,26 @@ class TestJobPostEditApplyUrlCanonical(TestCase):
 
 
 class TestJobPostAudience(TestCase):
-    """Phase 3.5 prep for Phase 4 ActivityPub readiness:
-    JobPost.audience holds AS2 audience URIs; default is the AS2 Public
-    collection so existing-data semantics stay 'public'. is_public()
-    helper mirrors what the frontend reads back via the serializer.
+    """JobPost.audience holds AS2 audience URIs. BACK-91: the default is
+    now PRIVATE (empty list) — ingesting a job is not a publishing act.
+    Promotion to public is a per-user opt-in applied at create time. The
+    is_public() helper mirrors what the frontend reads back via the
+    serializer.
 
-    The field is latent today — federation dispatch will consult it in
-    Phase 4. These tests pin the contract: default, helper truthiness,
-    and JSON:API round-trip."""
+    These tests pin the contract: private default, helper truthiness, and
+    JSON:API round-trip."""
 
     def setUp(self):
         self.user = User.objects.create_user(username="audience_user", password="pass")
         self.company = Company.objects.create(name="AudienceCo")
 
-    def test_new_job_post_defaults_to_public_audience(self):
+    def test_new_job_post_defaults_to_private_audience(self):
+        # BACK-91: a bare create is private (no implicit publish).
         jp = JobPost.objects.create(
             title="Engineer", company=self.company, created_by=self.user
         )
         jp.refresh_from_db()
-        self.assertEqual(jp.audience, [AS2_PUBLIC])
-        self.assertEqual(
-            jp.audience,
-            ["https://www.w3.org/ns/activitystreams#Public"],
-            "AS2 Public URI string must be exact — federation peers match this verbatim",
-        )
+        self.assertEqual(jp.audience, [])
 
     def test_audience_default_is_fresh_per_instance(self):
         """Mutable defaults that share state across instances are the
@@ -306,8 +302,15 @@ class TestJobPostAudience(TestCase):
         self.assertNotIn("https://example.test/sentinel", jp2.audience)
         self.assertIsNot(jp1.audience, jp2.audience)
 
-    def test_is_public_true_for_default(self):
-        jp = JobPost.objects.create(title="Pub", created_by=self.user)
+    def test_is_public_false_for_default(self):
+        # BACK-91: default audience is private, so is_public() is False.
+        jp = JobPost.objects.create(title="Priv", created_by=self.user)
+        self.assertFalse(jp.is_public())
+
+    def test_is_public_true_for_explicit_public_audience(self):
+        jp = JobPost.objects.create(
+            title="Pub", created_by=self.user, audience=[AS2_PUBLIC]
+        )
         self.assertTrue(jp.is_public())
 
     def test_is_public_false_for_empty_list(self):

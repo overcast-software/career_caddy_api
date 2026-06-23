@@ -72,10 +72,14 @@ def _seed_follower(
 
 
 def _seed_public_post(user, **kwargs) -> JobPost:
+    # BACK-91: the model default is now private, so a "public" seed must
+    # set the audience explicitly. Callers wanting a private post still
+    # override with audience=[].
     defaults = dict(
         title="Senior Engineer",
         description="Build cool things.",
         link="https://example.com/jobs/1",
+        audience=[AS2_PUBLIC],
     )
     defaults.update(kwargs)
     return JobPost.objects.create(created_by=user, **defaults)
