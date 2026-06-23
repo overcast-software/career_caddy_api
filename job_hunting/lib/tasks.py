@@ -747,6 +747,230 @@ def sweep_stale_scrape_claims(threshold_minutes: int = _DEFAULT_LEASE_MINUTES) -
 
 
 # ---------------------------------------------------------------------------
+# Orphaned attended-hold staleness fallback (PACA CC #32)
+# ---------------------------------------------------------------------------
+# Attended-scrape routing (PACA CC #31) partitions the status='hold' claim
+# queue on Scrape.attended: an attended runner claims ONLY attended=True
+# holds; the default runners claim ONLY attended=False. The partition is
+# STRICT and never crosses (see ScrapeViewSet.claim_next). Gap: an
+# attended=True hold orphans in `hold` forever if no attended runner ever
+# polls — claim-next skips it, and the lease-sweep above only resets
+# non-terminal *claimed* rows (claimed_at < cutoff), never an unclaimed
+# hold. This sweep closes that gap WITHOUT touching the claim path.
+#
+# Age signal: Scrape has no created_at and claimed_at is NULL on an
+# unclaimed hold, so neither column dates the orphan. Instead use the
+# audit table — every hold-create writes a ScrapeStatus row
+# (auto_now_add created_at). Max(scrape_statuses__created_at) is "when
+# this row most recently entered hold": for a currently-`hold` row the
+# latest audit row IS the hold row, and a redo (failed -> re-held) mints a
+# fresh hold ScrapeStatus, so the Max tracks the most-recent hold — not
+# the original. The candidate set (attended holds) is tiny; subquery cost
+# is negligible.
+#
+# Two legs:
+#  1. Always-on observability (read-only): count attended holds older than
+#     WARN minutes and logger.warning so an operator notices the missing
+#     attended runner. Harmless whether attended routing is on or off.
+#  2. Opt-in auto-demote (CC_ATTENDED_HOLD_TTL_MINUTES > 0 only): act on
+#     attended holds older than the TTL.
+#       action="fail" (default): terminal-fail each via _log_scrape_status
+#         so failure_reason + SSE events.notify + a failed ScrapeStatus
+#         audit row all land. The linked JobPost stub stays complete=False,
+#         so a later attended `redo` still recovers it.
+#       action="unattended": demote attended=False (status stays hold,
+#         claimed_at stays NULL) so the next default claim-next picks it up.
+#
+# Double-claim safety: snapshot candidate ids, then GUARD every mutate on
+# filter(status='hold', claimed_at__isnull=True, attended=True). A
+# concurrent attended claim-next flips the row to running+claimed inside
+# SELECT FOR UPDATE SKIP LOCKED, so a guard that no longer matches loses
+# cleanly (0 rows) and the runner keeps the row. The fail-leg guard sets
+# status='failed' atomically, which is also self-healing: should
+# _log_scrape_status not run, the row is already terminal and never
+# re-swept (the candidate query requires status='hold'). Mirrors
+# sweep_stale_scrape_claims.
+#
+# Schedule: registered as a django-q2 Schedule ('I', minutes=5) by
+# migration 0111. Config knobs (env -> settings, default-safe):
+#   CC_ATTENDED_HOLD_TTL_MINUTES  int, default 0  (0 = auto-demote OFF)
+#   CC_ATTENDED_HOLD_TTL_ACTION   "fail" (default) | "unattended"
+#   CC_ATTENDED_HOLD_WARN_MINUTES int, default 30 (observability leg only)
+
+_ATTENDED_HOLD_FAILURE_REASON = (
+    "attended hold expired: no attended runner claimed within {ttl}m; "
+    'needs make runner ARGS="--attended" (warm login)'
+)
+
+
+def _orphaned_attended_holds(cutoff):
+    """Queryset of unclaimed attended holds whose most-recent hold
+    ScrapeStatus is older than ``cutoff``.
+
+    The annotate collapses the audit rows to the latest hold timestamp
+    (the age signal — Scrape has no created_at and an unclaimed hold has
+    claimed_at IS NULL).
+    """
+    from django.db.models import Max
+
+    from job_hunting.models import Scrape
+
+    return (
+        Scrape.objects.filter(
+            status="hold", attended=True, claimed_at__isnull=True
+        )
+        .annotate(held_at=Max("scrape_statuses__created_at"))
+        .filter(held_at__lt=cutoff)
+    )
+
+
+def _orphaned_attended_hold_ids(cutoff) -> list:
+    """Snapshot of orphaned-attended-hold ids older than ``cutoff``.
+
+    Split out as the candidate-snapshot seam: the guarded per-row mutate
+    re-checks the predicate, so a row that an attended runner claims
+    between this snapshot and the mutate loses the guard cleanly.
+    """
+    return list(_orphaned_attended_holds(cutoff).values_list("id", flat=True))
+
+
+def sweep_orphaned_attended_holds(
+    ttl_minutes: int | None = None,
+    action: str | None = None,
+    warn_minutes: int | None = None,
+) -> dict:
+    """Observe (always) and optionally auto-demote orphaned attended holds.
+
+    An attended=True hold with no attended runner polling sits in `hold`
+    forever — the strict claim-next partition never lets a default runner
+    take it. This sweep is the staleness fallback.
+
+    Args (all default to the matching ``CC_ATTENDED_HOLD_*`` setting):
+    - ``ttl_minutes``: auto-demote acts on holds older than this. ``0``
+      (the default) keeps auto-demote OFF — observability only.
+    - ``action``: ``"fail"`` (default) terminal-fails the stale holds;
+      ``"unattended"`` demotes attended=False so a default runner claims
+      them. Invalid values fall back to ``"fail"``.
+    - ``warn_minutes``: observability-leg age threshold (default 30).
+
+    Returns a dict (visible in the django_q.Task ``result`` column)::
+
+        {stale_count, warn_minutes, ttl_minutes, action,
+         failed, demoted, skipped, cutoff}
+
+    ``stale_count`` is the always-on observability count (> warn_minutes).
+    ``failed`` / ``demoted`` count auto-demote mutations; ``skipped``
+    counts rows that lost the guard to a concurrent attended claim.
+    ``cutoff`` is the TTL cutoff iso (only when auto-demote ran).
+    """
+    from datetime import timedelta
+
+    from django.conf import settings
+    from django.utils import timezone
+
+    if ttl_minutes is None:
+        ttl_minutes = int(getattr(settings, "CC_ATTENDED_HOLD_TTL_MINUTES", 0))
+    if warn_minutes is None:
+        warn_minutes = int(getattr(settings, "CC_ATTENDED_HOLD_WARN_MINUTES", 30))
+    if action is None:
+        action = getattr(settings, "CC_ATTENDED_HOLD_TTL_ACTION", "fail")
+    if action not in ("fail", "unattended"):
+        action = "fail"
+
+    from job_hunting.models import Scrape
+
+    now = timezone.now()
+
+    # ---- Leg 1: always-on observability (read-only) ----
+    warn_cutoff = now - timedelta(minutes=warn_minutes)
+    stale_count = _orphaned_attended_holds(warn_cutoff).count()
+    if stale_count:
+        logger.warning(
+            '%d attended hold(s) orphaned > %dm; start an attended runner '
+            '(make runner ARGS="--attended")',
+            stale_count,
+            warn_minutes,
+        )
+
+    result = {
+        "stale_count": stale_count,
+        "warn_minutes": warn_minutes,
+        "ttl_minutes": ttl_minutes,
+        "action": action,
+        "failed": 0,
+        "demoted": 0,
+        "skipped": 0,
+    }
+
+    # ---- Leg 2: opt-in auto-demote (TTL > 0 only — the safety switch) ----
+    if not ttl_minutes or ttl_minutes <= 0:
+        return result
+
+    ttl_cutoff = now - timedelta(minutes=ttl_minutes)
+    result["cutoff"] = ttl_cutoff.isoformat()
+    candidate_ids = _orphaned_attended_hold_ids(ttl_cutoff)
+    if not candidate_ids:
+        return result
+
+    if action == "unattended":
+        # Guarded bulk demote. The WHERE re-checks the candidate predicate
+        # at update time, so a row a concurrent attended runner just
+        # claimed (status flipped to running) is excluded. Status stays
+        # hold, claimed_at stays NULL — the next default claim-next takes
+        # it.
+        demoted = Scrape.objects.filter(
+            id__in=candidate_ids,
+            status="hold",
+            claimed_at__isnull=True,
+            attended=True,
+        ).update(attended=False)
+        result["demoted"] = demoted
+        result["skipped"] = len(candidate_ids) - demoted
+        if demoted:
+            logger.warning(
+                "demoted %d orphaned attended hold(s) to unattended "
+                "(orphaned > %dm); a default runner will claim them",
+                demoted,
+                ttl_minutes,
+            )
+        return result
+
+    # action == "fail"
+    from job_hunting.lib.scraper import _log_scrape_status
+
+    failure_reason = _ATTENDED_HOLD_FAILURE_REASON.format(ttl=ttl_minutes)
+    for sid in candidate_ids:
+        # GUARD: atomically flip the row out of the candidate set before
+        # the terminal write. A concurrent attended claim-next (SELECT FOR
+        # UPDATE SKIP LOCKED) either already moved the row to running
+        # (this WHERE matches 0 -> skip, leave it for the runner) or loses
+        # to us (it then sees status='failed' and skips). Setting status
+        # here also self-heals: if the terminal write below never runs,
+        # the row is already terminal and never re-swept.
+        claimed = Scrape.objects.filter(
+            id=sid,
+            status="hold",
+            claimed_at__isnull=True,
+            attended=True,
+        ).update(status="failed", failure_reason=failure_reason)
+        if not claimed:
+            result["skipped"] += 1
+            continue
+        # Terminal write — failure_reason + SSE events.notify + the failed
+        # ScrapeStatus audit row, exactly once for the row we won.
+        _log_scrape_status(sid, "failed", failure_reason=failure_reason)
+        result["failed"] += 1
+        logger.warning(
+            "failed orphaned attended hold id=%s (no attended runner "
+            "claimed within %dm)",
+            sid,
+            ttl_minutes,
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Scrape.html retention — bounded prune (PACA #30)
 # ---------------------------------------------------------------------------
 # Successful scrapes must stay inspectable so the scrape-profile-enhancer
