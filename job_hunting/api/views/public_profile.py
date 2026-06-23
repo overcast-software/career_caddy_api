@@ -66,13 +66,15 @@ _PUBLIC_ATTRS = (
 
 
 def _public_jobpost_resource(job_post) -> dict:
-    """Build the public JSON:API ``job-post`` resource for ``job_post``.
+    """Build the public JSON:API ``public-job-post`` resource for ``job_post``.
 
-    Keeps the canonical ``type: "job-post"`` so a client can share an
-    Ember Data model shape with the authed surface, but emits only the
-    public-safe attribute subset plus a denormalized ``company_name``
-    (Company is a shared resource and there is no public Company read
-    endpoint, so the name is inlined rather than linked).
+    Emits the distinct ``type: "public-job-post"`` — this projection is a
+    different resource than the authed ``job-post`` (different field set,
+    different permissions), so it carries its own type rather than
+    masquerading as the full resource. It emits only the public-safe
+    attribute subset plus a denormalized ``company_name`` (Company is a
+    shared resource and there is no public Company read endpoint, so the
+    name is inlined rather than linked).
     """
     attrs = {name: _to_primitive(getattr(job_post, name)) for name in _PUBLIC_ATTRS}
     company_name = None
@@ -83,7 +85,7 @@ def _public_jobpost_resource(job_post) -> dict:
         )
     attrs["company_name"] = company_name
     return {
-        "type": "job-post",
+        "type": "public-job-post",
         "id": str(job_post.id),
         "attributes": attrs,
     }
@@ -126,7 +128,9 @@ def _page_params(request):
             description="Username (not id) of the profile owner",
         ),
     ],
-    responses={200: OpenApiResponse(description="JSON:API list of job-post resources")},
+    responses={
+        200: OpenApiResponse(description="JSON:API list of public-job-post resources")
+    },
 )
 @api_view(["GET"])
 @permission_classes([AllowAny])

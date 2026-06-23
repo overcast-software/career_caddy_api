@@ -110,7 +110,7 @@ class TestPublicFederatedJobPosts(TestCase):
     def test_resource_shape_is_public_projection(self):
         body = self.client.get(URL.format(username="dough")).json()
         item = body["data"][0]
-        self.assertEqual(item["type"], "job-post")
+        self.assertEqual(item["type"], "public-job-post")
         self.assertEqual(item["id"], str(self.public_post.id))
         attrs = item["attributes"]
         self.assertEqual(attrs["title"], "Senior Greenskeeper")
