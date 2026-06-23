@@ -1171,6 +1171,12 @@ class ScrapeSerializer(BaseSerializer):
         # 'extension-direct'. See Scrape model docstrings for shape.
         "source_mode",
         "captured_payload",
+        # Attended-scrape routing. Writable snake_case boolean (model
+        # default False). When True, only an attended runner can claim
+        # the resulting hold scrape via POST /scrapes/claim-next/. cc_auto
+        # sends `attended: true` to route a scrape to a human-driven
+        # headed browser; omitted/False keeps the default runner queue.
+        "attended",
         # Operator-facing diagnostic populated by the failed-status
         # write sites (placeholder rejection, parse_scrape exception,
         # CompletenessReviewer rejection, sweep). Read-only on the
