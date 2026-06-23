@@ -7,8 +7,11 @@ Two public surfaces, both ``AllowAny``:
 
 - ``GET /api/v1/users/<username>/`` — the profile OWNER as a normal
   JSON:API ``user`` resource (canonical numeric id, public-safe attrs
-  only) exposing a ``federated`` relationship. With ``?include=federated``
-  it sideloads that page of public ``job-post`` resources.
+  only) exposing a ``federated`` relationship. The relationship is
+  LINK-ONLY (``links.related`` points at the collection below); there
+  is deliberately no ``?include=federated`` sideload — the SPA paginates
+  the feed via the collection query instead, so sideloading the whole
+  first page onto the user resource is dead surface.
 - ``GET /api/v1/users/<username>/job-posts/federated/`` — the federated
   (published) job posts themselves, as normal ``job-post`` resources (a
   public-safe SUBSET of the fields, NOT a shadow ``public-job-post``
@@ -27,6 +30,11 @@ Federated-collection contract:
   filter the AP outbox uses (``created_by`` == user AND ``audience``
   contains ``AS2_PUBLIC``, ``order_by(-created_at, -id)``). The web
   profile and the fediverse view can never disagree on what's public.
+- Pagination: KEYSET (cursor) on the composite ``(-created_at, -id)``
+  order — the Mastodon / ActivityPub-outbox pattern. A growing feed
+  (new federated posts arriving while the visitor scrolls) never dupes
+  or skips an already-seen row, which offset/page-number paging cannot
+  promise. See :func:`public_user_federated_job_posts`.
 - Payload: a deliberate PUBLIC PROJECTION (``_public_jobpost_resource``)
   carrying only display fields. It does NOT reuse ``JobPostSerializer``,
   which over-shares (per-user scores, every user's applications /
@@ -40,9 +48,12 @@ user's posts. Unknown username → 404. Known user with no public posts →
 """
 from __future__ import annotations
 
-import math
+import base64
+import binascii
+from datetime import datetime
 
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
 from rest_framework.decorators import api_view, permission_classes
@@ -104,23 +115,55 @@ def _public_jobpost_resource(job_post) -> dict:
     }
 
 
-def _page_params(request):
-    """Parse (page, per_page) supporting JSON:API + simple styles.
+# Keyset-pagination bounds for the federated feed. Defaults sized for an
+# infinite-scroll viewport; capped so a hostile ``page[size]`` can't pull
+# the whole table in one request.
+_DEFAULT_PAGE_SIZE = 20
+_MAX_PAGE_SIZE = 100
 
-    Mirrors BaseViewSet._page_params bounds (per_page clamped 1..200,
-    default 50) so the public endpoint paginates like the rest of the
-    API.
-    """
+
+class _InvalidCursor(Exception):
+    """Raised when ``?page[after]`` can't be decoded into ``(created_at, id)``."""
+
+
+def _keyset_page_size(request) -> int:
+    """Parse ``?page[size]=N`` for the keyset feed (default 20, cap 100)."""
     qp = request.query_params
     try:
-        page = int(qp.get("page[number]") or qp.get("page") or 1)
+        size = int(qp.get("page[size]") or qp.get("per_page") or _DEFAULT_PAGE_SIZE)
     except (TypeError, ValueError):
-        page = 1
+        size = _DEFAULT_PAGE_SIZE
+    return max(1, min(size, _MAX_PAGE_SIZE))
+
+
+def _encode_cursor(job_post) -> str:
+    """Opaque, URL-safe cursor for ``job_post``'s ``(created_at, id)`` key.
+
+    base64 of ``"<iso_created_at>|<id>"``. Opaque on purpose — clients
+    must treat it as a token to echo back via ``page[after]`` (or follow
+    ``links.next``), not parse. ISO format round-trips the timestamp at
+    microsecond precision so the keyset comparison is exact.
+    """
+    raw = f"{job_post.created_at.isoformat()}|{job_post.id}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, int]:
+    """Decode an opaque cursor into ``(created_at, id)``.
+
+    Raises :class:`_InvalidCursor` on ANY malformed input (bad base64,
+    bad utf-8, missing delimiter, unparseable timestamp / id) so the
+    view can answer a clean 400 rather than 500'ing on a hand-edited
+    or truncated cursor.
+    """
     try:
-        per_page = int(qp.get("page[size]") or qp.get("per_page") or 50)
-    except (TypeError, ValueError):
-        per_page = 50
-    return max(1, page), max(1, min(per_page, 200))
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        iso, sep, raw_id = raw.rpartition("|")
+        if not sep or not iso or not raw_id:
+            raise ValueError("cursor missing '<iso>|<id>' delimiter")
+        return datetime.fromisoformat(iso), int(raw_id)
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise _InvalidCursor(str(exc)) from exc
 
 
 @extend_schema(
@@ -129,9 +172,14 @@ def _page_params(request):
     description=(
         "Public, no-auth read of the posts a user has published "
         "(audience-public) — the human-readable twin of the ActivityPub "
-        "actor outbox. Never returns private / NULL-audience posts, never "
-        "another user's posts, never requires login. Unknown username "
-        "→ 404; known user with no public posts → 200 with an empty list."
+        "actor outbox. KEYSET (cursor) paginated on ``(-created_at, -id)`` "
+        "so the feed is stable while new federated posts arrive: pass "
+        "``page[size]`` (default 20, max 100) and ``page[after]`` (the "
+        "opaque cursor from a previous page's ``meta.next_cursor`` / "
+        "``links.next``). Never returns private / NULL-audience posts, "
+        "never another user's posts, never requires login. Unknown "
+        "username → 404; known user with no public posts → 200 with an "
+        "empty list; malformed cursor → 400."
     ),
     parameters=[
         OpenApiParameter(
@@ -140,15 +188,37 @@ def _page_params(request):
             OpenApiParameter.PATH,
             description="Username (not id) of the profile owner",
         ),
+        OpenApiParameter(
+            "page[size]",
+            OpenApiTypes.INT,
+            OpenApiParameter.QUERY,
+            description="Page size (default 20, capped at 100)",
+        ),
+        OpenApiParameter(
+            "page[after]",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            description="Opaque keyset cursor — echo meta.next_cursor to page forward",
+        ),
     ],
     responses={
-        200: OpenApiResponse(description="JSON:API list of job-post resources")
+        200: OpenApiResponse(description="JSON:API list of job-post resources"),
+        400: OpenApiResponse(description="Malformed pagination cursor"),
+        404: OpenApiResponse(description="Unknown username"),
     },
 )
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def public_user_federated_job_posts(request, username):
-    """GET /api/v1/users/<username>/job-posts/federated/ — see module docstring."""
+    """GET /api/v1/users/<username>/job-posts/federated/ — see module docstring.
+
+    Keyset paging: order is ``(-created_at, -id)``; a cursor encodes the
+    last row's ``(created_at, id)`` and the next slice is everything
+    strictly "older" in that composite order
+    (``created_at < c`` OR ``created_at == c AND id < c_id``). One extra
+    row is fetched per page to detect whether a further page exists
+    without paying for a separate ``COUNT(*)``.
+    """
     User = get_user_model()
     user = User.objects.filter(username=username).first()
     if user is None:
@@ -158,43 +228,49 @@ def public_user_federated_job_posts(request, username):
         )
 
     qs = public_jobpost_queryset_for_user(user.id).select_related("company")
-    total = qs.count()
-    page, per_page = _page_params(request)
-    total_pages = math.ceil(total / per_page) if per_page else 1
-    offset = (page - 1) * per_page
-    items = list(qs[offset : offset + per_page])
+    page_size = _keyset_page_size(request)
+
+    after = request.query_params.get("page[after]") or request.query_params.get(
+        "page_after"
+    )
+    if after:
+        try:
+            cursor_created_at, cursor_id = _decode_cursor(after)
+        except _InvalidCursor:
+            return Response(
+                {
+                    "errors": [
+                        {"status": "400", "detail": "Malformed pagination cursor"}
+                    ]
+                },
+                status=400,
+            )
+        # Descending keyset: rows strictly "after" the cursor in
+        # (-created_at, -id) order are the ones older than it.
+        qs = qs.filter(
+            Q(created_at__lt=cursor_created_at)
+            | Q(created_at=cursor_created_at, id__lt=cursor_id)
+        )
+
+    # Over-fetch by one to learn whether another page exists — cheaper
+    # than a second COUNT against a growing feed.
+    window = list(qs[: page_size + 1])
+    has_more = len(window) > page_size
+    items = window[:page_size]
+
+    next_cursor = _encode_cursor(items[-1]) if (has_more and items) else None
+
+    self_url = request.build_absolute_uri(request.path)
+    links = {"self": request.build_absolute_uri()}
+    if next_cursor is not None:
+        links["next"] = f"{self_url}?page[size]={page_size}&page[after]={next_cursor}"
 
     payload = {
         "data": [_public_jobpost_resource(jp) for jp in items],
-        "meta": {
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "total_pages": total_pages,
-        },
+        "links": links,
+        "meta": {"next_cursor": next_cursor},
     }
-    if page < total_pages:
-        base = request.build_absolute_uri(request.path)
-        payload["links"] = {"next": f"{base}?page={page + 1}&per_page={per_page}"}
-    else:
-        payload["links"] = {"next": None}
     return Response(payload)
-
-
-def _federated_include_requested(request) -> bool:
-    """True when the caller asked to sideload the ``federated`` relationship.
-
-    Tolerates both ``?include=`` and ``?includes=`` (the codebase accepts
-    either) and comma-separated lists, so ``?include=federated`` and
-    ``?include=federated,other`` both trigger the compound document.
-    """
-    for key in ("include", "includes"):
-        raw = request.query_params.get(key)
-        if raw:
-            tokens = {s.strip() for s in str(raw).split(",") if s.strip()}
-            if "federated" in tokens:
-                return True
-    return False
 
 
 def _public_user_resource(user) -> dict:
@@ -234,10 +310,11 @@ def _public_user_resource(user) -> dict:
         "resource — the owner of the public profile page. Carries the "
         "user's canonical numeric id (not the username) and PUBLIC-SAFE "
         "attributes only (username, display_name); never email, is_staff, "
-        "phone, or other PII. The ``federated`` relationship always links "
-        "to the user's published job posts; pass ``?include=federated`` to "
-        "additionally sideload that page of public ``job-post`` resources "
-        "as ``included``. Unknown username → 404."
+        "phone, or other PII. The ``federated`` relationship is LINK-ONLY: "
+        "``links.related`` points at the keyset-paginated federated "
+        "job-posts collection, which the client fetches and scrolls "
+        "directly. There is no ``?include=federated`` sideload. Unknown "
+        "username → 404."
     ),
     parameters=[
         OpenApiParameter(
@@ -245,12 +322,6 @@ def _public_user_resource(user) -> dict:
             OpenApiTypes.STR,
             OpenApiParameter.PATH,
             description="Username (not id) of the profile owner",
-        ),
-        OpenApiParameter(
-            "include",
-            OpenApiTypes.STR,
-            OpenApiParameter.QUERY,
-            description="Set to 'federated' to sideload the federated job posts",
         ),
     ],
     responses={
@@ -263,13 +334,11 @@ def _public_user_resource(user) -> dict:
 def public_user_profile(request, username):
     """GET /api/v1/users/<username>/ — public ``user`` resource.
 
-    The ``federated`` relationship always emits a ``links.related``
-    pointing at the public federated-job-posts collection. With
-    ``?include=federated`` it ALSO emits ``relationships.federated.data``
-    linkage for the current page plus a top-level ``included`` array of
-    the public ``job-post`` resources (same rows as
-    :func:`public_user_federated_job_posts`, via
-    :func:`public_jobpost_queryset_for_user`). Unknown username → 404.
+    The ``federated`` relationship emits a link-only ``links.related``
+    pointing at the public federated-job-posts collection
+    (:func:`public_user_federated_job_posts`); the client paginates that
+    collection itself rather than sideloading it here. Unknown username
+    → 404.
     """
     User = get_user_model()
     user = User.objects.filter(username=username).first()
@@ -281,18 +350,5 @@ def public_user_profile(request, username):
 
     resource = _public_user_resource(user)
     related = f"/api/v1/users/{user.username}/job-posts/federated/"
-    federated = {"links": {"related": related}}
-    payload = {"data": resource}
-
-    if _federated_include_requested(request):
-        qs = public_jobpost_queryset_for_user(user.id).select_related("company")
-        page, per_page = _page_params(request)
-        offset = (page - 1) * per_page
-        items = list(qs[offset : offset + per_page])
-        federated["data"] = [
-            {"type": "job-post", "id": str(jp.id)} for jp in items
-        ]
-        payload["included"] = [_public_jobpost_resource(jp) for jp in items]
-
-    resource["relationships"] = {"federated": federated}
-    return Response(payload)
+    resource["relationships"] = {"federated": {"links": {"related": related}}}
+    return Response({"data": resource})

@@ -137,7 +137,9 @@ class TestPublicFederatedJobPosts(TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertEqual(body["data"], [])
-        self.assertEqual(body["meta"]["total"], 0)
+        # Keyset feed: empty page exposes a null cursor and omits next.
+        self.assertIsNone(body["meta"]["next_cursor"])
+        self.assertNotIn("next", body["links"])
 
     def test_trailing_slash_optional(self):
         with_slash = self.client.get("/api/v1/users/dough/job-posts/federated/")
@@ -155,6 +157,121 @@ class TestPublicFederatedJobPosts(TestCase):
         body = self.client.get(URL.format(username="dough")).json()
         ids = [item["id"] for item in body["data"]]
         self.assertEqual(ids[0], str(newer.id))
+
+
+class TestPublicFederatedJobPostsKeysetPagination(TestCase):
+    """Keyset (cursor) pagination on the federated feed.
+
+    Order is ``(-created_at, -id)``; the cursor encodes the last row's
+    ``(created_at, id)`` so a growing feed never dupes or skips an
+    already-seen row. ``created_at`` is ``auto_now_add`` so we stamp
+    explicit, well-separated timestamps via ``update()`` (which bypasses
+    auto_now_add) to make the ordering fully deterministic.
+    """
+
+    PAGE_SIZE = 2
+
+    def setUp(self):
+        from datetime import datetime, timedelta, timezone as dt_timezone
+
+        self.owner = User.objects.create_user(username="dough", password="pass")
+        base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt_timezone.utc)
+        # Create p1..p5 then stamp ascending created_at, so newest-first
+        # order is [p5, p4, p3, p2, p1].
+        self.posts = []
+        for n in range(1, 6):
+            jp = JobPost.objects.create(
+                created_by=self.owner,
+                title=f"Public role {n}",
+                link=f"https://example.com/jobs/{n}",
+                audience=[AS2_PUBLIC],
+            )
+            JobPost.objects.filter(pk=jp.pk).update(
+                created_at=base + timedelta(minutes=n)
+            )
+            jp.refresh_from_db()
+            self.posts.append(jp)
+        # Newest-first id order for assertions.
+        self.expected_order = [str(p.id) for p in reversed(self.posts)]
+
+    def _get(self, **params):
+        params.setdefault("page[size]", self.PAGE_SIZE)
+        return self.client.get(URL.format(username="dough"), params)
+
+    def test_first_page_has_next_and_cursor(self):
+        body = self._get().json()
+        self.assertEqual(len(body["data"]), self.PAGE_SIZE)
+        self.assertEqual(
+            [item["id"] for item in body["data"]], self.expected_order[:2]
+        )
+        self.assertIsNotNone(body["meta"]["next_cursor"])
+        self.assertIn("next", body["links"])
+        self.assertIn("page[after]=", body["links"]["next"])
+        self.assertIn("page[size]=2", body["links"]["next"])
+
+    def test_following_cursor_returns_distinct_next_rows(self):
+        page1 = self._get().json()
+        cursor1 = page1["meta"]["next_cursor"]
+        page2 = self._get(**{"page[after]": cursor1}).json()
+        page1_ids = [item["id"] for item in page1["data"]]
+        page2_ids = [item["id"] for item in page2["data"]]
+        # Distinct rows, in order, no overlap, no skip.
+        self.assertEqual(page1_ids, self.expected_order[:2])
+        self.assertEqual(page2_ids, self.expected_order[2:4])
+        self.assertEqual(set(page1_ids) & set(page2_ids), set())
+
+    def test_walk_all_pages_covers_every_row_once(self):
+        seen = []
+        cursor = None
+        for _ in range(10):  # generous guard against an infinite loop
+            params = {} if cursor is None else {"page[after]": cursor}
+            body = self._get(**params).json()
+            seen.extend(item["id"] for item in body["data"])
+            cursor = body["meta"]["next_cursor"]
+            if cursor is None:
+                break
+        self.assertEqual(seen, self.expected_order)
+        self.assertEqual(len(seen), len(set(seen)))  # no duplicates
+
+    def test_last_page_omits_next_and_nulls_cursor(self):
+        # Walk to the final page (5 rows / size 2 → pages of 2, 2, 1).
+        c1 = self._get().json()["meta"]["next_cursor"]
+        c2 = self._get(**{"page[after]": c1}).json()["meta"]["next_cursor"]
+        last = self._get(**{"page[after]": c2}).json()
+        self.assertEqual([item["id"] for item in last["data"]], self.expected_order[4:])
+        self.assertIsNone(last["meta"]["next_cursor"])
+        self.assertNotIn("next", last["links"])
+
+    def test_insert_after_page1_does_not_dupe_or_skip(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        page1 = self._get().json()
+        cursor1 = page1["meta"]["next_cursor"]
+        page1_ids = [item["id"] for item in page1["data"]]
+
+        # A NEWER row arrives between fetches — it sorts ahead of page 1,
+        # so it must not bleed into the cursor-bounded page 2.
+        newer = JobPost.objects.create(
+            created_by=self.owner,
+            title="Fresh arrival mid-scroll",
+            link="https://example.com/jobs/99",
+            audience=[AS2_PUBLIC],
+        )
+        JobPost.objects.filter(pk=newer.pk).update(
+            created_at=datetime(2026, 1, 2, 0, 0, 0, tzinfo=dt_timezone.utc)
+        )
+
+        page2 = self._get(**{"page[after]": cursor1}).json()
+        page2_ids = [item["id"] for item in page2["data"]]
+        # Page 2 is exactly the rows that were "after" the cursor at
+        # fetch time — unchanged by the newer insert.
+        self.assertEqual(page2_ids, self.expected_order[2:4])
+        self.assertNotIn(str(newer.id), page2_ids)
+        self.assertEqual(set(page1_ids) & set(page2_ids), set())
+
+    def test_invalid_cursor_is_400(self):
+        resp = self._get(**{"page[after]": "!!!not-a-valid-cursor!!!"})
+        self.assertEqual(resp.status_code, 400)
 
 
 USER_URL = "/api/v1/users/{username}/"
@@ -239,27 +356,21 @@ class TestPublicUserProfile(TestCase):
         self.assertNotIn("data", rel)
         self.assertNotIn("included", data)
 
-    def test_include_federated_sideloads_public_job_posts(self):
+    def test_include_federated_is_ignored_resource_stays_link_only(self):
+        # The ?include=federated sideload was dropped — the SPA paginates
+        # the collection endpoint directly. Passing it must NOT resurrect
+        # the data linkage or a top-level `included`; the resource stays
+        # link-only.
         body = self.client.get(
             USER_URL.format(username="dough") + "?include=federated"
         ).json()
         rel = body["data"]["relationships"]["federated"]
-        # still carries the related link.
         self.assertEqual(
             rel["links"]["related"],
             "/api/v1/users/dough/job-posts/federated/",
         )
-        # data linkage points only at the owner's public post.
-        self.assertEqual(rel["data"], [{"type": "job-post", "id": str(self.public_post.id)}])
-        # top-level included carries the public job-post resource(s).
-        self.assertIn("included", body)
-        inc_types = {r["type"] for r in body["included"]}
-        self.assertEqual(inc_types, {"job-post"})
-        inc_ids = {r["id"] for r in body["included"]}
-        self.assertEqual(inc_ids, {str(self.public_post.id)})
-        # private + other-user posts never sideload.
-        self.assertNotIn(str(self.private_post.id), inc_ids)
-        self.assertNotIn(str(self.other_public.id), inc_ids)
+        self.assertNotIn("data", rel)
+        self.assertNotIn("included", body)
 
     def test_unknown_user_is_404(self):
         resp = self.client.get(USER_URL.format(username="nobody"))
