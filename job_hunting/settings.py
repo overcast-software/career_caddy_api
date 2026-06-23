@@ -342,6 +342,27 @@ CADDY_AGENT_URL = os.environ.get("CADDY_AGENT_URL", "http://localhost:3011")
 USE_CADDY_AGENT_EXTRACTION = os.environ.get("USE_CADDY_AGENT_EXTRACTION", "").lower() in ("1", "true", "yes")
 SCREENSHOT_DIR = os.environ.get("SCREENSHOT_DIR", "/app/screenshots")
 
+# Orphaned attended-hold staleness fallback (PACA CC #32). Attended-scrape
+# routing partitions the status='hold' claim queue on Scrape.attended; an
+# attended=True hold orphans in `hold` if no attended runner ever polls.
+# sweep_orphaned_attended_holds (django-q schedule, migration 0111) always
+# observes (logs a warning when holds age past WARN minutes) and
+# auto-demotes only when the TTL is > 0 — default 0 keeps auto-demote OFF,
+# so this is a deploy-time opt-in knob. ACTION picks the auto-demote
+# behavior: "fail" terminal-fails stale holds, "unattended" demotes them
+# to the default-runner queue.
+CC_ATTENDED_HOLD_TTL_MINUTES = int(
+    os.environ.get("CC_ATTENDED_HOLD_TTL_MINUTES", "0")
+)
+CC_ATTENDED_HOLD_TTL_ACTION = os.environ.get(
+    "CC_ATTENDED_HOLD_TTL_ACTION", "fail"
+)
+if CC_ATTENDED_HOLD_TTL_ACTION not in ("fail", "unattended"):
+    CC_ATTENDED_HOLD_TTL_ACTION = "fail"
+CC_ATTENDED_HOLD_WARN_MINUTES = int(
+    os.environ.get("CC_ATTENDED_HOLD_WARN_MINUTES", "30")
+)
+
 # Logging configuration
 LOGGING = {
     "version": 1,
