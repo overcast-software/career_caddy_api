@@ -189,6 +189,20 @@ class ScrapeViewSet(BaseViewSet):
 
     def pre_save_payload(self, request, attrs, creating=False):
         attrs = super().pre_save_payload(request, attrs, creating=creating)
+        # Never let an empty/None `html` overwrite a stored capture
+        # (PACA #30). The agents-side scrape graph PATCHes
+        # `html: state.html` on the `extracting` transition
+        # (agents/scrape_graph/nodes_scrape.py PersistScrape); when
+        # state.html is empty on the success path that PATCH would clobber
+        # a previously captured DOM, and the most-recent successful scrape
+        # for a host loses its inspectable html — which blocks
+        # inspect_scrape_html / find_selectors_for_text and the readiness
+        # live-match. parse_payload keeps null/empty attribute values, so
+        # the key arrives here; drop it and leave any existing value
+        # intact. Deliberate clears go through the prune_scrape_html path
+        # (ORM .update(), which bypasses the serializer).
+        if "html" in attrs and not attrs.get("html"):
+            attrs.pop("html")
         if "html" in attrs and attrs["html"] and not attrs.get("job_content"):
             from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
             attrs["job_content"] = clean_html_to_markdown(attrs["html"])

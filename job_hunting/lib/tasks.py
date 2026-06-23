@@ -747,6 +747,91 @@ def sweep_stale_scrape_claims(threshold_minutes: int = _DEFAULT_LEASE_MINUTES) -
 
 
 # ---------------------------------------------------------------------------
+# Scrape.html retention — bounded prune (PACA #30)
+# ---------------------------------------------------------------------------
+# Successful scrapes must stay inspectable so the scrape-profile-enhancer
+# (inspect_scrape_html / find_selectors_for_text) and the readiness
+# live-match have a captured DOM to read against. Raw html is large
+# (TextField, often MBs), so we keep only the most-recent N *completed*
+# scrapes per host and null the html on older completed rows — bounding
+# storage without losing the freshest captured page for each host.
+#
+# Never touches non-completed rows: the failure path's debug-artifact html
+# (agents/scrape_graph/_artifacts.py capture_debug_artifact) is the
+# operator's diagnostic surface and must be preserved; in-flight rows
+# (hold / running / extracting) still have work to do.
+#
+# Recency is keyed on `id` (a monotonic serial — a re-scrape mints a new
+# row, so the highest id for a host is the freshest capture). Scrape has
+# no `updated_at`, and `scraped_at` can be null on rows created outside
+# the completion path, so `id` is the reliable ordering.
+#
+# Schedule: registered as a django-q2 Schedule ('I', minutes=60) by
+# migration 0109. Idempotent — re-running only re-evaluates the
+# keep-set; the ORM .update() that nulls html deliberately bypasses the
+# ScrapeViewSet pre_save_payload anti-clobber guard (the one sanctioned
+# html-clearing path).
+
+_DEFAULT_HTML_KEEP_PER_HOST = 1
+
+
+def prune_scrape_html(
+    keep_per_host: int = _DEFAULT_HTML_KEEP_PER_HOST, dry_run: bool = False
+) -> dict:
+    """Null ``html`` on all but the most-recent ``keep_per_host`` completed
+    scrapes per host.
+
+    Returns ``{nulled, would_null, kept, hosts, keep_per_host, dry_run}``
+    for the django_q.Task ``result`` column / management-command output.
+    """
+    from urllib.parse import urlparse
+
+    from job_hunting.models import Scrape
+
+    keep_per_host = max(1, int(keep_per_host))
+
+    # Only completed rows that still carry html. `.only()` the bookkeeping
+    # columns so we don't hydrate the (potentially multi-MB) html blob just
+    # to decide which rows to keep.
+    rows = list(
+        Scrape.objects.filter(status="completed")
+        .exclude(html__isnull=True)
+        .exclude(html="")
+        .order_by("-id")
+        .only("id", "url")
+    )
+
+    # host is a Python @property (urlparse), not a column, so bucket
+    # in-process. Fine at this scale; rows is the small set of
+    # completed-with-html scrapes, not the whole table.
+    seen: dict[str, int] = {}
+    to_null: list[int] = []
+    kept = 0
+    for row in rows:
+        host = urlparse(row.url).netloc if row.url else ""
+        count = seen.get(host, 0)
+        if count < keep_per_host:
+            seen[host] = count + 1
+            kept += 1
+        else:
+            to_null.append(row.id)
+
+    if to_null and not dry_run:
+        Scrape.objects.filter(id__in=to_null).update(html=None)
+
+    result = {
+        "nulled": 0 if dry_run else len(to_null),
+        "would_null": len(to_null) if dry_run else 0,
+        "kept": kept,
+        "hosts": len(seen),
+        "keep_per_host": keep_per_host,
+        "dry_run": dry_run,
+    }
+    logger.info("prune_scrape_html: %s", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # ScrapeProfile sharpen — staff-triggered enhancer pass
 # ---------------------------------------------------------------------------
 # Triggered by POST /api/v1/scrape-profiles/:id/sharpen/. The endpoint
