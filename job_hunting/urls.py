@@ -91,6 +91,7 @@ from job_hunting.api.views import (
     graph_aggregate,
     graph_mermaid,
     public_user_federated_job_posts,
+    public_user_profile,
 )
 
 
@@ -231,6 +232,17 @@ urlpatterns = [
         r"^api/v1/users/(?P<username>[^/]+)/job-posts/federated/?$",
         public_user_federated_job_posts,
         name="user-federated-job-posts",
+    ),
+    # CC #51 — public (AllowAny) read of a single user as a JSON:API `user`
+    # resource (the federated relationship owner; powers the /<username>
+    # profile header). Username is the lookup key; the resource id stays
+    # the canonical numeric id. The `(?!\d+/?$)` guard makes a PURELY
+    # NUMERIC segment (e.g. /users/5/) fall THROUGH to the router's authed
+    # numeric-pk retrieve route, so this never shadows GET /users/<id>/.
+    re_path(
+        r"^api/v1/users/(?P<username>(?!\d+/?$)[^/]+)/?$",
+        public_user_profile,
+        name="public-user-profile",
     ),
     re_path(
         r"^api/v1/scrapes/(?P<pk>\d+)/screenshots/(?P<filename>.+\.png)$",
