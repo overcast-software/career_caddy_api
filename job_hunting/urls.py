@@ -90,6 +90,7 @@ from job_hunting.api.views import (
     graph_structure,
     graph_aggregate,
     graph_mermaid,
+    public_user_federated_job_posts,
 )
 
 
@@ -220,6 +221,16 @@ urlpatterns = [
         r"^api/v1/companies/(?P<pk>\d+)/job-posts$",
         CompanyViewSet.as_view({"get": "job_posts"}),
         name="company-job-posts-noslash",
+    ),
+    # CC #51 — public (AllowAny) read of a user's FEDERATED (audience-public)
+    # job posts; powers the public /<username> profile page. Username (not
+    # id) is the path key. Trailing slash optional (router dual-slash
+    # convention). Placed before the router include so the nested collection
+    # route wins; only the /federated subset is ever publicly routed.
+    re_path(
+        r"^api/v1/users/(?P<username>[^/]+)/job-posts/federated/?$",
+        public_user_federated_job_posts,
+        name="user-federated-job-posts",
     ),
     re_path(
         r"^api/v1/scrapes/(?P<pk>\d+)/screenshots/(?P<filename>.+\.png)$",

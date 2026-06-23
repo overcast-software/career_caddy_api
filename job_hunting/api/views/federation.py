@@ -324,29 +324,47 @@ def _empty_collection(request, username: str, collection: str):
     )
 
 
-def _outbox_jobpost_queryset(actor: Actor):
-    """Return the actor's public-audience JobPosts in outbox order.
+def public_jobpost_queryset_for_user(user_id):
+    """Return a user's public-audience JobPosts in outbox order.
 
-    Filter: ``audience`` contains the AS2 Public URI AND
-    ``created_by_id == actor.user_id``. Posts with empty / private
-    audiences are excluded by definition — they were never federable.
-    When ``actor.user_id is None`` (the future instance-actor case)
-    the queryset is empty so the outbox renders as zero items rather
-    than 500'ing on the absent owner.
+    This is the ONE definition of "federated / published" for a user: a
+    post is public iff its ``audience`` contains the AS2 Public URI AND
+    it was created by ``user_id``. Posts with empty / private audiences
+    are excluded by definition — they were never federable.
+
+    Both surfaces that expose a user's posts publicly consume this so the
+    fediverse view and the human-readable view never disagree: the
+    ActivityPub actor outbox (:func:`_outbox_jobpost_queryset`) and the
+    public web profile endpoint
+    (``views.public_profile.public_user_federated_job_posts``).
+
+    When ``user_id is None`` (the future instance-actor case) the
+    queryset is empty so callers render zero items rather than 500'ing on
+    the absent owner.
 
     Sort: ``-created_at`` then ``-id`` so identical creation timestamps
     (paste-storms, demo seed) have a stable secondary order — important
     once peers diff pages between requests.
     """
-    if actor.user_id is None:
+    if user_id is None:
         return JobPost.objects.none()
     return (
         JobPost.objects.filter(
-            created_by_id=actor.user_id,
+            created_by_id=user_id,
             audience__contains=[AS2_PUBLIC],
         )
         .order_by("-created_at", "-id")
     )
+
+
+def _outbox_jobpost_queryset(actor: Actor):
+    """Return the actor's public-audience JobPosts in outbox order.
+
+    Thin adapter over :func:`public_jobpost_queryset_for_user` keyed off
+    the actor's owning user — the outbox and the public web profile share
+    one filter definition so "published" means the same thing on both.
+    """
+    return public_jobpost_queryset_for_user(actor.user_id)
 
 
 def _outbox_page_count(total: int, page_size: int) -> int:
