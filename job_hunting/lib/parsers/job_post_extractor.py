@@ -28,6 +28,7 @@ from job_hunting.models import (
     JobPostOverwriteDecision,
     Scrape,
 )
+from job_hunting.models.job_post import audience_for_user
 from job_hunting.models.job_post_dedupe import (
     canonicalize_link,
     prefer_extension_direct_link,
@@ -782,6 +783,12 @@ class JobPostExtractor:
             create_defaults = {**job_defaults, "link": link, "source": create_only_source}
             if "description" not in create_defaults and effective_description:
                 create_defaults["description"] = effective_description
+            # BACK-91: ingestion is private by default. Promote a freshly
+            # ingested post to public only when its owner opted into
+            # publishing (Profile.federate_posts). Set in `defaults` so it
+            # applies only on the created=True branch — an existing-row
+            # match (created=False) keeps its own audience untouched.
+            create_defaults["audience"] = audience_for_user(user)
             job, created = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company=company,

@@ -74,6 +74,7 @@ class TestOutboxWithPosts(TestCase):
             title="Senior Engineer",
             description="A great role",
             link="https://example.com/jobs/1",
+            audience=[AS2_PUBLIC],
         )
         self.private_post = JobPost.objects.create(
             created_by=self.user,
@@ -87,6 +88,7 @@ class TestOutboxWithPosts(TestCase):
             title="Someone else's",
             description="Belongs to other",
             link="https://example.com/jobs/3",
+            audience=[AS2_PUBLIC],
         )
 
     def test_metadata_advertises_first_and_last_when_nonempty(self):
@@ -182,6 +184,7 @@ class TestOutboxPagination(TestCase):
                 title=f"Role {i}",
                 description=f"Description {i}",
                 link=f"https://example.com/jobs/page-{i}",
+                audience=[AS2_PUBLIC],
             )
             for i in range(5)
         ]

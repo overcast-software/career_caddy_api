@@ -57,6 +57,7 @@ class TestSaveSignals(TestCase):
                 title="A",
                 description="B",
                 link="https://example.com/jobs/1",
+                audience=[AS2_PUBLIC],
             )
         # Find the create call
         kinds = [call.args[1] for call in enq.call_args_list]
@@ -100,6 +101,7 @@ class TestSaveSignals(TestCase):
             title="Engineer",
             description="x",
             link="https://example.com/jobs/3",
+            audience=[AS2_PUBLIC],
         )
         with patch(
             "job_hunting.signals.federation.enqueue_jobpost_activity"
@@ -115,6 +117,7 @@ class TestSaveSignals(TestCase):
             title="Engineer",
             description="x",
             link="https://example.com/jobs/4",
+            audience=[AS2_PUBLIC],
         )
         with patch(
             "job_hunting.signals.federation.enqueue_jobpost_activity"
@@ -131,6 +134,7 @@ class TestSaveSignals(TestCase):
             title="Engineer",
             description="x",
             link="https://example.com/jobs/5",
+            audience=[AS2_PUBLIC],
         )
         with patch(
             "job_hunting.signals.federation.enqueue_jobpost_activity"
@@ -146,6 +150,7 @@ class TestSaveSignals(TestCase):
             title="Engineer",
             description="initial",
             link="https://example.com/jobs/6",
+            audience=[AS2_PUBLIC],
         )
         with patch(
             "job_hunting.signals.federation.enqueue_jobpost_activity"
@@ -161,6 +166,7 @@ class TestSaveSignals(TestCase):
             title="Engineer",
             description="x",
             link="https://example.com/jobs/7",
+            audience=[AS2_PUBLIC],
         )
         with patch(
             "job_hunting.signals.federation.enqueue_jobpost_activity"
@@ -186,6 +192,7 @@ class TestDeleteSignals(TestCase):
             title="Bye",
             description="leaving",
             link="https://example.com/jobs/d1",
+            audience=[AS2_PUBLIC],
         )
         with patch(
             "job_hunting.signals.federation._enqueue_delete_for_instance"
@@ -224,6 +231,7 @@ class TestSignalsNoFollowers(TestCase):
                 title="Solo",
                 description="x",
                 link="https://example.com/jobs/solo",
+                audience=[AS2_PUBLIC],
             )
         # Signal still fired the enqueue, even though no followers exist —
         # the gating is in the dispatch helper, not the signal.

@@ -33,6 +33,12 @@ class Profile(GetMixin, models.Model):
     links = SafeJSONField(null=True, blank=True, default=dict)
     onboarding = SafeJSONField(null=True, blank=True, default=dict)
     auto_score = models.BooleanField(default=False)
+    # BACK-91: publishing ingested job posts to the fediverse is a per-user
+    # opt-in, default OFF. Ingestion is always private; when this is True the
+    # ingestion/persist paths mark freshly-created posts public
+    # (`audience=[AS2_PUBLIC]`) via `JobPost.audience_for_user`. There is no
+    # per-post publish button — visibility follows this single setting.
+    federate_posts = models.BooleanField(default=False)
 
     class Meta:
         db_table = "profile"

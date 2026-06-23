@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 from django.utils import timezone
 
@@ -20,7 +21,12 @@ AS2_PUBLIC = "https://www.w3.org/ns/activitystreams#Public"
 
 
 def _default_audience_public():
-    """Callable default for JobPost.audience.
+    """Legacy callable default for JobPost.audience (public).
+
+    Retained ONLY because migration 0083_jobpost_audience references this
+    symbol by import path — never wire it onto the model again. The live
+    default is now ``_default_audience_private`` (BACK-91: ingestion is
+    private by default; publishing is a separate per-user opt-in).
 
     JSONField with a mutable default (list/dict) MUST receive a callable,
     not a literal — Django would otherwise share one list instance across
@@ -28,6 +34,41 @@ def _default_audience_public():
     per-row mutations isolated.
     """
     return [AS2_PUBLIC]
+
+
+def _default_audience_private():
+    """Callable default for JobPost.audience — private (empty list).
+
+    BACK-91: ingesting a job into your own library must NOT be a publishing
+    act. A bare ``JobPost()`` is therefore born private; promotion to public
+    (``[AS2_PUBLIC]``) is an explicit, per-user-opt-in act applied at the
+    create call site via ``audience_for_user`` — never an implicit default.
+
+    Fresh list per call for the same mutable-default reason as above.
+    """
+    return []
+
+
+def audience_for_user(user):
+    """Resolve the AS2 ``audience`` a freshly-ingested JobPost should carry.
+
+    Publishing to the fediverse is a per-user opt-in
+    (``Profile.federate_posts``, default ``False``). Returns ``[AS2_PUBLIC]``
+    only when the owning user has explicitly opted into publishing; otherwise
+    ``[]`` (private). Centralizes the opt-in resolution so every local
+    JobPost create path stays consistent — the model default itself is always
+    private, and promotion to public is a deliberate, user-gated act.
+
+    ``user`` may be ``None`` (system / anonymous ingest) or a user without a
+    Profile row; both resolve to private.
+    """
+    if user is None or not getattr(user, "pk", None):
+        return []
+    try:
+        federate = bool(user.profile_obj.federate_posts)
+    except (AttributeError, ObjectDoesNotExist):
+        federate = False
+    return [AS2_PUBLIC] if federate else []
 
 
 def _default_source_instance():
@@ -199,14 +240,16 @@ class JobPost(GetMixin, models.Model):
     last_seen_at = models.DateTimeField(default=timezone.now, db_index=True)
 
     # ActivityPub-aligned per-post visibility. Stores AS2 `audience` URI
-    # strings as a JSON list. Default: a fresh `[AS2_PUBLIC]` list per row.
-    # Today this field is *latent* — Phase 4's /as-object/ adapter and
-    # Outbox dispatch will consult it; nothing in core reads it yet beyond
-    # the `is_public()` helper that the frontend mirror reflects. Single-
-    # user instance, so we only ship Public vs Private (= empty list) for
-    # now; Followers/Unlisted granularity is a future UI addition over the
-    # same data shape.
-    audience = models.JSONField(default=_default_audience_public, blank=True)
+    # strings as a JSON list. Default: an empty list = PRIVATE (BACK-91).
+    # Ingestion is private by default; a post is born public
+    # (`[AS2_PUBLIC]`) only when the owning user has opted into publishing
+    # (`Profile.federate_posts`) — the ingestion/persist paths apply that
+    # opt-in via `audience_for_user(user)` at create time. The outbox view
+    # and the `is_public()` helper read this; the frontend mirror reflects
+    # it. Single-user instance, so we only ship Public vs Private (= empty
+    # list) for now; Followers/Unlisted granularity is a future UI addition
+    # over the same data shape.
+    audience = models.JSONField(default=_default_audience_private, blank=True)
 
     # Stable identifier for the Career Caddy instance that *originated*
     # this JobPost. Defaults to `settings.CAREER_CADDY_INSTANCE` for rows

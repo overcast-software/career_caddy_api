@@ -432,6 +432,7 @@ class DjangoUserSerializer:
         links = []
         onboarding = None
         auto_score = False
+        federate_posts = False
         prof = None
         try:
             from job_hunting.models import Profile
@@ -445,6 +446,7 @@ class DjangoUserSerializer:
                 links = prof.links if prof.links is not None else []
                 onboarding = prof.resolved_onboarding()
                 auto_score = bool(getattr(prof, "auto_score", False))
+                federate_posts = bool(getattr(prof, "federate_posts", False))
         except Exception:
             phone = ""
         if onboarding is None:
@@ -478,6 +480,7 @@ class DjangoUserSerializer:
             "links": links,
             "onboarding": onboarding,
             "auto_score": auto_score,
+            "federate_posts": federate_posts,
         }
         # JSON:API sparse-fieldsets: `?fields[user]=username,email`. Unknown
         # keys are silently dropped, matching the BaseSerializer behavior.
@@ -552,6 +555,7 @@ class DjangoUserSerializer:
             "username", "email", "first_name", "last_name", "password",
             "phone", "linkedin", "github", "address", "links",
             "is_staff", "is_active", "onboarding", "auto_score",
+            "federate_posts",
         ]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
@@ -561,6 +565,8 @@ class DjangoUserSerializer:
             ("is-active", "is_active"),
             ("first-name", "first_name"),
             ("last-name", "last_name"),
+            ("auto-score", "auto_score"),
+            ("federate-posts", "federate_posts"),
         ]:
             if hyphen in attrs_in and snake not in out:
                 out[snake] = attrs_in[hyphen]

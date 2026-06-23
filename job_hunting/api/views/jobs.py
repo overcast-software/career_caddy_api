@@ -790,6 +790,15 @@ class JobPostViewSet(BaseViewSet):
                 _record_discovery(existing)
                 return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         obj = JobPost(**attrs)
+        # BACK-91: ingestion is private by default. Promote the new post to
+        # public only when its owner (created_by == request.user) opted into
+        # publishing (Profile.federate_posts), and only when the client did
+        # not pass an explicit audience. The dedupe merge paths above return
+        # 200 against an existing row and never reach here, so an existing
+        # post's audience is never disturbed.
+        if "audience" not in attrs:
+            from job_hunting.models.job_post import audience_for_user
+            obj.audience = audience_for_user(request.user)
         # Populate dedupe fields pre-save so find_duplicate sees them.
         from job_hunting.models.job_post_dedupe import (
             canonicalize_link,
