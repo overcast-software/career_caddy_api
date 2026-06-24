@@ -35,7 +35,10 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from job_hunting.lib.as_object import build_create_activity_for_jobpost
+from job_hunting.lib.as_object import (
+    build_create_activity_for_jobpost,
+    build_note_object_for_jobpost,
+)
 from job_hunting.lib import federation_signing
 from job_hunting.lib import federation_ingest
 from job_hunting.models import (
@@ -58,7 +61,7 @@ from job_hunting.models.federation_activity import (
     DIRECTION_INBOUND,
     DIRECTION_OUTBOUND,
 )
-from job_hunting.models.actor import ACTOR_TYPE_ORGANIZATION
+from job_hunting.models.actor import ACTOR_TYPE_ORGANIZATION, ACTOR_TYPE_PERSON
 from job_hunting.models.job_post import AS2_PUBLIC
 
 
@@ -575,6 +578,137 @@ def actor_following(request, username: str):
     debug page.
     """
     return _empty_collection(request, username, "following")
+
+
+# ---------------------------------------------------------------------------
+# BACK-93 — AP object dereferencing (Note objects + activity envelopes).
+#
+# Every outbox / delivered ``Create`` advertises
+# ``object.id = {origin}/job-posts/<pk>`` and
+# ``id = {origin}/activities/<uuid>``. Remote instances (Mastodon et al.)
+# dereference those URIs to verify + render the post. Without these views
+# the apex Caddy falls through to the SPA and the peer gets HTML it can't
+# ingest — so federated posts render nowhere on the remote profile. Both
+# views serve AS2; the ``/job-posts/<pk>`` surface content-negotiates so
+# the human SPA path is undisturbed (only an AP ``Accept`` reaches the
+# Note branch).
+
+
+def _jobpost_is_local(job_post: JobPost) -> bool:
+    """True when this instance is authoritative for the JobPost's object id.
+
+    Federated rows carry a ``source_instance`` and their canonical object
+    id is rooted on the origin instance (see ``as_object.object_uri``);
+    we must not claim authority for them under our own origin. Local rows
+    (``source_instance`` unset or equal to our host) are ours to serve.
+    """
+    src = job_post.source_instance
+    return not src or src == settings.CAREER_CADDY_INSTANCE
+
+
+def _jobpost_is_public(job_post: JobPost) -> bool:
+    """True when the post is federated-public (audience holds AS2 Public)."""
+    audience = job_post.audience
+    return isinstance(audience, list) and AS2_PUBLIC in audience
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def jobpost_object_view(request, pk: int):
+    """Content-negotiated JobPost object — AS2 Note for federation peers.
+
+    AS2 branch (``Accept: application/activity+json`` / ``ld+json``):
+    serve the standalone Note iff the post is local AND public (its
+    ``audience`` contains the AS2 Public URI). Private / non-local /
+    missing posts → 404 AS2 — a private post must never become
+    dereferenceable just because the caller sent an AP ``Accept`` header
+    (preserves the BACK-91 private-by-default + outbox visibility math).
+
+    Default branch: minimal JSON:API ``job-post`` linkage (mirrors
+    ``company_actor_view``). Under the Accept-gated apex routing rule a
+    browser never reaches here — this branch is defensive only.
+    """
+    job_post = JobPost.objects.filter(pk=pk).first()
+    public = (
+        job_post is not None
+        and _jobpost_is_public(job_post)
+        and _jobpost_is_local(job_post)
+    )
+
+    if _wants_activitypub(request):
+        if not public:
+            return JsonResponse(
+                {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+            )
+        actor = (
+            Actor.objects.filter(
+                user_id=job_post.created_by_id, type=ACTOR_TYPE_PERSON
+            )
+            .order_by("pk")
+            .first()
+        )
+        body = build_note_object_for_jobpost(job_post, actor)
+        return HttpResponse(
+            content=JsonResponse(body).content,
+            content_type=AS2_CONTENT_TYPE,
+        )
+
+    if not public:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    body = {
+        "data": {
+            "type": "job-post",
+            "id": str(job_post.pk),
+            "links": {
+                "self": f"{_origin()}/api/v1/job-posts/{job_post.pk}/",
+            },
+        }
+    }
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type="application/vnd.api+json",
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def federation_activity_view(request, activity_uuid: str):
+    """Dereference an outbound activity envelope by its UUID.
+
+    Every delivered ``Create`` / ``Update`` / ``Delete`` persists a
+    ``FederationActivity`` outbound row whose ``activity_id`` is the full
+    ``{origin}/activities/<uuid>`` URI and whose ``body`` is the JSON we
+    signed + sent. We resolve the row by that URI and replay the stored
+    body as AS2 — so a peer dereferencing an activity id gets the
+    activity, not the SPA HTML. Unknown / inbound-only ids → 404 AS2.
+
+    Only OUTBOUND rows are served: inbound activities belong to the peer
+    that authored them, not to us.
+    """
+    activity_id = f"{_origin()}/activities/{activity_uuid}"
+    row = (
+        FederationActivity.objects.filter(
+            direction=DIRECTION_OUTBOUND, activity_id=activity_id
+        )
+        .order_by("pk")
+        .first()
+    )
+    if row is None or not row.body:
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    try:
+        body = json.loads(row.body)
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"error": "not found"}, status=404, content_type=AS2_CONTENT_TYPE
+        )
+    return HttpResponse(
+        content=JsonResponse(body).content,
+        content_type=AS2_CONTENT_TYPE,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ from job_hunting.api.views.federation import (
     company_followers,
     company_following,
     company_outbox,
+    federation_activity_view,
+    jobpost_object_view,
     webfinger,
 )
 from job_hunting.api.views import (
@@ -199,6 +201,26 @@ urlpatterns = [
         "companies/<slug:slug>/following/",
         company_following,
         name="company-following-slash",
+    ),
+    # BACK-93 — AP object dereferencing. Root-URL (NOT /api/v1/) so they
+    # match the object/activity ids the outbox advertises:
+    # ``object.id = {origin}/job-posts/<pk>`` and
+    # ``id = {origin}/activities/<uuid>``. ``/job-posts/<pk>`` is
+    # content-negotiated (AS2 Note on AP Accept, JSON:API stub otherwise)
+    # so the SPA's human-facing /job-posts/<id> route is undisturbed when
+    # the apex routes only AP-Accept traffic here. ``/activities/<uuid>``
+    # is federation-only (no SPA sibling), always AS2.
+    path("job-posts/<int:pk>", jobpost_object_view, name="jobpost-object"),
+    path("job-posts/<int:pk>/", jobpost_object_view, name="jobpost-object-slash"),
+    re_path(
+        r"^activities/(?P<activity_uuid>[0-9a-fA-F-]+)$",
+        federation_activity_view,
+        name="federation-activity",
+    ),
+    re_path(
+        r"^activities/(?P<activity_uuid>[0-9a-fA-F-]+)/$",
+        federation_activity_view,
+        name="federation-activity-slash",
     ),
     path("api/v1/healthcheck/", healthcheck, name="healthcheck"),
     re_path(r"^api/v1/healthcheck$", healthcheck, name="healthcheck-noslash"),

@@ -316,6 +316,36 @@ def _note_for_jobpost(job_post, actor_uri_str: str) -> dict:
     return note
 
 
+def build_note_object_for_jobpost(job_post, actor=None) -> dict:
+    """Standalone, dereferenceable AS2 Note for a JobPost object id.
+
+    Served at the public ``/job-posts/<pk>`` object URI so a federation
+    peer that dereferences an outbox / delivered ``Create.object.id``
+    gets the Note itself, not the SPA HTML (the BACK-93 defect). The
+    shape mirrors the note embedded in
+    :func:`build_create_activity_for_jobpost` — same ``id``,
+    ``attributedTo`` (the owning actor's ``/actors/<preferred_username>``
+    URI), ``to`` / ``content`` / ``url`` — PLUS the top-level
+    ``@context`` a standalone fetched document requires. The embedded
+    note inherits ``@context`` from its Create envelope; a bare fetch
+    does not, so we add it here.
+
+    ``actor`` is the owning ``Actor`` row when known, so ``attributedTo``
+    is byte-identical to what the outbox advertised. When None (no Actor
+    row materialized yet) it falls back to the author's username — the
+    same handle :func:`actor_uri` mints elsewhere — so the document is
+    still self-consistent.
+    """
+    if actor is not None:
+        actor_uri_str = _local_actor_uri(actor)
+    else:
+        author = getattr(job_post, "created_by", None)
+        handle = getattr(author, "username", None) or "anonymous"
+        actor_uri_str = actor_uri(handle, job_post.source_instance)
+    note = _note_for_jobpost(job_post, actor_uri_str)
+    return {"@context": AS2_CONTEXT, **note}
+
+
 def build_update_activity_for_jobpost(job_post, actor, *, edit_marker=None) -> dict:
     """Build the AS2 ``Update(Note)`` activity envelope for ``job_post``.
 
