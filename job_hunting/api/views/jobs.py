@@ -262,6 +262,37 @@ class JobPostViewSet(BaseViewSet):
                 Q(discoveries__user_id=request.user.id)
             ).distinct()
 
+        # filter[publishable]=true — the C2 curation queue (CC-61). Surface
+        # the OWNER's vetted-but-unpublished candidates:
+        #   created_by == me
+        #   AND NOT public (AS2_PUBLIC absent from audience)
+        #   AND at least one vetting signal — a Score, a JobApplication, or
+        #       a direct Question the owner attached.
+        # Bare stubs the owner created but never engaged with are excluded.
+        # Scoped to created_by == me even for staff: it's "my publishable
+        # candidates", not a global queue. The public/private predicate
+        # mirrors federation.public_jobpost_queryset_for_user
+        # (audience__contains=[AS2_PUBLIC]), negated.
+        publishable_filter = request.query_params.get("filter[publishable]")
+        if str(publishable_filter).lower() in ("1", "true", "yes"):
+            uid = request.user.id
+            qs = (
+                qs.filter(created_by_id=uid)
+                .exclude(audience__contains=[AS2_PUBLIC])
+                .filter(
+                    Q(scores__user_id=uid)
+                    | Q(applications__user_id=uid)
+                    | Q(direct_questions__created_by_id=uid)
+                )
+                .distinct()
+            )
+            # Most-recently-active first. last_seen_at is the post's own
+            # recency column (indexed); a true cross-signal recency rank
+            # (max of score/application/question timestamps) would be an
+            # MCP composite, not plain CRUD. An explicit ?sort= still
+            # overrides this default below.
+            qs = qs.order_by("-last_seen_at", "-id")
+
         hostname_filter = request.query_params.get("filter[hostname]")
         if hostname_filter is not None:
             if hostname_filter == "(direct)":
