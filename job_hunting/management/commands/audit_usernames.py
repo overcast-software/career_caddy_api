@@ -1,15 +1,21 @@
-"""Read-only audit: list users whose username violates the catchall policy.
+"""Read-only audit: list users whose username violates the username policy.
 
-`<username>@careercaddy.online` is the Phase 2.5 catchall mailbox. Going
-forward, new signups are validated against `lib/username_policy` — this
-command surfaces pre-existing rows that pre-date the validator so an
-operator can hand-fix them (rename, send a re-onboarding email, etc.).
+The username is both the `<username>@careercaddy.online` catchall
+local-part (Phase 2.5) and the public ActivityPub actor handle (CC-56
+#58/#59). New signups are validated against `lib/username_policy`; this
+command surfaces pre-existing rows that pre-date — or pre-date the
+tightening of — the validator (too short, or containing now-disallowed
+characters such as `.`/`-`) so an operator can hand-fix them (rename,
+send a re-onboarding email, etc.). The per-row `reason` column carries
+the exact failure (length vs charset), so the same command covers both
+CC-56 #58 (min length) and #59 (charset).
 
-Read-only by design — no rename, no flag-flip, no email send. The spec
-makes this explicit: silent rename of a user account would break their
-JWT auth without warning. Operators decide remediation case by case.
+Read-only by design — no rename, no flag-flip, no email send. Existing
+handles may already be federated; a silent rename would break their JWT
+auth (and any live actor URI) without warning. Operators decide
+remediation case by case.
 
-Output format: tab-separated `id\tusername\temail`, one row per
+Output format: tab-separated `id\tusername\temail\treason`, one row per
 violator, sorted by id ASC. Exit status is 0 even when violators are
 present (this is an informational tool, not a CI gate).
 """
@@ -24,8 +30,9 @@ from job_hunting.lib.username_policy import UsernamePolicyError, validate_userna
 
 class Command(BaseCommand):
     help = (
-        "Print users whose username violates the catchall mail "
-        "policy (see lib/username_policy.py). Read-only."
+        "Print users whose username violates the username policy — "
+        "catchall mail local-part + ActivityPub actor handle "
+        "(see lib/username_policy.py). Read-only."
     )
 
     def handle(self, *args, **options):
