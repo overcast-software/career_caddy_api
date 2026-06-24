@@ -376,7 +376,14 @@ class TestCompanyFollowersCollection(TestCase):
 # ---------------------------------------------------------------------------
 
 
-@override_settings(INSTANCE_ORIGIN=TEST_ORIGIN)
+@override_settings(
+    INSTANCE_ORIGIN=TEST_ORIGIN,
+    # CC-68: inbound Note->JobPost ingest is OFF by default; these cases
+    # exercise the legacy mint-a-JP-and-fan-out-discoveries behavior, so
+    # they must opt back in (matching the create-path classes in the
+    # phase5e / phase6b inbound-ingest suites).
+    FEDERATION_INBOUND_INGEST_ENABLED=True,
+)
 class TestCompanyAttributedToDiscovery(TestCase):
     """A Create(Note) attributedTo a local Company actor materializes
     JobPostDiscovery rows for that Company's local followers."""

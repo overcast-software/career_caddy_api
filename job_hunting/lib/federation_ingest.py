@@ -49,6 +49,46 @@ inert by definition. If a future AS2 ``careercaddy:extension`` payload
 carries company metadata, that's the place to plumb a fingerprint
 match in; until then canonical_link IS the dedup signal for the
 federated path, and that's intentional.
+
+CC-68 — inbound Note→JobPost ingest is DISABLED by default
+==========================================================
+
+As of CC-68 ``ingest_create_note`` short-circuits to SKIPPED when the
+``FEDERATION_INBOUND_INGEST_ENABLED`` setting is False (the default).
+Why: inbound ingest is premature. The four-clause dedup walk above
+answers "have we seen this URL before?" but NOTHING here answers the
+two questions that actually matter for inbound:
+
+  * Is this Note actually a job posting?  The ``careercaddy:extension``
+    payload is OPTIONAL today (used only to resolve Company), so a
+    plain social toot/mention with no extension still minted a JobPost
+    with no Company FK → rendered "missing" in the UI. The only
+    positive signal is object-type in {Note, Article}, which every
+    Mastodon status satisfies.
+  * Did the operator opt in to this sender?  There is no per-instance /
+    per-actor subscription mechanism — anything delivered to a local
+    actor's inbox was ingested. With a single CC actor and zero peer
+    instances, legitimate inbound volume is currently zero.
+
+Re-enable design (DO NOT BUILD HERE — this is the spec, not the code).
+A proper re-enable requires BOTH gates, ANDed:
+
+  (a) Positive CC job-post marker. REQUIRE the ``careercaddy:extension``
+      payload and skip plain Notes that lack it. A bare microblog post
+      is not a job posting; only a peer asserting the CC extension
+      shape is making a job-post claim we can trust enough to ingest.
+  (b) Explicit per-instance / per-actor SUBSCRIPTION the operator opts
+      into — the inbound cousin of BACK-91's outbound ``federate_posts``
+      opt-in. "Anything delivered to my inbox" is not consent; the
+      operator must have followed / subscribed to the source actor (or
+      allow-listed its instance) before its Notes mint local rows.
+
+Until both land, this module stays inert on the create path by default;
+flip ``FEDERATION_INBOUND_INGEST_ENABLED=True`` only to exercise the
+legacy behavior (e.g. tests, or a controlled single-peer experiment).
+The audit trail is preserved either way: the inbox handler writes the
+FederationActivity row BEFORE calling us, so a future re-enable can
+replay logged-only inbound Creates via ``replay_inbound_creates``.
 """
 from __future__ import annotations
 
@@ -539,6 +579,22 @@ def ingest_create_note(
         # in this state, but be defensive — a stray replay walk should
         # also no-op when ingest is disabled.
         return IngestResult(outcome=OUTCOME_SKIPPED, reason="ingest_disabled")
+
+    # CC-68 — inbound Note→JobPost ingest is premature; disabled by
+    # default. Gate sits at the top of the function so it covers BOTH the
+    # Note ingest AND the downstream 6b company-discovery fan-out
+    # (``_create_discoveries_for_company_actor`` runs after the save
+    # below). The inbox handler has already written the FederationActivity
+    # audit row before we're called, so the inbound activity stays traced;
+    # we simply refuse to MINT a JobPost (or any JobPostDiscovery). See the
+    # "Re-enable design" block in the module docstring for the gates a
+    # proper re-enable must add. Distinct from ACTIVITYPUB_INGEST_ENABLED
+    # above (operator kill-switch, defaults ON) — checked second so the
+    # kill-switch's ``ingest_disabled`` reason wins when both are off.
+    if not getattr(settings, "FEDERATION_INBOUND_INGEST_ENABLED", False):
+        return IngestResult(
+            outcome=OUTCOME_SKIPPED, reason="inbound_ingest_disabled"
+        )
 
     obj = activity.get("object") if isinstance(activity, dict) else None
     if not isinstance(obj, dict):

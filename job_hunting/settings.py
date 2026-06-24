@@ -574,6 +574,30 @@ ACTIVITYPUB_INGEST_ENABLED = os.environ.get(
     "ACTIVITYPUB_INGEST_ENABLED", "True"
 ).lower() in ("true", "1", "yes")
 
+# CC-68 — inbound Note→JobPost ingest is DISABLED by default (premature).
+#
+# Distinct from ACTIVITYPUB_INGEST_ENABLED (the operator kill-switch that
+# defaults ON). This flag governs whether a verified inbound Create(Note)
+# is allowed to MINT a local JobPost at all. It defaults OFF because
+# inbound ingest has no subscription gate yet: the only filters today are
+# object-type in {Note, Article}, AS2 Public audience, and canonical_link
+# dedup — none of which answer "is this Note actually a job posting?" or
+# "did the operator opt in to this sender?". Result: a plain fediverse
+# toot/mention delivered to a local actor's inbox became a JobPost with
+# no Company → rendered "missing" in the UI.
+#
+# When OFF: the inbox handler still writes the FederationActivity audit
+# row (so we keep a trace of what arrived and a future re-enable can
+# replay), but federation_ingest.ingest_create_note short-circuits to a
+# SKIPPED outcome BEFORE creating any JobPost or JobPostDiscovery row.
+# See the "Re-enable design" block in lib/federation_ingest.py for the
+# gates a proper re-enable must add (positive CC marker + per-actor
+# subscription opt-in). Set FEDERATION_INBOUND_INGEST_ENABLED=True to
+# restore the legacy create-on-inbound behavior.
+FEDERATION_INBOUND_INGEST_ENABLED = os.environ.get(
+    "FEDERATION_INBOUND_INGEST_ENABLED", "False"
+).lower() in ("true", "1", "yes")
+
 PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", "3600"))
 
 # Registration control — set REGISTRATION_OPEN=true to allow public signups
