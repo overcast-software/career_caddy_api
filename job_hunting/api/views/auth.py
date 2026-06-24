@@ -218,6 +218,22 @@ def initialize(request):
             or attrs.get("openaiApiKey")
         )
 
+        # The first superuser's username becomes the operator's public
+        # ActivityPub actor handle (@user / WebFinger / /@user URL), so it
+        # must clear the same policy as every other signup path. This was
+        # the one user-create path that skipped the validator (CC-56
+        # #58/#59). Shared rule lives in lib/username_policy.py.
+        from job_hunting.lib.username_policy import (
+            UsernamePolicyError,
+            validate_username,
+        )
+        try:
+            validate_username(username)
+        except UsernamePolicyError as e:
+            return JsonResponse(
+                {"errors": [{"detail": str(e)}]}, status=400
+            )
+
         # Create superuser
         try:
             user = User.objects.create_superuser(
