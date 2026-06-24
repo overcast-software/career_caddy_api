@@ -60,6 +60,7 @@ from job_hunting.models import (
     JobApplicationStatus,
     ResumeSummary,
 )
+from job_hunting.models.job_post import AS2_PUBLIC
 
 
 logger = logging.getLogger(__name__)
@@ -1420,6 +1421,85 @@ class JobPostViewSet(BaseViewSet):
         if not post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         return Response(job_post_as_object(post), content_type="application/activity+json")
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="Publish this job post to the fediverse (owner only)",
+        description=(
+            "Marks the post public by ensuring the AS2 Public URI is in "
+            "`audience`, then saves. The federation signal "
+            "(job_hunting/signals/federation.py) turns the private→public "
+            "audience transition into a Create fanout. Idempotent: an "
+            "already-public post is a no-op (no duplicate Create). "
+            "Owner-scoped (staff bypass). Does NOT touch the global "
+            "`Profile.federate_posts` opt-in — per-post publish is "
+            "independent of it (CC-62)."
+        ),
+        responses={200: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="publish")
+    def publish(self, request, pk=None):
+        """Ensure AS2_PUBLIC in ``audience`` + save (idempotent).
+
+        Per BACK-91 the audience-transition signal keys off the
+        private→public change and enqueues the Create fanout — we just
+        flip the audience and persist. Already-public posts no-op so a
+        double publish never mints a second Create."""
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        audience = obj.audience if isinstance(obj.audience, list) else []
+        if AS2_PUBLIC not in audience:
+            obj.audience = audience + [AS2_PUBLIC]
+            obj.save(update_fields=["audience"])
+
+        # Scope top_score to request.user so the shared-post serializer
+        # doesn't leak a cross-user high score via the unscoped fallback.
+        obj._top_score = (
+            obj.scores.filter(user_id=request.user.id).order_by("-score").first()
+        )
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="Unpublish this job post from the fediverse (owner only)",
+        description=(
+            "Removes the AS2 Public URI from `audience` (preserving any "
+            "other audience entries), then saves. The public→private "
+            "transition fans out nothing (V1 emits no Withdraw). "
+            "Idempotent: an already-private post is a no-op. Owner-scoped "
+            "(staff bypass). Does NOT touch `Profile.federate_posts` "
+            "(CC-62)."
+        ),
+        responses={200: _JSONAPI_ITEM, 403: _JSONAPI_ITEM, 404: _JSONAPI_ITEM},
+    )
+    @action(detail=True, methods=["post"], url_path="unpublish")
+    def unpublish(self, request, pk=None):
+        """Remove AS2_PUBLIC from ``audience`` + save (idempotent).
+
+        Preserves every other audience entry. The audience-transition
+        signal emits nothing on public→private (no Withdraw in V1), so
+        this only flips local visibility back to private."""
+        obj = JobPost.objects.filter(pk=pk).first()
+        if not obj:
+            return Response({"errors": [{"detail": "Not found"}]}, status=404)
+        if not request.user.is_staff and obj.created_by_id != request.user.id:
+            return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
+
+        audience = obj.audience if isinstance(obj.audience, list) else []
+        if AS2_PUBLIC in audience:
+            obj.audience = [a for a in audience if a != AS2_PUBLIC]
+            obj.save(update_fields=["audience"])
+
+        obj._top_score = (
+            obj.scores.filter(user_id=request.user.id).order_by("-score").first()
+        )
+        ser = self.get_serializer()
+        return Response({"data": ser.to_resource(obj)})
 
     @extend_schema(
         tags=["Job Posts"],
