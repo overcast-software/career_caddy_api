@@ -63,6 +63,7 @@ from job_hunting.models.federation_activity import (
 )
 from job_hunting.models.actor import ACTOR_TYPE_ORGANIZATION, ACTOR_TYPE_PERSON
 from job_hunting.models.job_post import AS2_PUBLIC
+from job_hunting.models.nanoid_pk import NANOID_RE
 
 
 logger = logging.getLogger(__name__)
@@ -614,7 +615,7 @@ def _jobpost_is_public(job_post: JobPost) -> bool:
 
 @csrf_exempt
 @require_http_methods(["GET"])
-def jobpost_object_view(request, pk: int):
+def jobpost_object_view(request, pk: str):
     """Content-negotiated JobPost object — AS2 Note for federation peers.
 
     AS2 branch (``Accept: application/activity+json`` / ``ld+json``):
@@ -1256,9 +1257,12 @@ def _resolve_jobpost_from_object(target: object) -> JobPost | None:
     if len(segments) < 2 or segments[-2] != "job-posts":
         return None
     raw_pk = segments[-1]
-    if not raw_pk.isdigit():
+    # JobPost PKs are 10-char NanoIDs (CC-57), no longer integers. Reject
+    # anything that isn't a well-formed NanoID rather than guessing, and
+    # look up by the string pk directly (no int() cast).
+    if not NANOID_RE.match(raw_pk):
         return None
-    return JobPost.objects.filter(pk=int(raw_pk)).first()
+    return JobPost.objects.filter(pk=raw_pk).first()
 
 
 def _handle_delete(activity: dict, actor: Actor,

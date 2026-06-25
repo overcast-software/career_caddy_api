@@ -211,8 +211,8 @@ urlpatterns = [
     # so the SPA's human-facing /job-posts/<id> route is undisturbed when
     # the apex routes only AP-Accept traffic here. ``/activities/<uuid>``
     # is federation-only (no SPA sibling), always AS2.
-    path("job-posts/<int:pk>", jobpost_object_view, name="jobpost-object"),
-    path("job-posts/<int:pk>/", jobpost_object_view, name="jobpost-object-slash"),
+    path("job-posts/<str:pk>", jobpost_object_view, name="jobpost-object"),
+    path("job-posts/<str:pk>/", jobpost_object_view, name="jobpost-object-slash"),
     re_path(
         r"^activities/(?P<activity_uuid>[0-9a-fA-F-]+)$",
         federation_activity_view,
