@@ -92,6 +92,7 @@ from job_hunting.api.views import (
     graph_structure,
     graph_aggregate,
     graph_mermaid,
+    scrape_queue_health,
     public_user_federated_job_posts,
     public_user_profile,
 )
@@ -309,6 +310,16 @@ urlpatterns = [
     path("api/v1/admin/graph-structure/", graph_structure, name="graph-structure"),
     path("api/v1/admin/graph-aggregate/", graph_aggregate, name="graph-aggregate"),
     path("api/v1/admin/graph-mermaid/", graph_mermaid, name="graph-mermaid"),
+    path(
+        "api/v1/admin/scrape-queue-health/",
+        scrape_queue_health,
+        name="scrape-queue-health",
+    ),
+    re_path(
+        r"^api/v1/admin/scrape-queue-health$",
+        scrape_queue_health,
+        name="scrape-queue-health-noslash",
+    ),
     path("api/v1/chat/", chat_proxy, name="chat"),
     # SSE — Phase 2 of Plans/Push status updates. Issue token, then stream.
     path("api/v1/events/token/", events_token, name="events-token"),

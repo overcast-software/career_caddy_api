@@ -36,6 +36,7 @@ from .admin import (
     WaitlistViewSet,
     InvitationViewSet,
     agent_models,
+    scrape_queue_health,
 )
 from .career_data import (
     career_data,
@@ -91,6 +92,7 @@ __all__ = [
     "healthcheck",
     "guest_session",
     "agent_models",
+    "scrape_queue_health",
     "initialize",
     "waitlist_signup",
     "password_reset_request",
