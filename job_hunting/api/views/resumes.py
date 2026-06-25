@@ -642,7 +642,8 @@ class ResumeViewSet(BaseViewSet):
             company_id = item.get("company_id") or (company_rel.get("data") or {}).get(
                 "id"
             )
-            company_id = int(company_id) if company_id is not None else None
+            # company_id is the Company NanoID PK (CC-77 #79) — used as-is, not int-cast.
+            company_id = company_id or None
 
             # Helper to collect incoming description lines in order
             incoming_lines = []

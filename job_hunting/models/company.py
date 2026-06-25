@@ -1,9 +1,19 @@
 from django.db import models, transaction
 from django.db.models import F, Q
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 
 
-class Company(GetMixin, models.Model):
+class Company(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). Company is shared across all users (no created_by).
+    # Nine external FKs reference company(id) — federation_actors,
+    # experience, question, job_application, federation_followers, scrape,
+    # company_alias (NOT NULL), job_post, cover_letter — plus the self-FK
+    # ``canonical``. The company_canonical_not_self CheckConstraint (on id +
+    # canonical_id), actor's mutual-exclusivity check, and federation_followers'
+    # followee-required check + per-company partial UNIQUE all ride on these
+    # columns and are rebuilt on the NanoID values in migration 0124.
     SOURCE_EXTRACTION = "extraction"
     SOURCE_MANUAL = "manual"
     SOURCE_BACKFILL = "backfill"
