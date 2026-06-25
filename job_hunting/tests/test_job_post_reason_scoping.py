@@ -60,7 +60,7 @@ class TestJobPostReasonCodeScoping(TestCase):
         response = self.client.get("/api/v1/job-posts/")
         self.assertEqual(response.status_code, 200)
         match = next(
-            (d for d in response.json()["data"] if int(d["id"]) == self.post.id),
+            (d for d in response.json()["data"] if d["id"] == self.post.id),
             None,
         )
         self.assertIsNotNone(match, "user B should see the shared post via their Score")

@@ -284,7 +284,7 @@ class TestDuplicatesList(_Base):
 
         resp = self.client.get(self._url(root))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = sorted(int(row["id"]) for row in resp.json()["data"])
+        ids = sorted(row["id"] for row in resp.json()["data"])
         self.assertEqual(ids, [mine.id])
 
     def test_staff_sees_all_children(self):
@@ -300,7 +300,7 @@ class TestDuplicatesList(_Base):
 
         resp = self.client.get(self._url(root))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = sorted(int(row["id"]) for row in resp.json()["data"])
+        ids = sorted(row["id"] for row in resp.json()["data"])
         self.assertEqual(ids, sorted([mine.id, theirs.id]))
 
     def test_404_when_post_does_not_exist(self):
