@@ -242,7 +242,7 @@ urlpatterns = [
     path("api/v1/test-email/", test_email, name="test-email"),
     re_path(r"^api/v1/test-email$", test_email, name="test-email-noslash"),
     re_path(
-        r"^api/v1/companies/(?P<pk>\d+)/job-posts$",
+        r"^api/v1/companies/(?P<pk>[0-9A-Za-z]+)/job-posts$",
         CompanyViewSet.as_view({"get": "job_posts"}),
         name="company-job-posts-noslash",
     ),
@@ -268,7 +268,7 @@ urlpatterns = [
         name="public-user-profile",
     ),
     re_path(
-        r"^api/v1/scrapes/(?P<pk>\d+)/screenshots/(?P<filename>.+\.png)$",
+        r"^api/v1/scrapes/(?P<pk>[0-9A-Za-z]+)/screenshots/(?P<filename>.+\.png)$",
         ScrapeViewSet.as_view({"get": "screenshot_file"}),
         name="scrape-screenshot-file-direct",
     ),
