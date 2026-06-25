@@ -1,9 +1,13 @@
 from django.conf import settings
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 from django.db import models
 
 
-class Score(GetMixin, models.Model):
+class Score(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). Score is a leaf — nothing FKs to it — so the swap
+    # only repoints its own PK.
     score = models.IntegerField(null=True, blank=True)
     status = models.CharField(max_length=50, null=True, blank=True)
     explanation = models.TextField(null=True, blank=True)
