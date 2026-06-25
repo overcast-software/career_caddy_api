@@ -1177,9 +1177,12 @@ class ScrapeViewSet(BaseViewSet):
                     claimed_at__isnull=True,
                     attended=attended,
                 )
-                # Scrape has no created_at; id is monotonic-increasing
-                # under Postgres autoinc and serves as the FIFO key.
-                .order_by("id")
+                # FIFO by creation time. The PK is a random NanoID (CC-77)
+                # so it can no longer stand in as the arrival-order key;
+                # order by created_at instead. Pre-CC-77 rows carry a NULL
+                # created_at and sort first as the oldest holds; id is a
+                # stable tiebreak for exact-timestamp ties.
+                .order_by(F("created_at").asc(nulls_first=True), "id")
                 .first()
             )
             if claimable is None:

@@ -47,6 +47,12 @@ class Scrape(GetMixin, NanoIDModel):
     external_link = models.CharField(max_length=2000, null=True, blank=True)
     parse_method = models.CharField(max_length=100, null=True, blank=True)
     scraped_at = models.DateTimeField(null=True, blank=True)
+    # Creation timestamp — the FIFO key for the claim-next queue. Added
+    # in CC-77: the PK is now a (random) NanoID, so the integer-autoinc
+    # id can no longer stand in as the arrival-order key. Nullable so the
+    # additive migration needs no backfill; pre-existing rows sort first
+    # (nulls_first) as the oldest holds.
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
     status = models.CharField(max_length=50, null=True, blank=True)
     source_scrape = models.ForeignKey(
         "self",
