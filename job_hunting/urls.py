@@ -290,7 +290,7 @@ urlpatterns = [
     path("api/v1/career-data/export/", career_data_export, name="career-data-export"),
     path("api/v1/career-data/import/", career_data_import, name="career-data-import"),
     path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
-    path("api/v1/resumes/<int:pk>/markdown/", resume_markdown, name="resume-markdown"),
+    path("api/v1/resumes/<str:pk>/markdown/", resume_markdown, name="resume-markdown"),
     path("api/v1/cover-letters/<str:pk>/markdown/", cover_letter_markdown, name="cover-letter-markdown"),
     path(
         "api/v1/users/<str:user_id>/onboarding/",
