@@ -1,8 +1,9 @@
 from django.db import models
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 
 
-class Skill(GetMixin, models.Model):
+class Skill(GetMixin, NanoIDModel):
     text = models.CharField(max_length=255, null=True, blank=True)
     skill_type = models.CharField(max_length=255, null=True, blank=True)
 

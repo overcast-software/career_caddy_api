@@ -55,6 +55,10 @@ dependencies = [
     # container runs `manage.py qcluster`. Replaces the 9 daemon-thread
     # spawn points + 2 polling daemons over Phases 2-5.
     "django-q2>=1.7.0",
+    # Opaque primary keys — CC-77 NanoID PK swap. Generates the 10-char
+    # URL-safe NanoID ids used as every model's primary key (see
+    # job_hunting.models.nanoid_pk).
+    "nanoid>=2.0.0",
 ]
 
 [dependency-groups]
