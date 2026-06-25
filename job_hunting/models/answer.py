@@ -1,8 +1,12 @@
 from django.db import models
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 
 
-class Answer(GetMixin, models.Model):
+class Answer(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). Answer is a leaf — nothing FKs to it — so the swap
+    # only repoints its own PK.
     question = models.ForeignKey(
         "Question",
         on_delete=models.CASCADE,
