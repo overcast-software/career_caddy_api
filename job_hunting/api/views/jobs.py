@@ -1926,7 +1926,7 @@ class JobApplicationViewSet(BaseViewSet):
         if response.status_code == 201:
             app_id = (response.data.get("data") or {}).get("id")
             if app_id:
-                app = JobApplication.objects.filter(pk=int(app_id)).first()
+                app = JobApplication.objects.filter(pk=app_id).first()
                 if app and not JobApplicationStatus.objects.filter(application_id=app.id).exists():
                     status_label = app.status or "Unvetted"
                     status_obj, _ = Status.objects.get_or_create(
@@ -1984,11 +1984,11 @@ class JobApplicationViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
-        app = JobApplication.objects.filter(pk=int(pk)).first()
+        app = JobApplication.objects.filter(pk=pk).first()
         if not app or app.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = JobApplicationStatusSerializer()
-        items = list(JobApplicationStatus.objects.filter(application_id=int(pk)))
+        items = list(JobApplicationStatus.objects.filter(application_id=pk))
         data = [ser.to_resource(i) for i in items]
 
         # Build included only when ?include=... is provided
@@ -2008,11 +2008,11 @@ class JobApplicationViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
-        app = JobApplication.objects.filter(pk=int(pk)).first()
+        app = JobApplication.objects.filter(pk=pk).first()
         if not app or app.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = QuestionSerializer()
-        items = list(Question.objects.filter(application_id=int(pk)))
+        items = list(Question.objects.filter(application_id=pk))
         data = [ser.to_resource(i) for i in items]
 
         # Build included only when ?include=... is provided
@@ -2053,14 +2053,8 @@ class StatusViewSet(viewsets.ModelViewSet):
         application_id = app_rel_data.get("id")
 
         if application_id is not None:
-            try:
-                application_id = int(application_id)
-            except (TypeError, ValueError):
-                return Response(
-                    {"errors": [{"detail": "Invalid job_application id"}]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
+            # application_id is the JobApplication PK — a NanoID string
+            # (CC-79), not cast. A bad id falls through to the not-found check.
             application = JobApplication.objects.filter(pk=application_id).first()
             if not application:
                 return Response(
@@ -2153,13 +2147,8 @@ class JobApplicationStatusViewSet(BaseViewSet):
                 {"errors": [{"detail": "relationships.application is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            application_id = int(application_id)
-        except (TypeError, ValueError):
-            return Response(
-                {"errors": [{"detail": "Invalid application id"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # application_id is the JobApplication PK — a NanoID string (CC-79),
+        # not cast. A bad id falls through to the not-found check.
         application = JobApplication.objects.filter(pk=application_id).first()
         if not application:
             return Response(
