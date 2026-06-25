@@ -225,7 +225,7 @@ class CoverLetterViewSet(BaseViewSet):
             )
 
         try:
-            resume_id = int(resume_id) if resume_id is not None else None
+            # resume_id is the Resume NanoID PK (CC-77 #79) — not int-cast.
             # job_post_id is the JobPost PK — a NanoID string (CC-57), not int.
             company_id = int(company_id) if company_id is not None else None
         except (TypeError, ValueError):
@@ -233,8 +233,8 @@ class CoverLetterViewSet(BaseViewSet):
                 {"errors": [{"detail": "Invalid resume, job-post, or company ID"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # id=0 means "no resume" → career-data fallback
-        if resume_id == 0:
+        # absent / "0" means "no resume" → career-data fallback
+        if resume_id in (None, "", "0", 0):
             resume_id = None
 
         resume = Resume.get(resume_id) if resume_id is not None else None

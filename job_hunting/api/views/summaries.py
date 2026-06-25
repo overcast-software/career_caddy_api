@@ -110,11 +110,7 @@ class SummaryViewSet(BaseViewSet):
                     if isinstance(rel_data, dict):
                         resume_id = rel_data.get("id")
 
-            if resume_id is not None:
-                try:
-                    resume_id = int(resume_id)
-                except (TypeError, ValueError):
-                    resume_id = None
+            # resume_id is the Resume NanoID PK (CC-77 #79) — used as-is, not int-cast.
 
             # Fall back to the single linked resume if unambiguous
             if resume_id is None:
@@ -185,20 +181,17 @@ class SummaryViewSet(BaseViewSet):
         )
         user_id = _rel_id("user", "users")
 
-        # Resume is optional — omitting it or passing id=0 falls back to career-data
+        # Resume is optional — omitting it or passing "0" falls back to career-data.
+        # resume_id is the Resume NanoID PK (CC-77 #79) — not int-cast.
         resume = None
-        if resume_id is not None:
-            try:
-                rid = int(resume_id)
-            except (TypeError, ValueError):
-                rid = None
-            if rid:  # 0 → treated as "no resume" → career-data fallback
-                resume = Resume.objects.filter(pk=rid).first()
-                if not resume:
-                    return Response(
-                        {"errors": [{"detail": "Invalid resume ID"}]},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+        rid = resume_id if resume_id not in (None, "", "0", 0) else None
+        if rid:
+            resume = Resume.objects.filter(pk=rid).first()
+            if not resume:
+                return Response(
+                    {"errors": [{"detail": "Invalid resume ID"}]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         job_post = None
         if job_post_id is not None:

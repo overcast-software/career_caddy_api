@@ -41,7 +41,8 @@ def _markdown_response(body: str) -> HttpResponse:
 @permission_classes([IsAuthenticated])
 def resume_markdown(request, pk):
     try:
-        resume = Resume.objects.select_related("user").get(pk=int(pk))
+        # pk is the Resume NanoID PK (CC-77 #79) — not int-cast.
+        resume = Resume.objects.select_related("user").get(pk=pk)
     except (Resume.DoesNotExist, ValueError):
         return _not_found()
 

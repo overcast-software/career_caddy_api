@@ -179,7 +179,7 @@ def generate_prompt(request):
 
     if resume_id:
         try:
-            resume_id = int(resume_id)
+            # resume_id is the Resume NanoID PK (CC-77 #79) — not int-cast.
             resume = Resume.get(resume_id)
             if resume and resume.user_id == request.user.id:
                 context["resume"] = resume

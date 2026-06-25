@@ -160,8 +160,9 @@ class ScoreViewSet(BaseViewSet):
         # job_post_id is the JobPost PK — a NanoID string (CC-57), not cast.
         # Infer user from auth token; relationship is optional
         user_id = int(raw_user_id) if raw_user_id is not None else request.user.id
-        # Missing or null resume defaults to career-data scoring (equivalent to resume_id=0)
-        resume_id = int(resume_id) if resume_id is not None else 0
+        # resume_id is the Resume NanoID PK (CC-77 #79); missing/null/"0"
+        # defaults to career-data scoring (resume IS NULL).
+        resume_id = resume_id if resume_id not in (None, "", "0", 0) else None
 
         jp = JobPost.objects.filter(pk=job_post_id).first()
         if not jp:
@@ -183,7 +184,7 @@ class ScoreViewSet(BaseViewSet):
             )
         exporter = DbExportService()
 
-        if resume_id == 0:
+        if not resume_id:
             # Score against the user's full career data (all favorite resumes, cover letters, answers)
             career_data = CareerData.for_user(user_id)
             prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)

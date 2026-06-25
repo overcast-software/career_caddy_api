@@ -104,7 +104,7 @@ class ResumeViewSet(BaseViewSet):
         responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")},
     )
     def retrieve(self, request, pk=None):
-        obj = self.model.objects.filter(pk=int(pk)).first()
+        obj = self.model.objects.filter(pk=pk).first()
         if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -114,7 +114,7 @@ class ResumeViewSet(BaseViewSet):
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -941,7 +941,7 @@ class ResumeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         # Resume + Score are both per-user. A request for another user's
@@ -963,7 +963,7 @@ class ResumeViewSet(BaseViewSet):
         permission_classes=[IsAuthenticated],
     )
     def cover_letters(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -975,7 +975,7 @@ class ResumeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         data = [
@@ -1003,7 +1003,7 @@ class ResumeViewSet(BaseViewSet):
     @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
         if request.method.lower() == "post":
-            obj = Resume.objects.filter(pk=int(pk)).first()  # obj is the Resume
+            obj = Resume.objects.filter(pk=pk).first()  # obj is the Resume
             if not obj:
                 return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1094,7 +1094,7 @@ class ResumeViewSet(BaseViewSet):
                 )
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1128,7 +1128,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"], url_path=r"summaries/(?P<summary_id>\d+)")
     def summary(self, request, pk=None, summary_id=None):
-        resume = Resume.objects.filter(pk=int(pk)).first()
+        resume = Resume.objects.filter(pk=pk).first()
         if not resume:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         try:
@@ -1169,7 +1169,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = ExperienceSerializer()
@@ -1200,7 +1200,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def educations(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = EducationSerializer()
@@ -1220,7 +1220,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def skills(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = SkillSerializer()
@@ -1271,7 +1271,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"], url_path="export")
     def export(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1357,7 +1357,7 @@ class ResumeViewSet(BaseViewSet):
         Reorder experiences within a resume in a single transaction.
         Body: {"experience_ids": [3, 1, 2]}.
         """
-        resume = Resume.objects.filter(pk=int(pk)).first()
+        resume = Resume.objects.filter(pk=pk).first()
         if not resume:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         if not request.user.is_staff and resume.user_id != request.user.id:
@@ -1397,7 +1397,7 @@ class ResumeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["post"], url_path="clone")
     def clone(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 

@@ -1738,10 +1738,9 @@ class JobPostViewSet(BaseViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            try:
-                resume = Resume.objects.filter(pk=int(resume_id)).first()
-            except (TypeError, ValueError):
-                resume = None
+            # resume_id is the Resume NanoID PK (CC-77 #79) — not int-cast;
+            # a missing/garbage id simply yields no match -> "Invalid resume ID".
+            resume = Resume.objects.filter(pk=resume_id).first()
 
             if not resume:
                 return Response(

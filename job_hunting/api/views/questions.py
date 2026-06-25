@@ -429,15 +429,13 @@ class AnswerViewSet(BaseViewSet):
             or attrs_node.get("resume_id") or attrs_node.get("resumeId")
             or node.get("resume_id") or data.get("resume_id")
         )
-        try:
-            resume_id_int = int(resume_id_raw) if resume_id_raw is not None else 0
-        except (TypeError, ValueError):
-            resume_id_int = 0
+        # resume_id is the Resume NanoID PK (CC-77 #79); absent / "0" => career-data.
+        resume_id = resume_id_raw if resume_id_raw not in (None, "", "0", 0) else None
 
         # Resume existence validation only — the answer task re-derives
         # career markdown from resume_id or CareerData on its own.
-        if resume_id_int:
-            if not Resume.objects.filter(pk=resume_id_int).exists():
+        if resume_id:
+            if not Resume.objects.filter(pk=resume_id).exists():
                 return Response(
                     {"errors": [{"detail": "Resume not found"}]}, status=400
                 )
@@ -457,7 +455,7 @@ class AnswerViewSet(BaseViewSet):
                 "job_hunting.lib.tasks.answer_job",
                 obj.id,
                 injected_prompt=injected_prompt,
-                resume_id=resume_id_int or None,
+                resume_id=resume_id or None,
             )
 
             return Response({"data": ser.to_resource(obj)}, status=status.HTTP_202_ACCEPTED)
