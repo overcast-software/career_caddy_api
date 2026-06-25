@@ -49,7 +49,7 @@ class TestScrapeCreateAttended(TestCase):
         body = resp.json()
         # Writable snake_case attribute echoed back on the resource.
         self.assertIs(body["data"]["attributes"]["attended"], True)
-        scrape = Scrape.objects.get(pk=int(body["data"]["id"]))
+        scrape = Scrape.objects.get(pk=body["data"]["id"])
         self.assertTrue(scrape.attended)
 
     def test_attended_defaults_to_false_when_omitted(self):
@@ -57,13 +57,13 @@ class TestScrapeCreateAttended(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         body = resp.json()
         self.assertIs(body["data"]["attributes"]["attended"], False)
-        scrape = Scrape.objects.get(pk=int(body["data"]["id"]))
+        scrape = Scrape.objects.get(pk=body["data"]["id"])
         self.assertFalse(scrape.attended)
 
     def test_attended_false_explicit_persists(self):
         resp = self._create("https://attended.example/jobs/3", attended=False)
         self.assertEqual(resp.status_code, 201, resp.content)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertFalse(scrape.attended)
 
 

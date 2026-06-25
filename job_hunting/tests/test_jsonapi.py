@@ -71,12 +71,12 @@ class JSONAPITests(APITransactionTestCase):
         }
         resp = self.client.post("/api/v1/resumes/", data=payload, format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        resume_id = int(resp.data["data"]["id"])
+        resume_id = resp.data["data"]["id"]
         self.assertEqual(resp.data["data"]["type"], "resume")
         # Scoped route: /users/{id}/resumes
         resp = self.client.get(f"/api/v1/users/{self.user.id}/resumes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = [int(r["id"]) for r in resp.data["data"]]
+        ids = [r["id"] for r in resp.data["data"]]
         self.assertIn(resume_id, ids)
 
     def test_company_job_posts_scoped_and_job_post_relationship_linkage(self):

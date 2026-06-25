@@ -31,7 +31,7 @@ class JobPostDiscoveryListTests(TestCase):
         )
 
     def _ids(self, resp):
-        return {int(r["id"]) for r in resp.json()["data"]}
+        return {r["id"] for r in resp.json()["data"]}
 
     def test_non_staff_without_signal_does_not_see_post(self):
         client = APIClient()
@@ -88,7 +88,7 @@ class JobPostDiscoveryCreateTests(TestCase):
     def test_fresh_create_records_discovery(self):
         resp = self._post(self.alice, "https://acme.example/jobs/a")
         self.assertEqual(resp.status_code, 201)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
         self.assertTrue(
             JobPostDiscovery.objects.filter(
                 job_post_id=post_id, user=self.alice
@@ -99,12 +99,12 @@ class JobPostDiscoveryCreateTests(TestCase):
         # Alice ingests first.
         first = self._post(self.alice, "https://acme.example/jobs/b")
         self.assertEqual(first.status_code, 201)
-        post_id = int(first.json()["data"]["id"])
+        post_id = first.json()["data"]["id"]
 
         # Bob POSTs the same link → 200 echo + Bob now has a discovery.
         second = self._post(self.bob, "https://acme.example/jobs/b")
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(int(second.json()["data"]["id"]), post_id)
+        self.assertEqual(second.json()["data"]["id"], post_id)
         self.assertTrue(
             JobPostDiscovery.objects.filter(
                 job_post_id=post_id, user=self.bob
@@ -156,7 +156,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
     def _list_ids(self, user=None):
         resp = self._client(user).get("/api/v1/job-posts/")
         self.assertEqual(resp.status_code, 200)
-        return {int(r["id"]) for r in resp.json()["data"]}
+        return {r["id"] for r in resp.json()["data"]}
 
     def test_fresh_post_lands_in_caller_list(self):
         """cc_auto fresh-create case: POST → 201 → discovery for poster
@@ -167,7 +167,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
 
         disc = JobPostDiscovery.objects.filter(
             job_post_id=post_id, user=self.dough
@@ -201,7 +201,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
             "/api/v1/job-posts/", self._payload(link), format="json"
         )
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(int(resp.json()["data"]["id"]), existing.id)
+        self.assertEqual(resp.json()["data"]["id"], existing.id)
 
         disc = JobPostDiscovery.objects.filter(
             job_post_id=existing.id, user=self.dough
@@ -251,7 +251,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(int(resp.json()["data"]["id"]), existing.id)
+        self.assertEqual(resp.json()["data"]["id"], existing.id)
         self.assertTrue(
             JobPostDiscovery.objects.filter(
                 job_post_id=existing.id, user=self.dough, source="email"
@@ -294,7 +294,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
                 resp.status_code, expected_status,
                 f"{title} ({link}) → {resp.status_code}: {resp.content[:200]}"
             )
-            post_ids.add(int(resp.json()["data"]["id"]))
+            post_ids.add(resp.json()["data"]["id"])
 
         self.assertEqual(len(post_ids), 6, "expected 6 distinct posts")
         self.assertIn(ms.id, post_ids, "link-dedupe should echo existing id")
@@ -437,7 +437,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
 
         resp = self._client().get(f"/api/v1/companies/{self.company.id}/job-posts/")
         self.assertEqual(resp.status_code, 200)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         self.assertIn(
             post.id, ids,
             "discovery should surface a company's job-post on the company "
@@ -488,7 +488,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
         company_page = self._client().get(
             f"/api/v1/companies/{self.company.id}/job-posts/"
         )
-        ids = {int(r["id"]) for r in company_page.json()["data"]}
+        ids = {r["id"] for r in company_page.json()["data"]}
         self.assertIn(
             seeded.id, ids,
             "user reported: 'do you see any job posts from today from "
@@ -508,7 +508,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
             "/api/v1/job-posts/", self._payload(link), format="json"
         )
         self.assertEqual(eve_resp.status_code, 201)
-        eve_post_id = int(eve_resp.json()["data"]["id"])
+        eve_post_id = eve_resp.json()["data"]["id"]
 
         self.assertNotIn(
             eve_post_id, self._list_ids(),
@@ -520,7 +520,7 @@ class JobPostEmailIngestVisibilityTests(TestCase):
             "/api/v1/job-posts/", self._payload(link), format="json"
         )
         self.assertEqual(dough_resp.status_code, 200)
-        self.assertEqual(int(dough_resp.json()["data"]["id"]), eve_post_id)
+        self.assertEqual(dough_resp.json()["data"]["id"], eve_post_id)
         self.assertIn(eve_post_id, self._list_ids())
 
 
@@ -556,7 +556,7 @@ class JobPostRetrieveDiscoveryTests(TestCase):
         )
         resp = self._client(self.dough).get(f"/api/v1/job-posts/{self.post.id}/")
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(int(resp.json()["data"]["id"]), self.post.id)
+        self.assertEqual(resp.json()["data"]["id"], self.post.id)
 
     def test_retrieve_surfaces_post_for_staff(self):
         staff = User.objects.create_user(username="staff", password="p", is_staff=True)
@@ -590,7 +590,7 @@ class CompanyJobPostsRelationshipTests(TestCase):
     def _included_job_post_ids(self, resp):
         body = resp.json()
         return {
-            int(item["id"])
+            item["id"]
             for item in body.get("included", [])
             if item.get("type") == "job-post"
         }
@@ -693,7 +693,7 @@ class EmailForwardSourceTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
 
         disc = JobPostDiscovery.objects.get(job_post_id=post_id, user=self.dough)
         self.assertEqual(disc.source, "email-forward")
@@ -742,7 +742,7 @@ class EmailForwardSourceTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
         disc = JobPostDiscovery.objects.get(job_post_id=post_id, user=self.dough)
         self.assertEqual(disc.source, "email")
         self.assertIsNone(disc.forwarded_via_address)
@@ -771,7 +771,7 @@ class EmailForwardSourceTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(int(resp.json()["data"]["id"]), existing.id)
+        self.assertEqual(resp.json()["data"]["id"], existing.id)
 
         disc = JobPostDiscovery.objects.get(job_post_id=existing.id, user=self.dough)
         self.assertEqual(disc.source, "email-forward")
@@ -915,7 +915,7 @@ class DiscoverForUserIdRBACTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
 
         disc = JobPostDiscovery.objects.get(job_post_id=post_id)
         self.assertEqual(disc.user_id, self.dough.id)
@@ -935,7 +935,7 @@ class DiscoverForUserIdRBACTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
         disc = JobPostDiscovery.objects.get(job_post_id=post_id)
         self.assertEqual(disc.user_id, self.dough.id)
         self.assertEqual(disc.requested_by_id, self.dough.id)
@@ -954,7 +954,7 @@ class DiscoverForUserIdRBACTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        post_id = int(resp.json()["data"]["id"])
+        post_id = resp.json()["data"]["id"]
 
         disc = JobPostDiscovery.objects.get(job_post_id=post_id)
         self.assertEqual(
@@ -1035,7 +1035,7 @@ class DiscoverForUserIdRBACTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(int(resp.json()["data"]["id"]), existing.id)
+        self.assertEqual(resp.json()["data"]["id"], existing.id)
 
         disc = JobPostDiscovery.objects.get(
             job_post_id=existing.id, user_id=self.target.id

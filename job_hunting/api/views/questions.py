@@ -372,10 +372,9 @@ class AnswerViewSet(BaseViewSet):
                 or data.get("questionId")
                 or data.get("question-id")
             )
-        try:
-            qid = int(qid) if qid is not None else None
-        except (TypeError, ValueError):
-            return Response({"errors": [{"detail": "Invalid question ID"}]}, status=400)
+        # Question is a NanoID string PK (CC-77) — keep the id as a string;
+        # a non-existent id simply yields no match (handled below as 400).
+        qid = str(qid) if qid is not None else None
 
         question = Question.objects.filter(pk=qid).first() if qid is not None else None
         if question is None:

@@ -349,7 +349,12 @@ class BaseSerializer:
         for rel_name, fk_field in self.relationship_fks.items():
             rel = rels.get(rel_name)
             if rel and isinstance(rel.get("data"), dict):
-                out[fk_field] = int(rel["data"]["id"])
+                # Pass the JSON:API id through verbatim (as a string) — do
+                # NOT coerce to int. Relationship targets are mixed PK types
+                # post CC-77: NanoID string PKs (company/job-post/scrape) vs
+                # still-int PKs (user/status). Django coerces the string at
+                # the model-field layer on create()/save() either way.
+                out[fk_field] = str(rel["data"]["id"])
             elif rel and rel.get("data") is None:
                 out[fk_field] = None
         return out

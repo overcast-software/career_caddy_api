@@ -1221,14 +1221,16 @@ class JobPostViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         data = request.data if isinstance(request.data, dict) else {}
-        try:
-            target_id = int(data.get("target_id"))
-        except (TypeError, ValueError):
+        # JobPost is a NanoID string PK (CC-77) — accept target_id as a
+        # string; require it present and non-empty (no int() coercion).
+        target_id = data.get("target_id")
+        if target_id in (None, ""):
             return Response(
-                {"errors": [{"detail": "target_id (int) is required"}]},
+                {"errors": [{"detail": "target_id is required"}]},
                 status=400,
             )
-        if target_id == post.id:
+        target_id = str(target_id)
+        if target_id == str(post.id):
             return Response(
                 {"errors": [{"detail": "A post cannot be a duplicate of itself"}]},
                 status=400,
