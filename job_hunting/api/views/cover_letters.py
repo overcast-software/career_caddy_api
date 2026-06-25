@@ -69,7 +69,7 @@ class CoverLetterViewSet(BaseViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = CoverLetter.objects.filter(pk=int(pk)).first()
+        obj = CoverLetter.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -88,7 +88,7 @@ class CoverLetterViewSet(BaseViewSet):
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
-        obj = CoverLetter.objects.filter(pk=int(pk)).first()
+        obj = CoverLetter.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -123,7 +123,7 @@ class CoverLetterViewSet(BaseViewSet):
         return Response({"data": ser.to_resource(obj)})
 
     def destroy(self, request, pk=None):
-        obj = CoverLetter.objects.filter(pk=int(pk)).first()
+        obj = CoverLetter.objects.filter(pk=pk).first()
         if not obj:
             return Response(status=204)
 
@@ -369,7 +369,7 @@ class CoverLetterViewSet(BaseViewSet):
         permission_classes=[IsAuthenticated],
     )
     def export_docx(self, request, pk=None):
-        cl = self.model.get(int(pk))
+        cl = self.model.get(pk)
         if not cl:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 

@@ -80,7 +80,7 @@ def _cover_letter_markdown(letter: CoverLetter) -> str:
 def cover_letter_markdown(request, pk):
     try:
         letter = CoverLetter.objects.select_related("job_post", "company").get(
-            pk=int(pk)
+            pk=pk
         )
     except (CoverLetter.DoesNotExist, ValueError):
         return _not_found()
