@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 
 
 TIER_CHOICES = [
@@ -33,7 +34,10 @@ KNOWN_GOOD_MIN_SCRAPE_COUNT = 3
 KNOWN_GOOD_MAX_TIER0_MISS_RATIO = 0.5
 
 
-class ScrapeProfile(GetMixin, models.Model):
+class ScrapeProfile(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). ScrapeProfile is a leaf — nothing FKs to it — so the
+    # swap only repoints its own PK.
     hostname = models.CharField(max_length=255, unique=True, db_index=True)
     requires_auth = models.BooleanField(default=False)
     avg_content_length = models.IntegerField(null=True, blank=True)
