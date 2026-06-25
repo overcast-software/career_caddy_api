@@ -165,7 +165,7 @@ def generate_prompt(request):
     # Override context with specific parameters if provided
     if job_post_id:
         try:
-            job_post_id = int(job_post_id)
+            # job_post_id is the JobPost PK — a NanoID string (CC-57), not cast.
             job_post = JobPost.objects.filter(pk=job_post_id).first()
             if job_post:
                 context["job_post"] = job_post

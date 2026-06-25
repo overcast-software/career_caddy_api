@@ -203,7 +203,7 @@ class SummaryViewSet(BaseViewSet):
         job_post = None
         if job_post_id is not None:
             try:
-                job_post = JobPost.objects.filter(pk=int(job_post_id)).first()
+                job_post = JobPost.objects.filter(pk=job_post_id).first()
             except (TypeError, ValueError):
                 pass
             if not job_post:

@@ -1151,7 +1151,7 @@ class JobPostViewSet(BaseViewSet):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         visible = self._visible_jobpost_qs(request)
-        rows = list(visible.filter(duplicate_of_id=int(pk)))
+        rows = list(visible.filter(duplicate_of_id=pk))
         ser = self.get_serializer()
         return Response({"data": [ser.to_resource(r) for r in rows]})
 
@@ -1566,7 +1566,7 @@ class JobPostViewSet(BaseViewSet):
     def scores(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        scores = list(Score.objects.filter(job_post_id=int(pk), user_id=request.user.id))
+        scores = list(Score.objects.filter(job_post_id=pk, user_id=request.user.id))
         data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
@@ -1579,7 +1579,7 @@ class JobPostViewSet(BaseViewSet):
     def scrapes(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        scrapes = list(Scrape.objects.filter(job_post_id=int(pk)))
+        scrapes = list(Scrape.objects.filter(job_post_id=pk))
         data = [ScrapeSerializer().to_resource(s) for s in scrapes]
         return Response({"data": data})
 
@@ -1627,7 +1627,7 @@ class JobPostViewSet(BaseViewSet):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         cover_letters = list(
-            CoverLetter.objects.filter(job_post_id=int(pk), user_id=request.user.id)
+            CoverLetter.objects.filter(job_post_id=pk, user_id=request.user.id)
         )
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
@@ -1641,7 +1641,7 @@ class JobPostViewSet(BaseViewSet):
     def applications(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(JobApplication.objects.filter(job_post_id=int(pk), user_id=request.user.id))
+        apps = list(JobApplication.objects.filter(job_post_id=pk, user_id=request.user.id))
         data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
@@ -1660,7 +1660,7 @@ class JobPostViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get", "post"])
     def questions(self, request, pk=None):
-        job_post = JobPost.objects.filter(pk=int(pk)).first()
+        job_post = JobPost.objects.filter(pk=pk).first()
         if not job_post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1686,7 +1686,7 @@ class JobPostViewSet(BaseViewSet):
                 payload["included"] = self._build_included([obj], include_rels, request, primary_serializer=ser)
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        items = list(Question.objects.filter(application__job_post_id=int(pk), created_by_id=request.user.id))
+        items = list(Question.objects.filter(application__job_post_id=pk, created_by_id=request.user.id))
         include_rels = self._parse_include(request)
         payload = {"data": [ser.to_resource(i) for i in items]}
         if include_rels:

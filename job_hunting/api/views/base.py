@@ -263,7 +263,7 @@ class BaseViewSet(viewsets.ViewSet):
                                 model_cls = rel_ser.model
                                 try:
                                     fetched = model_cls.objects.filter(
-                                        pk=int(rel_id)
+                                        pk=rel_id
                                     ).first()
                                     if fetched:
                                         targets = [fetched]

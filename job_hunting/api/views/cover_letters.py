@@ -226,7 +226,7 @@ class CoverLetterViewSet(BaseViewSet):
 
         try:
             resume_id = int(resume_id) if resume_id is not None else None
-            job_post_id = int(job_post_id) if job_post_id is not None else None
+            # job_post_id is the JobPost PK — a NanoID string (CC-57), not int.
             company_id = int(company_id) if company_id is not None else None
         except (TypeError, ValueError):
             return Response(

@@ -890,7 +890,8 @@ class ResumeViewSet(BaseViewSet):
                     if isinstance(d, dict):
                         jp_id = d.get("id")
                 try:
-                    jp_id = int(jp_id) if jp_id is not None else None
+                    # jp_id is the JobPost PK — a NanoID string (CC-57), not int.
+                    jp_id = jp_id if jp_id is not None else None
                 except (TypeError, ValueError):
                     return Response(
                         {
@@ -1029,7 +1030,7 @@ class ResumeViewSet(BaseViewSet):
             job_post = None
             if job_post_id is not None:
                 try:
-                    job_post = JobPost.objects.filter(pk=int(job_post_id)).first()
+                    job_post = JobPost.objects.filter(pk=job_post_id).first()
                 except (TypeError, ValueError):
                     job_post = None
                 if not job_post:

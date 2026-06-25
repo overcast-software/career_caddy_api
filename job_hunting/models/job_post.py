@@ -4,6 +4,7 @@ from django.db import models
 from django.utils import timezone
 
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 from .job_post_dedupe import (
     canonicalize_link,
     fingerprint,
@@ -83,7 +84,11 @@ def _default_source_instance():
     return settings.CAREER_CADDY_INSTANCE
 
 
-class JobPost(GetMixin, models.Model):
+class JobPost(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK provided by NanoIDModel
+    # (CC-77 true PK swap). JobPost is the lead/only federated model, so
+    # this id is simultaneously the API resource id, the
+    # ``/api/v1/job-posts/<id>`` path key, and the ActivityPub object id.
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
