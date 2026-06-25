@@ -35,7 +35,7 @@ class TestScrapeFromText(TestCase):
         self.assertIn("data", body)
         self.assertEqual(body["data"]["type"], "scrape")
 
-        scrape = Scrape.objects.get(pk=int(body["data"]["id"]))
+        scrape = Scrape.objects.get(pk=body["data"]["id"])
         self.assertEqual(scrape.status, "pending")
         self.assertEqual(scrape.url, None)
         self.assertIn("Senior Engineer", scrape.job_content)
@@ -58,7 +58,7 @@ class TestScrapeFromText(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.url, "https://example.com/jobs/1")
         mock_parse.assert_called_once()
 
@@ -124,9 +124,10 @@ class TestScrapeFromTextResponseShape(TestCase):
         scrape_id = data.get("id")
         self.assertIsInstance(scrape_id, str, "data.id must be a string per JSON:API")
         self.assertTrue(scrape_id, "data.id must be non-empty (popup reads body.data.id)")
-        self.assertTrue(
-            scrape_id.isdigit(),
-            f"data.id must be a numeric string, got {scrape_id!r}",
+        self.assertRegex(
+            scrape_id,
+            r"^[0-9A-Za-z]{10}$",
+            f"data.id must be a 10-char NanoID string, got {scrape_id!r}",
         )
         self.assertIn("attributes", data, "data.attributes block required")
         self.assertIn("relationships", data, "data.relationships block required")
@@ -247,7 +248,7 @@ class TestScrapeFromTextResponseShape(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         body = resp.json()
         self._assert_envelope(body)
-        scrape_id = int(body["data"]["id"])
+        scrape_id = body["data"]["id"]
         scrape = Scrape.objects.get(pk=scrape_id)
         jp_linkage = body["data"]["relationships"]["job-post"]["data"]
         self.assertIsNotNone(jp_linkage, "JP linkage data must be populated after successful parse")
@@ -269,7 +270,7 @@ class TestScrapeFromTextResponseShape(TestCase):
         body = resp.json()
         scrape_id_str = body["data"]["id"]
         # Round-trip: the wire id must be parsable back to an existing pk.
-        scrape = Scrape.objects.get(pk=int(scrape_id_str))
+        scrape = Scrape.objects.get(pk=scrape_id_str)
         self.assertEqual(str(scrape.pk), scrape_id_str)
 
 
@@ -587,7 +588,7 @@ class TestScrapeFromTextSourceHint(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "paste")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -598,7 +599,7 @@ class TestScrapeFromTextSourceHint(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "extension")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -609,7 +610,7 @@ class TestScrapeFromTextSourceHint(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "email")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -620,7 +621,7 @@ class TestScrapeFromTextSourceHint(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "extension")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -641,7 +642,7 @@ class TestScrapeFromTextSourceHint(TestCase):
                     format="json",
                 )
                 self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-                scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+                scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
                 self.assertEqual(scrape.source, "paste")
                 Scrape.objects.all().delete()
 
@@ -653,7 +654,7 @@ class TestScrapeFromTextSourceHint(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "paste")
 
 
@@ -787,7 +788,7 @@ class TestScrapeFromTextSyncExtraction(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape_id = int(resp.json()["data"]["id"])
+        scrape_id = resp.json()["data"]["id"]
         scrape = Scrape.objects.get(pk=scrape_id)
         self.assertIn(
             scrape.status,
@@ -911,7 +912,7 @@ class TestScrapeFromTextExtensionHints(TestCase):
         jp.refresh_from_db()
         self.assertEqual(jp.apply_url, self.ATS)
         self.assertEqual(jp.apply_url_status, "resolved")
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.referrer_url, "https://www.linkedin.com/jobs/search/")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -930,7 +931,7 @@ class TestScrapeFromTextExtensionHints(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.url, self.LINKEDIN)
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -1061,7 +1062,7 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         jp.refresh_from_db()
         self.assertIsNone(jp.apply_url)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertIsNone(scrape.referrer_url)
         meta = resp.json().get("meta") or {}
         self.assertIsNone(meta.get("apply_match"))
@@ -1077,7 +1078,7 @@ class TestScrapeFromTextExtensionHints(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertIsNone(scrape.referrer_url)
         meta = resp.json().get("meta") or {}
         self.assertIsNone(meta.get("apply_match"))
@@ -1153,7 +1154,7 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(
             scrape.extension_prefill,
             {
@@ -1180,7 +1181,7 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             },
             format="json",
         )
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(
             scrape.extension_prefill,
             {"title": "Senior Engineer", "company_name": "Acme"},
@@ -1202,7 +1203,7 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             },
             format="json",
         )
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.extension_prefill, {"title": "Senior Engineer"})
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -1212,7 +1213,7 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             data={"text": "Senior Engineer at Acme"},
             format="json",
         )
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertIsNone(scrape.extension_prefill)
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
@@ -1228,7 +1229,7 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertIsNone(scrape.extension_prefill)
 
 
@@ -1267,7 +1268,7 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "failed")
         self.assertIsNotNone(scrape.failure_reason)
         self.assertIn("placeholder title", scrape.failure_reason)
@@ -1289,7 +1290,7 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "failed")
         self.assertIsNotNone(scrape.failure_reason)
         self.assertIn("placeholder company", scrape.failure_reason)
@@ -1307,7 +1308,7 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "failed")
         self.assertIsNotNone(scrape.failure_reason)
         self.assertIn("parse_scrape exception", scrape.failure_reason)
@@ -1343,7 +1344,7 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "completed")
         self.assertIsNone(scrape.failure_reason)
 
@@ -1356,7 +1357,7 @@ class TestScrapeFromTextFailureReason(TestCase):
             data={"text": "Senior Engineer at AcmeCorp. " * 30, "source": "extension"},
             format="json",
         )
-        scrape_id = int(post.json()["data"]["id"])
+        scrape_id = post.json()["data"]["id"]
 
         resp = self.client.get(f"/api/v1/scrapes/{scrape_id}/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)

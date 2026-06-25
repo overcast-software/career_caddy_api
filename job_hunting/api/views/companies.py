@@ -347,13 +347,8 @@ class CompanyViewSet(BaseViewSet):
                 {"errors": [{"detail": "target_id is required."}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            target_id = int(target_id)
-        except (TypeError, ValueError):
-            return Response(
-                {"errors": [{"detail": "target_id must be an integer."}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # target_id is the target Company NanoID PK (CC-77 #79) — string, not int.
+        target_id = str(target_id)
         if target_id == source.id:
             return Response(
                 {"errors": [{"detail": "Cannot merge a company into itself."}]},
@@ -486,13 +481,8 @@ class CompanyViewSet(BaseViewSet):
                 {"errors": [{"detail": "target_id is required."}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            target_id = int(target_id)
-        except (TypeError, ValueError):
-            return Response(
-                {"errors": [{"detail": "target_id must be an integer."}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # target_id is the target Company NanoID PK (CC-77 #79) — string, not int.
+        target_id = str(target_id)
 
         if not Company.objects.filter(pk=target_id).exists():
             return Response(

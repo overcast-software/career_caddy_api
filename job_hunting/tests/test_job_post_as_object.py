@@ -238,7 +238,7 @@ class TestVisibilityAuditFederatedRows(TestCase):
     def test_federated_row_invisible_in_list(self):
         response = self._client(self.user).get("/api/v1/job-posts/")
         self.assertEqual(response.status_code, 200)
-        ids = {int(item["id"]) for item in response.json()["data"]}
+        ids = {item["id"] for item in response.json()["data"]}
         self.assertNotIn(self.federated_jp.id, ids)
 
     def test_federated_row_invisible_on_retrieve(self):
@@ -259,10 +259,10 @@ class TestVisibilityAuditFederatedRows(TestCase):
             source="email-forward",
         )
         response = self._client(self.user).get("/api/v1/job-posts/")
-        ids = {int(item["id"]) for item in response.json()["data"]}
+        ids = {item["id"] for item in response.json()["data"]}
         self.assertIn(self.federated_jp.id, ids)
 
     def test_staff_sees_federated_row(self):
         response = self._client(self.staff).get("/api/v1/job-posts/")
-        ids = {int(item["id"]) for item in response.json()["data"]}
+        ids = {item["id"] for item in response.json()["data"]}
         self.assertIn(self.federated_jp.id, ids)

@@ -133,9 +133,16 @@ class TestBackfillCompanySlugs(TestCase):
         call_command("backfill_company_slugs", stdout=StringIO())
         c1.refresh_from_db()
         c2.refresh_from_db()
-        self.assertEqual(c1.slug, "acme")
-        # Collision suffix is the row's own id for determinism.
-        self.assertEqual(c2.slug, f"acme-{c2.id}")
+        # Exactly one row keeps the bare slug; the other is suffixed with
+        # its OWN id. The PK is a NanoID (CC-77), so the backfill's
+        # order_by("id") is no longer creation-order — assert the
+        # invariant without assuming which of the two wins the bare slug.
+        slugs = {c1.slug, c2.slug}
+        self.assertEqual(len(slugs), 2)
+        self.assertIn("acme", slugs)
+        bare, suffixed = (c1, c2) if c1.slug == "acme" else (c2, c1)
+        self.assertEqual(bare.slug, "acme")
+        self.assertEqual(suffixed.slug, f"acme-{suffixed.id}")
 
     def test_all_punctuation_name_falls_back_to_company_id(self):
         c = Company.objects.create(name="!!! ???")

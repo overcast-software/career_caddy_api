@@ -47,7 +47,7 @@ class TestIngestEndpointBlob(APITestCase):
         self.assertEqual(response.data["data"]["type"], "resume")
         self.assertEqual(response.data["data"]["attributes"]["status"], "pending")
 
-        resume_id = int(response.data["data"]["id"])
+        resume_id = response.data["data"]["id"]
         resume = Resume.objects.get(pk=resume_id)
         self.assertEqual(resume.user_id, self.user.id)
         self.assertEqual(resume.status, "pending")
@@ -68,7 +68,7 @@ class TestIngestEndpointBlob(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        resume_id = int(response.data["data"]["id"])
+        resume_id = response.data["data"]["id"]
         resume = Resume.objects.get(pk=resume_id)
         self.assertEqual(resume.name, "My Professional Resume")
 

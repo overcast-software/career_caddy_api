@@ -148,20 +148,22 @@ def _encode_cursor(job_post) -> str:
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def _decode_cursor(cursor: str) -> tuple[datetime, int]:
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     """Decode an opaque cursor into ``(created_at, id)``.
 
     Raises :class:`_InvalidCursor` on ANY malformed input (bad base64,
-    bad utf-8, missing delimiter, unparseable timestamp / id) so the
-    view can answer a clean 400 rather than 500'ing on a hand-edited
-    or truncated cursor.
+    bad utf-8, missing delimiter, unparseable timestamp) so the view
+    can answer a clean 400 rather than 500'ing on a hand-edited or
+    truncated cursor. The id is a NanoID string PK (CC-77) — kept
+    verbatim, never coerced to int; the keyset comparison against the
+    varchar PK is lexical, consistent with the ``-id`` DB ordering.
     """
     try:
         raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
         iso, sep, raw_id = raw.rpartition("|")
         if not sep or not iso or not raw_id:
             raise ValueError("cursor missing '<iso>|<id>' delimiter")
-        return datetime.fromisoformat(iso), int(raw_id)
+        return datetime.fromisoformat(iso), raw_id
     except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
         raise _InvalidCursor(str(exc)) from exc
 

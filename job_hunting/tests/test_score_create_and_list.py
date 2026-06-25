@@ -45,7 +45,7 @@ class TestScoreListJobPostFilter(TestCase):
 
     def _ids(self, resp):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        return {int(r["id"]) for r in resp.json()["data"]}
+        return {r["id"] for r in resp.json()["data"]}
 
     def test_no_filter_returns_all_user_scores(self):
         ids = self._ids(self.client.get(SCORES_URL))
@@ -192,7 +192,7 @@ class TestScoreMultiTenancy(TestCase):
         client.force_authenticate(user=self.visitor)
         resp = client.get(SCORES_URL + f"?filter[job_post_id]={self.jp.id}")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         creator_score_ids = set(
             Score.objects.filter(job_post=self.jp, user=self.creator).values_list("id", flat=True)
         )
@@ -221,7 +221,7 @@ class TestJobPostLinkedScoresUserScoped(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         rel = resp.json()["data"]["relationships"].get("scores", {})
         data = rel.get("data") or []
-        return {int(r["id"]) for r in data}
+        return {r["id"] for r in data}
 
     def test_user_only_sees_own_score_ids_in_linkage(self):
         ids = self._score_ids_in_jp_response(as_user=self.user)

@@ -91,7 +91,10 @@ class BaseViewSet(viewsets.ViewSet):
 
     def _get_obj(self, pk):
         """Fetch a single object by PK."""
-        return self.model.objects.filter(pk=int(pk)).first()
+        # PK is passed through as-is: NanoID-PK models (CC-77 #79) carry a
+        # string id, and Django coerces a numeric string for the remaining
+        # int-PK models. int() would raise ValueError on a NanoID.
+        return self.model.objects.filter(pk=pk).first()
 
     def get_serializer(self, *args, slim=False, request=None, **kwargs):
         ser = self.serializer_class()
@@ -263,7 +266,7 @@ class BaseViewSet(viewsets.ViewSet):
                                 model_cls = rel_ser.model
                                 try:
                                     fetched = model_cls.objects.filter(
-                                        pk=int(rel_id)
+                                        pk=rel_id
                                     ).first()
                                     if fetched:
                                         targets = [fetched]
@@ -527,7 +530,8 @@ class BaseViewSet(viewsets.ViewSet):
         responses={204: OpenApiResponse(description="Deleted")},
     )
     def destroy(self, request, pk=None):
-        self.model.objects.filter(pk=int(pk)).delete()
+        # PK passed through as-is (NanoID string or coercible int — see _get_obj).
+        self.model.objects.filter(pk=pk).delete()
         return Response(status=204)
 
     # JSON:API relationships linkage endpoint:

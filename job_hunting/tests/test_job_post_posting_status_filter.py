@@ -43,7 +43,7 @@ class JobPostApplicationStatusFilterTests(TestCase):
         )
 
     def _ids(self, resp):
-        return {int(r["id"]) for r in resp.json()["data"]}
+        return {r["id"] for r in resp.json()["data"]}
 
     def test_default_hides_closed_includes_open_and_unknown(self):
         resp = self.client.get("/api/v1/job-posts/")

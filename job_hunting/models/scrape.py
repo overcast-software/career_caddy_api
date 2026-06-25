@@ -1,10 +1,16 @@
 from django.conf import settings
 from django.db import models
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 from urllib.parse import urlparse
 
 
-class Scrape(GetMixin, models.Model):
+class Scrape(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). FKs referencing scrape(id): scrape_status.scrape_id
+    # (CASCADE, NOT NULL), the self-FK scrape.source_scrape_id (SET_NULL),
+    # and triggering_scrape_id on job_post_overwrite_decision /
+    # job_post_description_decision (both SET_NULL, nullable).
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -41,6 +47,12 @@ class Scrape(GetMixin, models.Model):
     external_link = models.CharField(max_length=2000, null=True, blank=True)
     parse_method = models.CharField(max_length=100, null=True, blank=True)
     scraped_at = models.DateTimeField(null=True, blank=True)
+    # Creation timestamp — the FIFO key for the claim-next queue. Added
+    # in CC-77: the PK is now a (random) NanoID, so the integer-autoinc
+    # id can no longer stand in as the arrival-order key. Nullable so the
+    # additive migration needs no backfill; pre-existing rows sort first
+    # (nulls_first) as the oldest holds.
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
     status = models.CharField(max_length=50, null=True, blank=True)
     source_scrape = models.ForeignKey(
         "self",

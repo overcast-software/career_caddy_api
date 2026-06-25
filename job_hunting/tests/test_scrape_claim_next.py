@@ -69,7 +69,7 @@ class TestScrapeClaimNext(TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         # Should pick the unclaimed one, not the already-claimed one.
-        claimed_scrape = Scrape.objects.get(pk=int(body["data"]["id"]))
+        claimed_scrape = Scrape.objects.get(pk=body["data"]["id"])
         self.assertEqual(claimed_scrape.url, "https://example.com/available")
 
     def test_skips_non_hold_statuses(self):
@@ -105,14 +105,14 @@ class TestScrapeClaimNext(TestCase):
             HTTP_USER_AGENT="cc-scrape-runner/1.0",
         )
         self.assertEqual(resp.status_code, 200)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.claimed_by, "cc-scrape-runner/1.0")
 
     def test_runner_name_falls_back_to_anonymous(self):
         Scrape.objects.create(url="https://example.com/anon", status="hold")
         resp = self.client.post(CLAIM_URL, data={}, format="json")
         self.assertEqual(resp.status_code, 200)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         # Test client doesn't set User-Agent by default → falls back.
         self.assertEqual(scrape.claimed_by, "anonymous")
 

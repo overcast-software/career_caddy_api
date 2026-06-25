@@ -61,12 +61,15 @@ class TestMarkDuplicateOf(_Base):
         resp = self.client.post(self._url(a), {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_rejects_non_integer_target_id(self):
+    def test_rejects_unknown_target_id(self):
+        # NanoID PKs (CC-77): target_id is a string, so a value that
+        # doesn't resolve to a visible post is a 404 (not-found), not a
+        # 400 — there is no longer an "integer-ness" precondition.
         a = self._post("A", link="https://example.com/a")
         resp = self.client.post(
             self._url(a), {"target_id": "abc"}, format="json"
         )
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_404_when_target_invisible(self):
         # Target post is created by someone else and the caller has no
@@ -281,7 +284,7 @@ class TestDuplicatesList(_Base):
 
         resp = self.client.get(self._url(root))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = sorted(int(row["id"]) for row in resp.json()["data"])
+        ids = sorted(row["id"] for row in resp.json()["data"])
         self.assertEqual(ids, [mine.id])
 
     def test_staff_sees_all_children(self):
@@ -297,7 +300,7 @@ class TestDuplicatesList(_Base):
 
         resp = self.client.get(self._url(root))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = sorted(int(row["id"]) for row in resp.json()["data"])
+        ids = sorted(row["id"] for row in resp.json()["data"])
         self.assertEqual(ids, sorted([mine.id, theirs.id]))
 
     def test_404_when_post_does_not_exist(self):

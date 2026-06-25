@@ -211,8 +211,8 @@ urlpatterns = [
     # so the SPA's human-facing /job-posts/<id> route is undisturbed when
     # the apex routes only AP-Accept traffic here. ``/activities/<uuid>``
     # is federation-only (no SPA sibling), always AS2.
-    path("job-posts/<int:pk>", jobpost_object_view, name="jobpost-object"),
-    path("job-posts/<int:pk>/", jobpost_object_view, name="jobpost-object-slash"),
+    path("job-posts/<str:pk>", jobpost_object_view, name="jobpost-object"),
+    path("job-posts/<str:pk>/", jobpost_object_view, name="jobpost-object-slash"),
     re_path(
         r"^activities/(?P<activity_uuid>[0-9a-fA-F-]+)$",
         federation_activity_view,
@@ -242,7 +242,7 @@ urlpatterns = [
     path("api/v1/test-email/", test_email, name="test-email"),
     re_path(r"^api/v1/test-email$", test_email, name="test-email-noslash"),
     re_path(
-        r"^api/v1/companies/(?P<pk>\d+)/job-posts$",
+        r"^api/v1/companies/(?P<pk>[0-9A-Za-z]+)/job-posts$",
         CompanyViewSet.as_view({"get": "job_posts"}),
         name="company-job-posts-noslash",
     ),
@@ -268,7 +268,7 @@ urlpatterns = [
         name="public-user-profile",
     ),
     re_path(
-        r"^api/v1/scrapes/(?P<pk>\d+)/screenshots/(?P<filename>.+\.png)$",
+        r"^api/v1/scrapes/(?P<pk>[0-9A-Za-z]+)/screenshots/(?P<filename>.+\.png)$",
         ScrapeViewSet.as_view({"get": "screenshot_file"}),
         name="scrape-screenshot-file-direct",
     ),
@@ -290,8 +290,8 @@ urlpatterns = [
     path("api/v1/career-data/export/", career_data_export, name="career-data-export"),
     path("api/v1/career-data/import/", career_data_import, name="career-data-import"),
     path("api/v1/generate-prompt/", generate_prompt, name="generate-prompt"),
-    path("api/v1/resumes/<int:pk>/markdown/", resume_markdown, name="resume-markdown"),
-    path("api/v1/cover-letters/<int:pk>/markdown/", cover_letter_markdown, name="cover-letter-markdown"),
+    path("api/v1/resumes/<str:pk>/markdown/", resume_markdown, name="resume-markdown"),
+    path("api/v1/cover-letters/<str:pk>/markdown/", cover_letter_markdown, name="cover-letter-markdown"),
     path(
         "api/v1/users/<str:user_id>/onboarding/",
         onboarding_endpoint,

@@ -185,13 +185,9 @@ class ExperienceViewSet(BaseViewSet):
                 rid = it.get("id")
                 if rid is None:
                     continue
-                try:
-                    resume_ids.append(int(rid))
-                except (TypeError, ValueError):
-                    return Response(
-                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                # rid is the Resume NanoID PK (CC-77 #79) — not int-cast;
+                # invalid ids are caught by the existence check below.
+                resume_ids.append(rid)
 
         # Validate referenced resumes (if provided)
         invalid = [
@@ -269,13 +265,9 @@ class ExperienceViewSet(BaseViewSet):
                 rid = it.get("id")
                 if rid is None:
                     continue
-                try:
-                    resume_ids.append(int(rid))
-                except (TypeError, ValueError):
-                    return Response(
-                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                # rid is the Resume NanoID PK (CC-77 #79) — not int-cast;
+                # invalid ids are caught by the existence check below.
+                resume_ids.append(rid)
 
         # Validate resumes and create missing links
         invalid = [
@@ -384,13 +376,9 @@ class EducationViewSet(BaseViewSet):
                 rid = it.get("id")
                 if rid is None:
                     continue
-                try:
-                    resume_ids.append(int(rid))
-                except (TypeError, ValueError):
-                    return Response(
-                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                # rid is the Resume NanoID PK (CC-77 #79) — not int-cast;
+                # invalid ids are caught by the existence check below.
+                resume_ids.append(rid)
 
         invalid = [
             rid for rid in resume_ids if not Resume.objects.filter(pk=rid).exists()
@@ -501,13 +489,9 @@ class CertificationViewSet(BaseViewSet):
                 rid = it.get("id")
                 if rid is None:
                     continue
-                try:
-                    resume_ids.append(int(rid))
-                except (TypeError, ValueError):
-                    return Response(
-                        {"errors": [{"detail": f"Invalid resume id: {rid}"}]},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                # rid is the Resume NanoID PK (CC-77 #79) — not int-cast;
+                # invalid ids are caught by the existence check below.
+                resume_ids.append(rid)
 
         # Validate referenced resumes (if provided)
         invalid = [

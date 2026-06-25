@@ -24,7 +24,7 @@ class TestJobPostListExcludeVettedBad(TestCase):
 
     def _ids(self, url):
         resp = self.client.get(url)
-        return {int(row["id"]) for row in resp.json()["data"]}
+        return {row["id"] for row in resp.json()["data"]}
 
     def test_excludes_posts_latest_status_vetted_bad(self):
         good = JobPost.objects.create(title="G", company=self.company, created_by=self.user)

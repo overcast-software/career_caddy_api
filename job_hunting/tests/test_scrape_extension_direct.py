@@ -110,7 +110,7 @@ class ScrapeSerializerExtensionDirectValidationTests(TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.content)
 
-        scrape_id = int(resp.json()["data"]["id"])
+        scrape_id = resp.json()["data"]["id"]
         scrape = Scrape.objects.get(pk=scrape_id)
         self.assertEqual(scrape.source_mode, "extension-direct")
         self.assertEqual(
@@ -322,7 +322,7 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         # POST against the same link would.
         self.assertEqual(resp.status_code, 201, resp.content)
 
-        scrape_id = int(resp.json()["data"]["id"])
+        scrape_id = resp.json()["data"]["id"]
         scrape = Scrape.objects.get(pk=scrape_id)
         self.assertEqual(scrape.source_mode, "extension-direct")
         self.assertIsNotNone(scrape.captured_payload)
@@ -392,7 +392,7 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        scrape = Scrape.objects.get(pk=int(resp.json()["data"]["id"]))
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         # Should be bound — canonical_link of submitted URL strips the
         # utm_* params and matches the existing JP's canonical_link.
         self.assertIsNotNone(scrape.job_post_id)

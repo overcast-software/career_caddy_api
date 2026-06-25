@@ -117,7 +117,7 @@ class TestSideloadedJobPostTopScoreIsUserScoped(_TwoUserSharedJobPostBase):
         top_rel = jp["relationships"].get("top-score") or {}
         rel_data = top_rel.get("data")
         self.assertIsNotNone(rel_data, "top-score relationship should not be null when caller has a score")
-        self.assertEqual(int(rel_data["id"]), self.score_b.id)
+        self.assertEqual(rel_data["id"], self.score_b.id)
 
     def test_companies_job_posts_subcollection_uses_callers_top_score(self):
         resp = self.client_b.get(f"/api/v1/companies/{self.company.id}/job-posts/")
@@ -126,7 +126,7 @@ class TestSideloadedJobPostTopScoreIsUserScoped(_TwoUserSharedJobPostBase):
         self.assertEqual(jp["attributes"]["top_score"], 40)
         rel_data = (jp["relationships"].get("top-score") or {}).get("data")
         self.assertIsNotNone(rel_data)
-        self.assertEqual(int(rel_data["id"]), self.score_b.id)
+        self.assertEqual(rel_data["id"], self.score_b.id)
 
     def test_primary_retrieve_still_emits_callers_top_score_regression(self):
         # Pre-existing list/retrieve hydration must keep working: B reads
@@ -151,7 +151,7 @@ class TestJobPostRelationshipsScoresEndpointIsUserScoped(_TwoUserSharedJobPostBa
     def test_relationships_scores_only_surfaces_callers_score_ids(self):
         resp = self.client_b.get(f"/api/v1/job-posts/{self.jp.id}/relationships/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         self.assertIn(self.score_b.id, ids)
         self.assertNotIn(
             self.score_a.id, ids,
@@ -164,7 +164,7 @@ class TestJobPostRelationshipsScoresEndpointIsUserScoped(_TwoUserSharedJobPostBa
         client.force_authenticate(user=staff)
         resp = client.get(f"/api/v1/job-posts/{self.jp.id}/relationships/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         self.assertIn(self.score_a.id, ids)
         self.assertIn(self.score_b.id, ids)
 
@@ -184,7 +184,7 @@ class TestCompanyScrapesEndpointIsUserScoped(_TwoUserSharedJobPostBase):
     def test_bob_only_sees_own_scrapes_on_company(self):
         resp = self.client_b.get(f"/api/v1/companies/{self.company.id}/scrapes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         self.assertIn(self.scrape_b.id, ids)
         self.assertNotIn(self.scrape_a.id, ids)
 
@@ -194,7 +194,7 @@ class TestCompanyScrapesEndpointIsUserScoped(_TwoUserSharedJobPostBase):
         client.force_authenticate(user=staff)
         resp = client.get(f"/api/v1/companies/{self.company.id}/scrapes/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         self.assertIn(self.scrape_a.id, ids)
         self.assertIn(self.scrape_b.id, ids)
 
@@ -227,7 +227,7 @@ class TestResumeScoresEndpointIsUserScoped(_TwoUserSharedJobPostBase):
     def test_bob_sees_own_scores_on_own_resume(self):
         resp = self.client_b.get(f"/api/v1/resumes/{self.resume_b.id}/scores/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        ids = {int(r["id"]) for r in resp.json()["data"]}
+        ids = {r["id"] for r in resp.json()["data"]}
         self.assertIn(self.bobs_score_on_bobs_resume.id, ids)
         # No leakage of A's score, even though it's on a different resume.
         self.assertNotIn(self.alices_score_on_alices_resume.id, ids)

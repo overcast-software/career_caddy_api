@@ -1010,6 +1010,8 @@ def prune_scrape_html(
     """
     from urllib.parse import urlparse
 
+    from django.db.models import F
+
     from job_hunting.models import Scrape
 
     keep_per_host = max(1, int(keep_per_host))
@@ -1017,12 +1019,22 @@ def prune_scrape_html(
     # Only completed rows that still carry html. `.only()` the bookkeeping
     # columns so we don't hydrate the (potentially multi-MB) html blob just
     # to decide which rows to keep.
+    #
+    # Rank most-recent-first by ACTUAL recency, not by id: the PK is a
+    # random NanoID now (CC-77), so "-id" no longer means "newest". Use
+    # scraped_at (when the scrape ran) then created_at (queue time, added
+    # in CC-77) with nulls_last so timestamp-less legacy rows rank as
+    # oldest; id is only a stable tiebreak.
     rows = list(
         Scrape.objects.filter(status="completed")
         .exclude(html__isnull=True)
         .exclude(html="")
-        .order_by("-id")
-        .only("id", "url")
+        .order_by(
+            F("scraped_at").desc(nulls_last=True),
+            F("created_at").desc(nulls_last=True),
+            F("id").desc(),
+        )
+        .only("id", "url", "scraped_at", "created_at")
     )
 
     # host is a Python @property (urlparse), not a column, so bucket

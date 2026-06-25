@@ -137,7 +137,7 @@ def generate_prompt(request):
         )
 
     try:
-        question_id = int(question_id)
+        # question_id is the Question PK — a NanoID string (CC-79), not cast.
         question = Question.objects.filter(pk=question_id).first()
         if not question:
             return Response(
@@ -165,7 +165,7 @@ def generate_prompt(request):
     # Override context with specific parameters if provided
     if job_post_id:
         try:
-            job_post_id = int(job_post_id)
+            # job_post_id is the JobPost PK — a NanoID string (CC-57), not cast.
             job_post = JobPost.objects.filter(pk=job_post_id).first()
             if job_post:
                 context["job_post"] = job_post
@@ -179,7 +179,7 @@ def generate_prompt(request):
 
     if resume_id:
         try:
-            resume_id = int(resume_id)
+            # resume_id is the Resume NanoID PK (CC-77 #79) — not int-cast.
             resume = Resume.get(resume_id)
             if resume and resume.user_id == request.user.id:
                 context["resume"] = resume
@@ -431,7 +431,7 @@ def career_data_import(request):
                 }
                 if existing:
                     if old_id is not None:
-                        jp_id_map[int(old_id)] = existing.id
+                        jp_id_map[str(old_id)] = existing.id
                     merge_empty_fields_from_attrs(existing, row_attrs)
                     JobPostDiscovery.objects.get_or_create(
                         job_post=existing,
@@ -459,7 +459,7 @@ def career_data_import(request):
                     defaults={"source": "import"},
                 )
                 if old_id is not None:
-                    jp_id_map[int(old_id)] = jp.id
+                    jp_id_map[str(old_id)] = jp.id
                 stats["job-posts"]["created"] += 1
 
         # -- job-applications --
@@ -468,7 +468,7 @@ def career_data_import(request):
             for row in _rows_as_dicts(wbook["job-applications"]):
                 old_id = row.get("id")
                 old_jp_id = row.get("job_post_id")
-                new_jp_id = jp_id_map.get(int(old_jp_id)) if old_jp_id is not None else None
+                new_jp_id = jp_id_map.get(str(old_jp_id)) if old_jp_id is not None else None
                 # Skip duplicate: same user + same job_post
                 if new_jp_id and JobApplication.objects.filter(
                     user=request.user, job_post_id=new_jp_id
@@ -477,7 +477,7 @@ def career_data_import(request):
                         existing = JobApplication.objects.filter(
                             user=request.user, job_post_id=new_jp_id
                         ).first()
-                        ja_id_map[int(old_id)] = existing.id
+                        ja_id_map[str(old_id)] = existing.id
                     stats["job-applications"]["skipped"] += 1
                     continue
                 company = None
@@ -493,7 +493,7 @@ def career_data_import(request):
                     notes=row.get("notes"),
                 )
                 if old_id is not None:
-                    ja_id_map[int(old_id)] = ja.id
+                    ja_id_map[str(old_id)] = ja.id
                 stats["job-applications"]["created"] += 1
 
         # -- questions --
@@ -502,9 +502,9 @@ def career_data_import(request):
             for row in _rows_as_dicts(wbook["questions"]):
                 old_id = row.get("id")
                 old_app_id = row.get("application_id")
-                new_app_id = ja_id_map.get(int(old_app_id)) if old_app_id is not None else None
+                new_app_id = ja_id_map.get(str(old_app_id)) if old_app_id is not None else None
                 old_jp_id = row.get("job_post_id")
-                new_jp_id = jp_id_map.get(int(old_jp_id)) if old_jp_id is not None else None
+                new_jp_id = jp_id_map.get(str(old_jp_id)) if old_jp_id is not None else None
                 content = row.get("content")
                 # Skip duplicate: same content + same application
                 if content and new_app_id and Question.objects.filter(
@@ -514,7 +514,7 @@ def career_data_import(request):
                         existing = Question.objects.filter(
                             content=content, application_id=new_app_id
                         ).first()
-                        q_id_map[int(old_id)] = existing.id
+                        q_id_map[str(old_id)] = existing.id
                     stats["questions"]["skipped"] += 1
                     continue
                 company = None
@@ -529,14 +529,14 @@ def career_data_import(request):
                     favorite=bool(row.get("favorite")),
                 )
                 if old_id is not None:
-                    q_id_map[int(old_id)] = q.id
+                    q_id_map[str(old_id)] = q.id
                 stats["questions"]["created"] += 1
 
         # -- answers --
         if "answers" in wbook.sheetnames:
             for row in _rows_as_dicts(wbook["answers"]):
                 old_q_id = row.get("question_id")
-                new_q_id = q_id_map.get(int(old_q_id)) if old_q_id is not None else None
+                new_q_id = q_id_map.get(str(old_q_id)) if old_q_id is not None else None
                 if new_q_id is None:
                     stats["answers"]["skipped"] += 1
                     continue

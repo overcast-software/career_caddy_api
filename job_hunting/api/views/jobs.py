@@ -1151,7 +1151,7 @@ class JobPostViewSet(BaseViewSet):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         visible = self._visible_jobpost_qs(request)
-        rows = list(visible.filter(duplicate_of_id=int(pk)))
+        rows = list(visible.filter(duplicate_of_id=pk))
         ser = self.get_serializer()
         return Response({"data": [ser.to_resource(r) for r in rows]})
 
@@ -1221,14 +1221,16 @@ class JobPostViewSet(BaseViewSet):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
         data = request.data if isinstance(request.data, dict) else {}
-        try:
-            target_id = int(data.get("target_id"))
-        except (TypeError, ValueError):
+        # JobPost is a NanoID string PK (CC-77) — accept target_id as a
+        # string; require it present and non-empty (no int() coercion).
+        target_id = data.get("target_id")
+        if target_id in (None, ""):
             return Response(
-                {"errors": [{"detail": "target_id (int) is required"}]},
+                {"errors": [{"detail": "target_id is required"}]},
                 status=400,
             )
-        if target_id == post.id:
+        target_id = str(target_id)
+        if target_id == str(post.id):
             return Response(
                 {"errors": [{"detail": "A post cannot be a duplicate of itself"}]},
                 status=400,
@@ -1566,7 +1568,7 @@ class JobPostViewSet(BaseViewSet):
     def scores(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        scores = list(Score.objects.filter(job_post_id=int(pk), user_id=request.user.id))
+        scores = list(Score.objects.filter(job_post_id=pk, user_id=request.user.id))
         data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
@@ -1579,7 +1581,7 @@ class JobPostViewSet(BaseViewSet):
     def scrapes(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        scrapes = list(Scrape.objects.filter(job_post_id=int(pk)))
+        scrapes = list(Scrape.objects.filter(job_post_id=pk))
         data = [ScrapeSerializer().to_resource(s) for s in scrapes]
         return Response({"data": data})
 
@@ -1627,7 +1629,7 @@ class JobPostViewSet(BaseViewSet):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         cover_letters = list(
-            CoverLetter.objects.filter(job_post_id=int(pk), user_id=request.user.id)
+            CoverLetter.objects.filter(job_post_id=pk, user_id=request.user.id)
         )
         data = [CoverLetterSerializer().to_resource(c) for c in cover_letters]
         return Response({"data": data})
@@ -1641,7 +1643,7 @@ class JobPostViewSet(BaseViewSet):
     def applications(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(JobApplication.objects.filter(job_post_id=int(pk), user_id=request.user.id))
+        apps = list(JobApplication.objects.filter(job_post_id=pk, user_id=request.user.id))
         data = [JobApplicationSerializer().to_resource(a) for a in apps]
         return Response({"data": data})
 
@@ -1660,7 +1662,7 @@ class JobPostViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get", "post"])
     def questions(self, request, pk=None):
-        job_post = JobPost.objects.filter(pk=int(pk)).first()
+        job_post = JobPost.objects.filter(pk=pk).first()
         if not job_post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1686,7 +1688,7 @@ class JobPostViewSet(BaseViewSet):
                 payload["included"] = self._build_included([obj], include_rels, request, primary_serializer=ser)
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        items = list(Question.objects.filter(application__job_post_id=int(pk), created_by_id=request.user.id))
+        items = list(Question.objects.filter(application__job_post_id=pk, created_by_id=request.user.id))
         include_rels = self._parse_include(request)
         payload = {"data": [ser.to_resource(i) for i in items]}
         if include_rels:
@@ -1738,10 +1740,9 @@ class JobPostViewSet(BaseViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            try:
-                resume = Resume.objects.filter(pk=int(resume_id)).first()
-            except (TypeError, ValueError):
-                resume = None
+            # resume_id is the Resume NanoID PK (CC-77 #79) — not int-cast;
+            # a missing/garbage id simply yields no match -> "Invalid resume ID".
+            resume = Resume.objects.filter(pk=resume_id).first()
 
             if not resume:
                 return Response(
@@ -1926,7 +1927,7 @@ class JobApplicationViewSet(BaseViewSet):
         if response.status_code == 201:
             app_id = (response.data.get("data") or {}).get("id")
             if app_id:
-                app = JobApplication.objects.filter(pk=int(app_id)).first()
+                app = JobApplication.objects.filter(pk=app_id).first()
                 if app and not JobApplicationStatus.objects.filter(application_id=app.id).exists():
                     status_label = app.status or "Unvetted"
                     status_obj, _ = Status.objects.get_or_create(
@@ -1984,11 +1985,11 @@ class JobApplicationViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"], url_path="application-statuses")
     def application_statuses(self, request, pk=None):
-        app = JobApplication.objects.filter(pk=int(pk)).first()
+        app = JobApplication.objects.filter(pk=pk).first()
         if not app or app.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = JobApplicationStatusSerializer()
-        items = list(JobApplicationStatus.objects.filter(application_id=int(pk)))
+        items = list(JobApplicationStatus.objects.filter(application_id=pk))
         data = [ser.to_resource(i) for i in items]
 
         # Build included only when ?include=... is provided
@@ -2008,11 +2009,11 @@ class JobApplicationViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def questions(self, request, pk=None):
-        app = JobApplication.objects.filter(pk=int(pk)).first()
+        app = JobApplication.objects.filter(pk=pk).first()
         if not app or app.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = QuestionSerializer()
-        items = list(Question.objects.filter(application_id=int(pk)))
+        items = list(Question.objects.filter(application_id=pk))
         data = [ser.to_resource(i) for i in items]
 
         # Build included only when ?include=... is provided
@@ -2053,14 +2054,8 @@ class StatusViewSet(viewsets.ModelViewSet):
         application_id = app_rel_data.get("id")
 
         if application_id is not None:
-            try:
-                application_id = int(application_id)
-            except (TypeError, ValueError):
-                return Response(
-                    {"errors": [{"detail": "Invalid job_application id"}]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
+            # application_id is the JobApplication PK — a NanoID string
+            # (CC-79), not cast. A bad id falls through to the not-found check.
             application = JobApplication.objects.filter(pk=application_id).first()
             if not application:
                 return Response(
@@ -2153,13 +2148,8 @@ class JobApplicationStatusViewSet(BaseViewSet):
                 {"errors": [{"detail": "relationships.application is required"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            application_id = int(application_id)
-        except (TypeError, ValueError):
-            return Response(
-                {"errors": [{"detail": "Invalid application id"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # application_id is the JobApplication PK — a NanoID string (CC-79),
+        # not cast. A bad id falls through to the not-found check.
         application = JobApplication.objects.filter(pk=application_id).first()
         if not application:
             return Response(

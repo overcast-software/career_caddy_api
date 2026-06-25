@@ -37,7 +37,7 @@ class TestPublishableFilter(TestCase):
     def _publishable_ids(self):
         resp = self.client.get("/api/v1/job-posts/?filter[publishable]=true")
         self.assertEqual(resp.status_code, 200)
-        return {int(r["id"]) for r in resp.data["data"]}
+        return {r["id"] for r in resp.data["data"]}
 
     def test_includes_own_vetted_via_score(self):
         post = self._post()

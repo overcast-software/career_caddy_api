@@ -104,7 +104,7 @@ class ResumeViewSet(BaseViewSet):
         responses={200: _JSONAPI_ITEM, 404: OpenApiResponse(description="Not found")},
     )
     def retrieve(self, request, pk=None):
-        obj = self.model.objects.filter(pk=int(pk)).first()
+        obj = self.model.objects.filter(pk=pk).first()
         if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = self.get_serializer()
@@ -114,7 +114,7 @@ class ResumeViewSet(BaseViewSet):
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj or obj.user_id != request.user.id:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -642,7 +642,8 @@ class ResumeViewSet(BaseViewSet):
             company_id = item.get("company_id") or (company_rel.get("data") or {}).get(
                 "id"
             )
-            company_id = int(company_id) if company_id is not None else None
+            # company_id is the Company NanoID PK (CC-77 #79) — used as-is, not int-cast.
+            company_id = company_id or None
 
             # Helper to collect incoming description lines in order
             incoming_lines = []
@@ -890,7 +891,8 @@ class ResumeViewSet(BaseViewSet):
                     if isinstance(d, dict):
                         jp_id = d.get("id")
                 try:
-                    jp_id = int(jp_id) if jp_id is not None else None
+                    # jp_id is the JobPost PK — a NanoID string (CC-57), not int.
+                    jp_id = jp_id if jp_id is not None else None
                 except (TypeError, ValueError):
                     return Response(
                         {
@@ -940,7 +942,7 @@ class ResumeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["get"])
     def scores(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         # Resume + Score are both per-user. A request for another user's
@@ -962,7 +964,7 @@ class ResumeViewSet(BaseViewSet):
         permission_classes=[IsAuthenticated],
     )
     def cover_letters(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -974,7 +976,7 @@ class ResumeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["get"], url_path="job-applications")
     def applications(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         data = [
@@ -1002,7 +1004,7 @@ class ResumeViewSet(BaseViewSet):
     @action(detail=True, methods=["get", "post"])
     def summaries(self, request, pk=None):
         if request.method.lower() == "post":
-            obj = Resume.objects.filter(pk=int(pk)).first()  # obj is the Resume
+            obj = Resume.objects.filter(pk=pk).first()  # obj is the Resume
             if not obj:
                 return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1029,7 +1031,7 @@ class ResumeViewSet(BaseViewSet):
             job_post = None
             if job_post_id is not None:
                 try:
-                    job_post = JobPost.objects.filter(pk=int(job_post_id)).first()
+                    job_post = JobPost.objects.filter(pk=job_post_id).first()
                 except (TypeError, ValueError):
                     job_post = None
                 if not job_post:
@@ -1093,7 +1095,7 @@ class ResumeViewSet(BaseViewSet):
                 )
             return Response(payload, status=status.HTTP_201_CREATED)
 
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1127,7 +1129,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"], url_path=r"summaries/(?P<summary_id>\d+)")
     def summary(self, request, pk=None, summary_id=None):
-        resume = Resume.objects.filter(pk=int(pk)).first()
+        resume = Resume.objects.filter(pk=pk).first()
         if not resume:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         try:
@@ -1168,7 +1170,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def experiences(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = ExperienceSerializer()
@@ -1199,7 +1201,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def educations(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = EducationSerializer()
@@ -1219,7 +1221,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"])
     def skills(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         ser = SkillSerializer()
@@ -1270,7 +1272,7 @@ class ResumeViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["get"], url_path="export")
     def export(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1356,7 +1358,7 @@ class ResumeViewSet(BaseViewSet):
         Reorder experiences within a resume in a single transaction.
         Body: {"experience_ids": [3, 1, 2]}.
         """
-        resume = Resume.objects.filter(pk=int(pk)).first()
+        resume = Resume.objects.filter(pk=pk).first()
         if not resume:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         if not request.user.is_staff and resume.user_id != request.user.id:
@@ -1396,7 +1398,7 @@ class ResumeViewSet(BaseViewSet):
 
     @action(detail=True, methods=["post"], url_path="clone")
     def clone(self, request, pk=None):
-        obj = Resume.objects.filter(pk=int(pk)).first()
+        obj = Resume.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 

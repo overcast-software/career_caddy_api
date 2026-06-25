@@ -57,7 +57,7 @@ class TestScrapeHasScoreFilter(TestCase):
 
     def _ids(self, response):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        return {int(row["id"]) for row in response.json()["data"]}
+        return {row["id"] for row in response.json()["data"]}
 
     def test_no_filter_returns_all(self):
         ids = self._ids(self.client.get(URL))

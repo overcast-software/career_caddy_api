@@ -1,9 +1,13 @@
 from django.conf import settings
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 from django.db import models
 
 
-class CoverLetter(GetMixin, models.Model):
+class CoverLetter(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). One FK references cover_letter(id):
+    # job_application.cover_letter_id (SET_NULL, nullable).
     content = models.TextField(null=True, blank=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

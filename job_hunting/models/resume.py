@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.db import models
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 
 
 # Canonical section order — the historical SE-flavored sequence. Used as
@@ -30,7 +31,14 @@ SECTION_ORDER_DEFAULTS = {
 }
 
 
-class Resume(GetMixin, models.Model):
+class Resume(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). Nine FKs reference resume(id): six CASCADE join tables
+    # (resume_skill/resume_summaries/resume_certification/resume_education/
+    # resume_experience/resume_project, resume_skill carrying a
+    # unique_together(resume, skill)) plus score/cover_letter/job_application
+    # (all SET_NULL, nullable). score additionally carries two named
+    # composite UNIQUEs on resume_id rebuilt on the NanoID values.
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

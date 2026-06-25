@@ -69,7 +69,7 @@ class CoverLetterViewSet(BaseViewSet):
         return Response(payload)
 
     def retrieve(self, request, pk=None):
-        obj = CoverLetter.objects.filter(pk=int(pk)).first()
+        obj = CoverLetter.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -88,7 +88,7 @@ class CoverLetterViewSet(BaseViewSet):
         return Response(payload)
 
     def _upsert(self, request, pk, partial=False):
-        obj = CoverLetter.objects.filter(pk=int(pk)).first()
+        obj = CoverLetter.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -123,7 +123,7 @@ class CoverLetterViewSet(BaseViewSet):
         return Response({"data": ser.to_resource(obj)})
 
     def destroy(self, request, pk=None):
-        obj = CoverLetter.objects.filter(pk=int(pk)).first()
+        obj = CoverLetter.objects.filter(pk=pk).first()
         if not obj:
             return Response(status=204)
 
@@ -224,17 +224,11 @@ class CoverLetterViewSet(BaseViewSet):
                 or data.get("company-id")
             )
 
-        try:
-            resume_id = int(resume_id) if resume_id is not None else None
-            job_post_id = int(job_post_id) if job_post_id is not None else None
-            company_id = int(company_id) if company_id is not None else None
-        except (TypeError, ValueError):
-            return Response(
-                {"errors": [{"detail": "Invalid resume, job-post, or company ID"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        # id=0 means "no resume" → career-data fallback
-        if resume_id == 0:
+        # resume_id / company_id are NanoID PKs (CC-77 #79) and job_post_id a
+        # NanoID (CC-57) — all used as-is, never int-cast.
+        company_id = company_id or None
+        # absent / "0" means "no resume" → career-data fallback
+        if resume_id in (None, "", "0", 0):
             resume_id = None
 
         resume = Resume.get(resume_id) if resume_id is not None else None
@@ -369,7 +363,7 @@ class CoverLetterViewSet(BaseViewSet):
         permission_classes=[IsAuthenticated],
     )
     def export_docx(self, request, pk=None):
-        cl = self.model.get(int(pk))
+        cl = self.model.get(pk)
         if not cl:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
