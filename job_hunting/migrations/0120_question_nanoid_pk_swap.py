@@ -1,0 +1,190 @@
+"""CC-77 #79 — Question integer PK -> 10-char NanoID PK (true PK swap).
+
+Copies the dependent-FK mechanism proven on ``Skill`` in
+``0114_skill_nanoid_pk_swap``. One FK references ``question(id)``:
+
+    answer.question_id   (CASCADE, NOT NULL)
+
+The FK column is non-nullable, so it is repointed WITH ``SET NOT NULL``.
+No composite constraint/index rides on ``answer.question_id`` (Answer
+declares only ``Meta.ordering``), so only the implicit FK btree index is
+recreated (clean chosen name — Django does not track FK index names).
+
+Mechanism + reverse semantics: see ``0114``/``0116``.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import job_hunting.models.nanoid_pk
+from django.db import migrations, models
+
+logger = logging.getLogger(__name__)
+
+
+def backfill_nanoids(apps, schema_editor):
+    """Mint a unique NanoID per ``question`` row, then repoint the dependent
+    ``answer.question_id`` staging column."""
+    from job_hunting.models.nanoid_pk import generate_nanoid
+
+    with schema_editor.connection.cursor() as cur:
+        cur.execute("SELECT id FROM question ORDER BY id")
+        ids = [row[0] for row in cur.fetchall()]
+
+        used: set[str] = set()
+        for old_id in ids:
+            nid = generate_nanoid()
+            while nid in used:  # astronomically rare; keep it deterministic
+                nid = generate_nanoid()
+            used.add(nid)
+            cur.execute(
+                "UPDATE question SET new_id = %s WHERE id = %s", [nid, old_id]
+            )
+
+        cur.execute(
+            "UPDATE answer a SET new_question_id = q.new_id "
+            "FROM question q WHERE a.question_id = q.id"
+        )
+
+    logger.info("0120 nanoid backfill: minted %s question ids.", len(ids))
+
+
+ADD_STAGING_COLUMNS = """
+ALTER TABLE question ADD COLUMN new_id varchar(10);
+ALTER TABLE answer ADD COLUMN new_question_id varchar(10);
+"""
+
+DROP_STAGING_COLUMNS = """
+ALTER TABLE answer DROP COLUMN IF EXISTS new_question_id;
+ALTER TABLE question DROP COLUMN IF EXISTS new_id;
+"""
+
+SWAP_FORWARD = """
+-- 1. Staging PK is fully backfilled: enforce NOT NULL before promotion.
+ALTER TABLE question ALTER COLUMN new_id SET NOT NULL;
+
+-- 2. Drop the dependent FK answer.question_id -> question.id
+--    (catalog-resolved name; confrelid filter targets only this FK).
+DO $$
+DECLARE cname text;
+BEGIN
+    SELECT conname INTO cname
+      FROM pg_constraint
+     WHERE conrelid = 'answer'::regclass
+       AND contype  = 'f'
+       AND confrelid = 'question'::regclass;
+    IF cname IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE answer DROP CONSTRAINT %I', cname);
+    END IF;
+END $$;
+
+-- 3. Promote question's PK from the int id to the NanoID staging column.
+DO $$
+DECLARE cname text;
+BEGIN
+    SELECT conname INTO cname FROM pg_constraint
+     WHERE conrelid = 'question'::regclass AND contype = 'p';
+    EXECUTE format('ALTER TABLE question DROP CONSTRAINT %I', cname);
+END $$;
+ALTER TABLE question DROP COLUMN id;
+ALTER TABLE question RENAME COLUMN new_id TO id;
+ALTER TABLE question ADD CONSTRAINT question_pkey PRIMARY KEY (id);
+
+-- 4. Repoint the dependent FK column (non-nullable: SET NOT NULL).
+ALTER TABLE answer DROP COLUMN question_id;
+ALTER TABLE answer RENAME COLUMN new_question_id TO question_id;
+ALTER TABLE answer ALTER COLUMN question_id SET NOT NULL;
+
+-- 5. Recreate the FK (DEFERRABLE INITIALLY DEFERRED, matching Django) + index.
+ALTER TABLE answer
+    ADD CONSTRAINT answer_question_id_fk
+    FOREIGN KEY (question_id) REFERENCES question (id)
+    DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX answer_question_id_idx ON answer (question_id);
+"""
+
+SWAP_REVERSE = """
+-- Reverse a destructive PK swap: NanoID PK -> a FRESH integer PK.
+ALTER TABLE question ADD COLUMN old_int_id bigint;
+ALTER TABLE answer ADD COLUMN old_int_question_id bigint;
+
+WITH numbered AS (
+    SELECT id, row_number() OVER (ORDER BY id) AS rn FROM question
+)
+UPDATE question q SET old_int_id = n.rn FROM numbered n WHERE q.id = n.id;
+
+UPDATE answer a SET old_int_question_id = q.old_int_id
+  FROM question q WHERE a.question_id = q.id;
+
+DO $$
+DECLARE cname text;
+BEGIN
+    SELECT conname INTO cname
+      FROM pg_constraint
+     WHERE conrelid = 'answer'::regclass
+       AND contype  = 'f'
+       AND confrelid = 'question'::regclass;
+    IF cname IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE answer DROP CONSTRAINT %I', cname);
+    END IF;
+END $$;
+DROP INDEX IF EXISTS answer_question_id_idx;
+
+DO $$
+DECLARE cname text;
+BEGIN
+    SELECT conname INTO cname FROM pg_constraint
+     WHERE conrelid = 'question'::regclass AND contype = 'p';
+    EXECUTE format('ALTER TABLE question DROP CONSTRAINT %I', cname);
+END $$;
+ALTER TABLE question DROP COLUMN id;
+ALTER TABLE question RENAME COLUMN old_int_id TO id;
+ALTER TABLE question ALTER COLUMN id SET NOT NULL;
+ALTER TABLE question ADD CONSTRAINT question_pkey PRIMARY KEY (id);
+ALTER TABLE question ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY;
+SELECT setval(pg_get_serial_sequence('question', 'id'),
+              (SELECT COALESCE(max(id), 1) FROM question));
+
+ALTER TABLE answer DROP COLUMN question_id;
+ALTER TABLE answer RENAME COLUMN old_int_question_id TO question_id;
+ALTER TABLE answer ALTER COLUMN question_id SET NOT NULL;
+ALTER TABLE answer
+    ADD CONSTRAINT answer_question_id_fk
+    FOREIGN KEY (question_id) REFERENCES question (id)
+    DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX answer_question_id_idx ON answer (question_id);
+"""
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ("job_hunting", "0119_coverletter_nanoid_pk_swap"),
+    ]
+
+    operations = [
+        migrations.RunSQL(
+            sql=ADD_STAGING_COLUMNS,
+            reverse_sql=DROP_STAGING_COLUMNS,
+        ),
+        migrations.RunPython(backfill_nanoids, migrations.RunPython.noop),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(sql=SWAP_FORWARD, reverse_sql=SWAP_REVERSE),
+            ],
+            state_operations=[
+                migrations.AlterField(
+                    model_name="question",
+                    name="id",
+                    field=models.CharField(
+                        default=job_hunting.models.nanoid_pk.generate_nanoid,
+                        editable=False,
+                        max_length=10,
+                        primary_key=True,
+                        serialize=False,
+                    ),
+                ),
+            ],
+        ),
+    ]

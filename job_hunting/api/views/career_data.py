@@ -137,7 +137,7 @@ def generate_prompt(request):
         )
 
     try:
-        question_id = int(question_id)
+        # question_id is the Question PK — a NanoID string (CC-79), not cast.
         question = Question.objects.filter(pk=question_id).first()
         if not question:
             return Response(

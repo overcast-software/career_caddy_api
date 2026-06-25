@@ -1,9 +1,13 @@
 from django.conf import settings
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 from django.db import models
 
 
-class Question(GetMixin, models.Model):
+class Question(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). One FK references question(id):
+    # answer.question_id (CASCADE, NOT NULL).
     application = models.ForeignKey(
         "JobApplication",
         on_delete=models.SET_NULL,
