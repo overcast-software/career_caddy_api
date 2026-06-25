@@ -1,10 +1,16 @@
 from django.conf import settings
 from django.db import models
 from .base import GetMixin
+from .nanoid_pk import NanoIDModel
 from urllib.parse import urlparse
 
 
-class Scrape(GetMixin, models.Model):
+class Scrape(GetMixin, NanoIDModel):
+    # ``id`` is the 10-char NanoID string PK from NanoIDModel (CC-77 #79
+    # true PK swap). FKs referencing scrape(id): scrape_status.scrape_id
+    # (CASCADE, NOT NULL), the self-FK scrape.source_scrape_id (SET_NULL),
+    # and triggering_scrape_id on job_post_overwrite_decision /
+    # job_post_description_decision (both SET_NULL, nullable).
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,

@@ -49,7 +49,7 @@ def _set_scrape_status(scrape_id: int, status: str) -> None:
 
 
 def _log_scrape_status(
-    scrape_id: int,
+    scrape_id: str,
     status_label: str,
     note: str = None,
     graph_node: str = None,

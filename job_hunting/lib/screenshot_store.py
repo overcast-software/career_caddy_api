@@ -17,7 +17,7 @@ class ScreenshotStore:
     def __init__(self, base_dir: str):
         self.base_dir = Path(base_dir)
 
-    def list_for_scrape(self, scrape_id: int) -> list[dict]:
+    def list_for_scrape(self, scrape_id: str) -> list[dict]:
         """Return [{filename, size, taken_at}] for a scrape's screenshots.
 
         ``size`` is the file size in bytes; ``taken_at`` is the file's
@@ -39,14 +39,14 @@ class ScreenshotStore:
             out.append({"filename": f.name, "size": size, "taken_at": taken_at})
         return out
 
-    def read(self, scrape_id: int, filename: str) -> Path | None:
+    def read(self, scrape_id: str, filename: str) -> Path | None:
         """Return full path if file exists, None otherwise."""
         if ".." in filename or "/" in filename:
             return None
         path = self.base_dir / str(scrape_id) / filename
         return path if path.is_file() else None
 
-    def save(self, scrape_id: int, filename: str, file_obj) -> Path:
+    def save(self, scrape_id: str, filename: str, file_obj) -> Path:
         """Save an uploaded file to {base_dir}/{scrape_id}/{filename}."""
         if ".." in filename or "/" in filename:
             raise ValueError("Invalid filename")

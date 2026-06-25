@@ -233,7 +233,7 @@ class ScrapeViewSet(BaseViewSet):
 
     def _sync_associations(self, pk):
         """After an update, ensure company_id mirrors the job post's company."""
-        scrape = Scrape.objects.filter(pk=int(pk)).first()
+        scrape = Scrape.objects.filter(pk=pk).first()
         if not scrape:
             return
         if scrape.job_post_id and not scrape.company_id:
@@ -244,12 +244,12 @@ class ScrapeViewSet(BaseViewSet):
 
     def _maybe_trigger_extraction(self, pk, force: bool = False):
         from job_hunting.lib.scraper import _maybe_caddy_extract
-        scrape = Scrape.objects.filter(pk=int(pk)).first()
+        scrape = Scrape.objects.filter(pk=pk).first()
         if scrape:
             _maybe_caddy_extract(scrape, force=force)
 
     def _check_scrape_ownership(self, request, pk):
-        obj = Scrape.objects.filter(pk=int(pk)).first()
+        obj = Scrape.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         if not request.user.is_staff:
@@ -274,7 +274,7 @@ class ScrapeViewSet(BaseViewSet):
             return denied
         # Capture status before update for change detection
         old_status = None
-        obj = Scrape.objects.filter(pk=int(pk)).first()
+        obj = Scrape.objects.filter(pk=pk).first()
         if obj:
             old_status = obj.status
         response = super().partial_update(request, pk=pk)
@@ -289,21 +289,21 @@ class ScrapeViewSet(BaseViewSet):
                 attrs = node.get("attributes") or {}
                 note = attrs.get("note")
                 from job_hunting.lib.scraper import _log_scrape_status
-                _log_scrape_status(int(pk), obj.status, note=note)
+                _log_scrape_status(pk, obj.status, note=note)
         return response
 
     def _reparse_force(self, pk) -> bool:
         """Force re-parse when a scrape that's already linked to a JobPost
         transitions back through the extraction pipeline (poller finishing
         a user-triggered re-scrape)."""
-        scrape = Scrape.objects.filter(pk=int(pk)).first()
+        scrape = Scrape.objects.filter(pk=pk).first()
         return bool(scrape and scrape.job_post_id and scrape.status == "completed")
 
     def destroy(self, request, pk=None):
         denied = self._check_scrape_ownership(request, pk)
         if denied:
             return denied
-        Scrape.objects.filter(pk=int(pk)).delete()
+        Scrape.objects.filter(pk=pk).delete()
         return Response(status=204)
 
     @extend_schema(
@@ -313,7 +313,7 @@ class ScrapeViewSet(BaseViewSet):
     )
     def retrieve(self, request, pk=None):
         """Get the current status of a scrape"""
-        obj = Scrape.objects.filter(pk=int(pk)).first()
+        obj = Scrape.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         if obj.created_by_id and obj.created_by_id != request.user.id:
@@ -485,7 +485,7 @@ class ScrapeViewSet(BaseViewSet):
         jp_rel = rels.get("job-post") or rels.get("job_post")
         linked_jp = None
         if jp_rel and isinstance(jp_rel.get("data"), dict):
-            linked_jp = JobPost.objects.filter(pk=int(jp_rel["data"]["id"])).first()
+            linked_jp = JobPost.objects.filter(pk=jp_rel["data"]["id"]).first()
 
         # Dedupe gate: if no relationship was supplied, refuse to mint a
         # redundant scrape when the URL already maps to a JobPost.
@@ -618,7 +618,7 @@ class ScrapeViewSet(BaseViewSet):
         The synchronous browser-MCP dispatch path is gone; redo is now
         just a status flip. Returns 202 (poller will work on it).
         """
-        obj = Scrape.objects.filter(pk=int(pk)).first()
+        obj = Scrape.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -650,7 +650,7 @@ class ScrapeViewSet(BaseViewSet):
     @action(detail=True, methods=["post"])
     def parse(self, request, pk=None):
         """Kick off parsing in a background thread. Returns 200 immediately."""
-        obj = Scrape.objects.filter(pk=int(pk)).first()
+        obj = Scrape.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
@@ -1544,7 +1544,7 @@ class ScrapeViewSet(BaseViewSet):
                 )
             from job_hunting.lib.screenshot_store import ScreenshotStore
             store = ScreenshotStore(settings.SCREENSHOT_DIR)
-            store.save(int(pk), uploaded.name, uploaded)
+            store.save(pk, uploaded.name, uploaded)
             return Response({"data": {"filename": uploaded.name}}, status=status.HTTP_201_CREATED)
 
         if not request.user.is_staff:
@@ -1554,7 +1554,7 @@ class ScrapeViewSet(BaseViewSet):
             )
         from job_hunting.lib.screenshot_store import ScreenshotStore
         store = ScreenshotStore(settings.SCREENSHOT_DIR)
-        files = store.list_for_scrape(int(pk))
+        files = store.list_for_scrape(pk)
         # JSON:API resource objects. There is no DB row backing a
         # screenshot — the filename is unique within a scrape's dir,
         # so we use a composite "<scrape_id>/<filename>" id to keep
@@ -1599,7 +1599,7 @@ class ScrapeViewSet(BaseViewSet):
         from django.http import FileResponse
         from job_hunting.lib.screenshot_store import ScreenshotStore
         store = ScreenshotStore(settings.SCREENSHOT_DIR)
-        path = store.read(int(pk), filename)
+        path = store.read(pk, filename)
         if not path:
             return Response(
                 {"errors": [{"detail": "Screenshot not found"}]},
@@ -1618,7 +1618,7 @@ class ScrapeViewSet(BaseViewSet):
         if not request.user.is_staff and scrape.created_by_id != request.user.id:
             return Response({"errors": [{"detail": "Forbidden"}]}, status=403)
         from job_hunting.models.scrape_status import ScrapeStatus
-        qs = ScrapeStatus.objects.filter(scrape_id=int(pk)).select_related("status").order_by("logged_at")
+        qs = ScrapeStatus.objects.filter(scrape_id=pk).select_related("status").order_by("logged_at")
         data = []
         for ss in qs:
             data.append({
