@@ -1153,3 +1153,177 @@ def sharpen_scrape_profile(
         "hostname": profile.hostname,
         "status": "requested",
     }
+
+
+# ---------------------------------------------------------------------------
+# Unclaimed-hold staleness observability (PACA CC-74)
+# ---------------------------------------------------------------------------
+# Companion to sweep_orphaned_attended_holds (CC #32). That sweep owns the
+# attended=True partition's TTL auto-demote/fail action. THIS sweep is pure
+# read-only observability across BOTH claim partitions — the primary signal
+# for a dead or absent *default* (attended=False) runner.
+#
+# Operator symptom that motivated it ("I didn't see the poller grab it"):
+# four scrapes sat in status='hold', attended=False, claimed_at IS NULL,
+# never claimed because no scrape runner was polling prod. claim_next is
+# correct; the gap is that an absent runner is INVISIBLE — unclaimed holds
+# rot silently. This sweep turns that silence into a queryable WARNING per
+# partition (scrape.holds.stale count=N oldest_age_min=M attended=<bool>),
+# and scrape_hold_queue_health backs a future admin badge
+# (GET /api/v1/admin/scrape-queue-health/).
+#
+# Age signal: identical to _orphaned_attended_holds — Scrape has no
+# created_at and an unclaimed hold has claimed_at IS NULL, so the age proxy
+# is Max(scrape_statuses__created_at): when the row most recently entered
+# hold. created_at is auto_now_add (always populated); logged_at is
+# nullable, so created_at is the reliable column. A redo (failed -> re-held)
+# mints a fresh hold ScrapeStatus, so the Max tracks the most-recent hold,
+# not the original — the correct clock for "how long has this been waiting
+# unclaimed". A row with no ScrapeStatus annotates held_at=NULL: counted in
+# *_total but never *_stale (NULL < cutoff is unknown -> excluded), the
+# conservative choice.
+#
+# Read-only: no mutation, no claim-path interaction. Safe to run as often as
+# the schedule fires. Schedule: registered as a django-q2 Schedule ('I',
+# minutes=5) by migration 0113.
+
+_DEFAULT_HOLD_STALE_MINUTES = 30
+
+
+def _unclaimed_holds():
+    """Queryset of every status='hold' row with no runner claim, annotated
+    with ``held_at`` (the most-recent hold ScrapeStatus.created_at — the age
+    proxy, since Scrape has no created_at and an unclaimed hold has
+    claimed_at IS NULL). Spans BOTH attended partitions."""
+    from django.db.models import Max
+
+    from job_hunting.models import Scrape
+
+    return Scrape.objects.filter(
+        status="hold", claimed_at__isnull=True
+    ).annotate(held_at=Max("scrape_statuses__created_at"))
+
+
+def scrape_hold_queue_health(
+    stale_minutes: int = _DEFAULT_HOLD_STALE_MINUTES,
+) -> dict:
+    """Read-only snapshot of the unclaimed-hold queue, partitioned by
+    ``attended``.
+
+    Backs both the observability sweep (``sweep_stale_unclaimed_holds``)
+    and the admin badge endpoint (GET /api/v1/admin/scrape-queue-health/).
+
+    ``oldest_*_age_seconds`` is the age of the OLDEST unclaimed hold
+    (regardless of the stale threshold) so the badge can show "oldest hold
+    is N minutes old"; ``*_stale`` counts only those older than
+    ``stale_minutes``.
+
+    Returns::
+
+        {
+          "hold_unclaimed_total": int,
+          "hold_unclaimed_stale": int,
+          "oldest_hold_age_seconds": int | None,
+          "stale_minutes": int,
+          "attended_breakdown": {
+            "false": {"total": int, "stale": int,
+                      "oldest_age_seconds": int | None},
+            "true":  {"total": int, "stale": int,
+                      "oldest_age_seconds": int | None},
+          },
+        }
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    now = timezone.now()
+    cutoff = now - timedelta(minutes=stale_minutes)
+
+    rows = list(_unclaimed_holds().values_list("attended", "held_at"))
+
+    buckets = {
+        False: {"total": 0, "stale": 0, "oldest_held_at": None},
+        True: {"total": 0, "stale": 0, "oldest_held_at": None},
+    }
+    overall_stale = 0
+    overall_oldest = None
+
+    for attended, held_at in rows:
+        bucket = buckets[bool(attended)]
+        bucket["total"] += 1
+        if held_at is None:
+            # No audit row to date the orphan — can't prove staleness.
+            continue
+        prior = bucket["oldest_held_at"]
+        if prior is None or held_at < prior:
+            bucket["oldest_held_at"] = held_at
+        if overall_oldest is None or held_at < overall_oldest:
+            overall_oldest = held_at
+        if held_at < cutoff:
+            bucket["stale"] += 1
+            overall_stale += 1
+
+    def _age_seconds(ts):
+        return int((now - ts).total_seconds()) if ts is not None else None
+
+    false_b = buckets[False]
+    true_b = buckets[True]
+    return {
+        "hold_unclaimed_total": len(rows),
+        "hold_unclaimed_stale": overall_stale,
+        "oldest_hold_age_seconds": _age_seconds(overall_oldest),
+        "stale_minutes": stale_minutes,
+        "attended_breakdown": {
+            "false": {
+                "total": false_b["total"],
+                "stale": false_b["stale"],
+                "oldest_age_seconds": _age_seconds(false_b["oldest_held_at"]),
+            },
+            "true": {
+                "total": true_b["total"],
+                "stale": true_b["stale"],
+                "oldest_age_seconds": _age_seconds(true_b["oldest_held_at"]),
+            },
+        },
+    }
+
+
+def sweep_stale_unclaimed_holds(
+    threshold_minutes: int = _DEFAULT_HOLD_STALE_MINUTES,
+) -> dict:
+    """Warn (logfire-visible) when unclaimed holds rot — a dead/absent runner.
+
+    PACA CC-74. Read-only observability fallback for the claim queue. The
+    strict claim partition means a status='hold', claimed_at IS NULL row is
+    only ever processed while a runner is polling its partition; if none
+    runs, the row sits in `hold` invisibly. This sweep emits one structured
+    WARNING per non-empty stale partition so an operator (or a logfire
+    alert) notices the runner is down::
+
+        scrape.holds.stale count=4 oldest_age_min=85 attended=False
+
+    Distinct from ``sweep_orphaned_attended_holds``: that sweep owns the
+    attended=True partition's TTL auto-demote/fail mutation. This one never
+    mutates and spans both partitions — the primary signal is the
+    attended=False (default-runner-down) case.
+
+    ``threshold_minutes`` mirrors ``_DEFAULT_LEASE_MINUTES`` — a module
+    constant overridable via the schedule arg. Returns the
+    ``scrape_hold_queue_health`` snapshot for the django_q.Task result
+    column.
+    """
+    health = scrape_hold_queue_health(stale_minutes=threshold_minutes)
+
+    for attended_flag, key in ((False, "false"), (True, "true")):
+        bucket = health["attended_breakdown"][key]
+        if bucket["stale"]:
+            oldest_age_min = (bucket["oldest_age_seconds"] or 0) // 60
+            logger.warning(
+                "scrape.holds.stale count=%s oldest_age_min=%s attended=%s",
+                bucket["stale"],
+                oldest_age_min,
+                attended_flag,
+            )
+
+    return health

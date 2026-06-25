@@ -107,6 +107,55 @@ def agent_models(request):
     })
 
 
+@extend_schema(
+    tags=["Admin"],
+    summary=(
+        "Unclaimed scrape-hold queue health — staleness signal for a "
+        "dead/absent runner"
+    ),
+    responses={
+        200: OpenApiResponse(
+            description=(
+                "Hold-queue health snapshot: hold_unclaimed_total, "
+                "hold_unclaimed_stale, oldest_hold_age_seconds, "
+                "attended_breakdown"
+            )
+        )
+    },
+)
+@api_view(["GET"])
+@permission_classes([IsAdminUser])
+def scrape_queue_health(request):
+    """Surface the unclaimed-hold count + oldest age for a future admin badge.
+
+    Companion read-surface to the ``sweep_stale_unclaimed_holds`` task
+    (PACA CC-74). When no scrape runner is polling a partition, its
+    status='hold' rows never get claimed and rot invisibly; this endpoint
+    lets the admin UI badge that condition.
+
+    Staleness threshold defaults to the sweep's module constant
+    (``_DEFAULT_HOLD_STALE_MINUTES``, 30 min); override with
+    ``?stale_minutes=N``. Read-only; staff-gated like the other
+    ``/api/v1/admin/`` surfaces.
+    """
+    from job_hunting.lib.tasks import (
+        _DEFAULT_HOLD_STALE_MINUTES,
+        scrape_hold_queue_health,
+    )
+
+    raw = request.query_params.get("stale_minutes")
+    try:
+        stale_minutes = (
+            int(raw) if raw is not None else _DEFAULT_HOLD_STALE_MINUTES
+        )
+    except (TypeError, ValueError):
+        stale_minutes = _DEFAULT_HOLD_STALE_MINUTES
+    if stale_minutes < 0:
+        stale_minutes = _DEFAULT_HOLD_STALE_MINUTES
+
+    return Response({"data": scrape_hold_queue_health(stale_minutes=stale_minutes)})
+
+
 class ApiKeyViewSet(BaseViewSet):
     model = ApiKey
     serializer_class = ApiKeySerializer
