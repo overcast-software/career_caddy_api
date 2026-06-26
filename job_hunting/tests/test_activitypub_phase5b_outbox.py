@@ -142,8 +142,12 @@ class TestOutboxWithPosts(TestCase):
             note["id"], f"{TEST_ORIGIN}/job-posts/{self.public_post.id}"
         )
         self.assertEqual(note["to"], [AS2_PUBLIC])
-        # Plain-text description should be wrapped in <p>.
-        self.assertEqual(note["content"], "<p>A great role</p>")
+        # BACK-97: the Note body is the lean line-composer (title header +
+        # real-description hook + link + hashtags), not the bare
+        # ``<p>{description}</p>`` echo. No AS2 ``summary`` (CW trap).
+        self.assertIn("🟢 Senior Engineer", note["content"])
+        self.assertIn("A great role", note["content"])
+        self.assertNotIn("summary", note)
         self.assertEqual(note["url"], self.public_post.canonical_link or self.public_post.link)
 
     def test_activity_id_is_deterministic_across_requests(self):
@@ -157,15 +161,18 @@ class TestOutboxWithPosts(TestCase):
             second["orderedItems"][0]["id"],
         )
 
-    def test_note_content_passthrough_when_already_html(self):
-        # HTML descriptions are emitted as-is — peers sanitise on display.
+    def test_html_description_is_tag_stripped_in_hook(self):
+        # BACK-97: the hook is plain text — embedded markup in the
+        # description is stripped (and the composed line escaped) so a
+        # JD's raw HTML can't break the Note envelope. The readable text
+        # survives; the raw tags do not.
         self.public_post.description = "<p>Pre-rendered <strong>HTML</strong></p>"
         self.public_post.save()
         response = self.client.get("/actors/dough/outbox?page=1")
         note = response.json()["orderedItems"][0]["object"]
-        self.assertEqual(
-            note["content"], "<p>Pre-rendered <strong>HTML</strong></p>"
-        )
+        self.assertIn("Pre-rendered", note["content"])
+        self.assertIn("HTML", note["content"])
+        self.assertNotIn("<strong>", note["content"])
 
 
 @override_settings(INSTANCE_ORIGIN=TEST_ORIGIN, ACTIVITYPUB_OUTBOX_PAGE_SIZE=2)

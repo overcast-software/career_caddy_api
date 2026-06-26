@@ -29,12 +29,15 @@ from django.db.models.signals import post_delete, post_save, pre_delete
 from django.dispatch import receiver
 from django.utils import timezone
 
-from job_hunting.lib.as_object import AS2_PUBLIC
+from job_hunting.lib.as_object import AS2_PUBLIC, user_opted_into_rich
 from job_hunting.lib.federation_dispatch import (
     enqueue_jobpost_activity,
     enqueue_jobpost_activity_for_company,
 )
+from job_hunting.models.job_application import JobApplication
+from job_hunting.models.job_application_status import JobApplicationStatus
 from job_hunting.models.job_post import JobPost
+from job_hunting.models.score import Score
 
 
 log = logging.getLogger(__name__)
@@ -303,3 +306,80 @@ from django.db.models.signals import post_init  # noqa: E402
 def snapshot_on_load(sender, instance, **kwargs):
     """Capture audience baseline whenever a JobPost is instantiated."""
     _snapshot_jobpost(instance)
+
+
+# ---------------------------------------------------------------------------
+# BACK-99 (Task C) — fire an Update when the RICH data changes.
+#
+# Publishing happens at INGEST (`Profile.federate_posts` → audience=Public
+# at create), so the first Create(Note) is always thin — verdict / score /
+# applied don't exist yet. The JobPost-field `_content_changed` gate never
+# fires for those (they live on Score / JobApplication / JobApplicationStatus,
+# not on JobPost), so without this the rich body would never reach the
+# fediverse. We re-emit an Update when the OWNER's own triage / score /
+# application changes on a PUBLIC, RICH-opted-in post.
+#
+# Gates (all must hold, else no emit):
+#   - the changed record belongs to the post's OWNER (created_by) — a
+#     different user's score on the same shared post doesn't change what
+#     the owner-attributed Note renders;
+#   - the post is PUBLIC (audience contains AS2_PUBLIC);
+#   - the owner opted into the RICH format — lean Notes don't carry this
+#     data, so there is nothing to refresh.
+
+
+def _maybe_enqueue_personal_update(job_post_id, actor_user_id) -> None:
+    """Enqueue an Update iff an owner's rich annotation changed on a public,
+    rich-opted-in post. Cheap-gates before the enqueue so the >99% of
+    score/application writes that aren't public-rich-owner skip the work."""
+    if not job_post_id or not actor_user_id:
+        return
+    # Load the FULL row — a ``.only()`` projection would defer the
+    # FEDERATION_UPDATEABLE_FIELDS that `snapshot_on_load` (post_init)
+    # reads, and accessing a deferred field there cascades
+    # refresh_from_db → re-instantiate → post_init forever.
+    jp = JobPost.objects.filter(pk=job_post_id).first()
+    if jp is None:
+        return
+    # Non-owner change → the owner-attributed Note is unaffected → no emit.
+    if jp.created_by_id != actor_user_id:
+        return
+    if not _is_public(jp.audience):
+        return
+    # Lean posts don't carry verdict/score/applied → nothing to refresh.
+    if not user_opted_into_rich(actor_user_id):
+        return
+    _enqueue(job_post_id, "update", edit_marker=timezone.now())
+
+
+@receiver(post_save, sender=Score)
+def fanout_on_score_change(sender, instance, **kwargs):
+    """A score write may change the rendered ``Strong match (N)`` segment."""
+    _maybe_enqueue_personal_update(instance.job_post_id, instance.user_id)
+
+
+@receiver(post_save, sender=JobApplication)
+def fanout_on_application_change(sender, instance, **kwargs):
+    """An application write only changes the rendered Note when it flips the
+    ``applied`` segment — gate on ``applied_at`` so the empty triage-created
+    row (applied_at NULL) doesn't spuriously re-emit."""
+    if instance.applied_at is None:
+        return
+    _maybe_enqueue_personal_update(instance.job_post_id, instance.user_id)
+
+
+@receiver(post_save, sender=JobApplicationStatus)
+def fanout_on_application_status_change(sender, instance, **kwargs):
+    """A triage status write may change the rendered verdict segment.
+
+    The owner + post are resolved off the parent JobApplication (one
+    lookup); the per-post gates in ``_maybe_enqueue_personal_update`` do
+    the rest."""
+    app = (
+        JobApplication.objects.filter(pk=instance.application_id)
+        .values("job_post_id", "user_id")
+        .first()
+    )
+    if not app:
+        return
+    _maybe_enqueue_personal_update(app["job_post_id"], app["user_id"])

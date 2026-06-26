@@ -36,8 +36,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from job_hunting.lib.as_object import (
+    _actor_rich_capable,
     build_create_activity_for_jobpost,
     build_note_object_for_jobpost,
+    resolve_personal_annotations_batch,
 )
 from job_hunting.lib import federation_signing
 from job_hunting.lib import federation_ingest
@@ -406,7 +408,10 @@ def actor_outbox(request, username: str):
 
     collection_id = f"{_actor_uri(username)}/outbox"
     page_size = getattr(settings, "ACTIVITYPUB_OUTBOX_PAGE_SIZE", 20)
-    queryset = _outbox_jobpost_queryset(actor)
+    # select_related the owner FK + company so the per-Note builder never
+    # lazy-loads them per row (BACK-100): the page is rendered with a
+    # bounded query count regardless of size.
+    queryset = _outbox_jobpost_queryset(actor).select_related("company")
     total = queryset.count()
     last_page = _outbox_page_count(total, page_size)
 
@@ -444,9 +449,26 @@ def actor_outbox(request, username: str):
         )
 
     offset = (page - 1) * page_size
+    page_posts = list(queryset[offset : offset + page_size])
+    # BACK-100: resolve the owner's verdict/score/applied for the whole
+    # page in a fixed number of queries (instead of N+1 per Note), then
+    # feed the prefetched annotations into each builder so a peer crawling
+    # the outbox sees the SAME rich body the delivered Create/Update
+    # carried. Lean actors (not rich-opted-in) skip the resolve entirely.
+    rich = _actor_rich_capable(actor)
+    annotation_map = (
+        resolve_personal_annotations_batch(page_posts, actor.user_id)
+        if rich
+        else {}
+    )
     items = [
-        build_create_activity_for_jobpost(job_post, actor)
-        for job_post in queryset[offset : offset + page_size]
+        build_create_activity_for_jobpost(
+            job_post,
+            actor,
+            rich=rich,
+            annotations=annotation_map.get(job_post.pk),
+        )
+        for job_post in page_posts
     ]
 
     body = {
