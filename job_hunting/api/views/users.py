@@ -650,7 +650,11 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        scores = list(Score.objects.filter(user_id=user.id))
+        # CC-91: optimize so /users/<id>/scores/ doesn't N+1 on the per-row
+        # job_post/resume/company traversal in ScoreSerializer.
+        scores = list(
+            ScoreSerializer.optimize_queryset(Score.objects.filter(user_id=user.id))
+        )
         data = [ScoreSerializer().to_resource(s) for s in scores]
         return Response({"data": data})
 
@@ -692,7 +696,13 @@ class DjangoUserViewSet(viewsets.ViewSet):
         except (User.DoesNotExist, ValueError):
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
-        applications = list(JobApplication.objects.filter(user_id=user.id))
+        # CC-91: optimize so /users/<id>/job-applications/ doesn't N+1 on the
+        # per-row FK + application-statuses traversal.
+        applications = list(
+            JobApplicationSerializer.optimize_queryset(
+                JobApplication.objects.filter(user_id=user.id)
+            )
+        )
         data = [JobApplicationSerializer().to_resource(a) for a in applications]
         return Response({"data": data})
 

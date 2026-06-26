@@ -113,6 +113,26 @@ class BaseSerializer:
     # List of relationship names whose data linkage arrays should be
     # auto-populated in to_resource() (for Ember Data sideload resolution).
     linked_relationships: List[str] = []
+    # Query-optimization hints for *list* serialization (CC-91). Serializing
+    # N rows calls to_resource() per row; the relationship traversal there
+    # lazy-loads each to-one FK and each linked to-many per row -> a per-row
+    # N+1. Declaring these lets a view fetch the whole page in a bounded
+    # number of queries via optimize_queryset(). Empty = no-op (serializers
+    # that don't opt in are unaffected).
+    list_select_related: tuple = ()
+    list_prefetch_related: tuple = ()
+
+    @classmethod
+    def optimize_queryset(cls, qs):
+        """Apply this serializer's declared select_related/prefetch_related so
+        a list of these resources serializes in O(1) queries w.r.t. row count
+        instead of the per-row N+1 in to_resource()/_build_included(). A no-op
+        when neither hint is declared. Callable on the class or an instance."""
+        if cls.list_select_related:
+            qs = qs.select_related(*cls.list_select_related)
+        if cls.list_prefetch_related:
+            qs = qs.prefetch_related(*cls.list_prefetch_related)
+        return qs
 
     def set_parent_context(self, parent_type: str, parent_id: int, rel_name: str):
         self._parent_context = {
@@ -211,14 +231,6 @@ class BaseSerializer:
                 rel_type = cfg["type"]
                 uselist = cfg.get("uselist", True)
 
-                # Safely get target, catching DoesNotExist errors
-                target = None
-                try:
-                    target = getattr(obj, rel_attr, None)
-                except Exception:
-                    # Relationship doesn't exist or target is missing - skip it
-                    target = None
-
                 if uselist:
                     # Map relationship name to URL segment for special cases
                     rel_segment = rel_name
@@ -244,17 +256,24 @@ class BaseSerializer:
                             pass
                     rel_out[rel_name] = rel_payload
                 else:
-                    # Determine target_id with FK fallback
+                    # Determine target_id, preferring the declared FK column so
+                    # we never trigger a per-row lazy load of the related object
+                    # (CC-91 N+1). The emitted linkage is {type, id} and the FK
+                    # value IS the related row's PK, so the response is identical
+                    # whether or not we materialize the object. Only fall back to
+                    # loading obj.<attr> when no FK is declared (e.g. a property-
+                    # backed relationship like Score.company).
                     target_id = None
-                    if target is not None and getattr(target, "id", None) is not None:
-                        target_id = target.id
-                    else:
-                        # FK fallback: check if we have a foreign key field for this relationship
-                        fk_field = self.relationship_fks.get(rel_name)
-                        if fk_field:
-                            fk_value = getattr(obj, fk_field, None)
-                            if fk_value is not None:
-                                target_id = fk_value
+                    fk_field = self.relationship_fks.get(rel_name)
+                    if fk_field:
+                        target_id = getattr(obj, fk_field, None)
+                    if target_id is None:
+                        try:
+                            target = getattr(obj, rel_attr, None)
+                        except Exception:
+                            target = None
+                        if target is not None and getattr(target, "id", None) is not None:
+                            target_id = target.id
 
                     data = (
                         {"type": rel_type, "id": str(target_id)}
@@ -529,11 +548,23 @@ class DjangoUserSerializer:
         if rel_name == "resumes":
             return "resume", list(Resume.objects.filter(user_id=obj.id))
         elif rel_name == "scores":
-            return "score", list(Score.objects.filter(user_id=obj.id))
+            # CC-91: optimize so `users/<id>?include=scores` doesn't N+1 on the
+            # per-row job_post/resume/company traversal in ScoreSerializer.
+            return "score", list(
+                ScoreSerializer.optimize_queryset(
+                    Score.objects.filter(user_id=obj.id)
+                )
+            )
         elif rel_name == "cover-letters":
             return "cover-letter", list(CoverLetter.objects.filter(user_id=obj.id))
         elif rel_name == "job-applications":
-            return "job-application", list(JobApplication.objects.filter(user_id=obj.id))
+            # CC-91: optimize so `users/<id>?include=job-applications` doesn't
+            # N+1 on the per-row FK + application-statuses traversal.
+            return "job-application", list(
+                JobApplicationSerializer.optimize_queryset(
+                    JobApplication.objects.filter(user_id=obj.id)
+                )
+            )
         elif rel_name == "summaries":
             return "summary", list(Summary.objects.filter(user_id=obj.id))
         else:
@@ -729,6 +760,11 @@ class ScoreSerializer(BaseSerializer):
         "user": {"attr": "user", "type": "user", "uselist": False},
         "company": {"attr": "company", "type": "company", "uselist": False},
     }
+    # CC-91: `company` is a @property (self.job_post.company), not an FK, so it
+    # has no relationship_fks entry — select_related("job_post__company") pulls
+    # the chain so the property is cache-resolved instead of issuing 2 queries
+    # per row. `user` is auth.User (int PK); resume/job_post are NanoID PKs.
+    list_select_related = ("job_post", "job_post__company", "resume", "user")
     relationship_fks = {
         "resume": "resume_id",
         "job-post": "job_post_id",
@@ -1484,6 +1520,12 @@ class JobApplicationSerializer(BaseSerializer):
     # the frontend must also `?include=application-statuses` so the sideload
     # actually ships the records — done in routes/job-applications/show.js.
     linked_relationships = ["application-statuses"]
+    # CC-91: pull the to-one FKs in the main query and the application-statuses
+    # (+ their status) in one prefetch so a list of applications serializes in
+    # O(1) queries instead of ~6/row. `user` is auth.User (still int PK); the
+    # rest are NanoID PKs — select_related works on both.
+    list_select_related = ("user", "job_post", "company", "resume", "cover_letter")
+    list_prefetch_related = ("application_statuses__status",)
     relationship_fks = {
         "user": "user_id",
         "users": "user_id",
