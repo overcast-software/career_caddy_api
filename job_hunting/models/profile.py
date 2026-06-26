@@ -39,6 +39,13 @@ class Profile(GetMixin, models.Model):
     # (`audience=[AS2_PUBLIC]`) via `JobPost.audience_for_user`. There is no
     # per-post publish button — visibility follows this single setting.
     federate_posts = models.BooleanField(default=False)
+    # BACK-98 (Task B): rich-vs-lean federated Note format. Orthogonal to
+    # `federate_posts` (publish y/n). Default OFF = LEAN — anyone who
+    # federates "just for visibility" gets the lean format. Opting in
+    # (`@dough`) selects the rich/show-off format that adds the
+    # verdict/score/applied line to the AP Note. Read by the content
+    # builder (`lib/as_object`) via the actor's owning user.
+    federate_rich = models.BooleanField(default=False)
 
     class Meta:
         db_table = "profile"

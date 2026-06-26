@@ -482,6 +482,23 @@ INSTANCE_ORIGIN = os.environ.get("INSTANCE_ORIGIN", "http://localhost:8000")
 # starts populating real history.
 ACTIVITYPUB_OUTBOX_PAGE_SIZE = 20
 
+# BACK-102 — instance publish-UI capability (self-host seam). Governs
+# whether the frontend renders the per-post publish-to-fediverse button:
+#   off           — never show it (the public-safe baseline for self-hosters)
+#   operator_only — show it to staff only (the frontend gates on is_staff)
+#   all_users     — show it to every authenticated user
+# Surfaced read-only on /api/v1/healthcheck/ as `federation_publish_ui` so
+# the SPA can gate the button without a code change. Doug's instance runs
+# `operator_only` ("someone else who spins this up may want publish ... but
+# my users do not"); a self-hoster overrides via the env var. Invalid
+# values fall back to the safe `off`.
+_FEDERATION_PUBLISH_UI_CHOICES = ("off", "operator_only", "all_users")
+FEDERATION_PUBLISH_UI = os.environ.get(
+    "FEDERATION_PUBLISH_UI", "operator_only"
+)
+if FEDERATION_PUBLISH_UI not in _FEDERATION_PUBLISH_UI_CHOICES:
+    FEDERATION_PUBLISH_UI = "off"
+
 # ---------------------------------------------------------------------------
 # ActivityPub Phase 5c — inbox + Follow + HTTP Signatures.
 #

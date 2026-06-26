@@ -418,6 +418,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
                 prof.auto_score = bool(profile_fields["auto_score"])
             if "federate_posts" in profile_fields:
                 prof.federate_posts = bool(profile_fields["federate_posts"])
+            if "federate_rich" in profile_fields:
+                prof.federate_rich = bool(profile_fields["federate_rich"])
             prof.save()
 
         # Send welcome email (non-blocking — don't fail registration on email error)
@@ -489,7 +491,7 @@ class DjangoUserViewSet(viewsets.ViewSet):
 
         # Extract profile fields before user updates
         profile_fields = {}
-        for pf in ("phone", "linkedin", "github", "address", "links", "onboarding", "auto_score", "federate_posts"):
+        for pf in ("phone", "linkedin", "github", "address", "links", "onboarding", "auto_score", "federate_posts", "federate_rich"):
             if pf in attrs:
                 profile_fields[pf] = attrs.pop(pf)
 
@@ -563,6 +565,8 @@ class DjangoUserViewSet(viewsets.ViewSet):
                 prof.auto_score = bool(profile_fields["auto_score"])
             if "federate_posts" in profile_fields:
                 prof.federate_posts = bool(profile_fields["federate_posts"])
+            if "federate_rich" in profile_fields:
+                prof.federate_rich = bool(profile_fields["federate_rich"])
             prof.save()
 
         return Response({"data": ser.to_resource(user)})

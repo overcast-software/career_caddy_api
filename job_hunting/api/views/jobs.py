@@ -104,6 +104,20 @@ def _attach_active_application_status(job_posts, user_id):
         jp._active_reason_note = note_map.get(jp.id)
 
 
+def _attach_published_state(job_posts, user):
+    """Pre-attach `_published_for_owner` (bool) on each post the caller OWNS
+    — derived from `audience` containing AS2_PUBLIC. For non-owned posts the
+    attribute is left UNSET so the serializer emits nothing (BACK-102:
+    published/audience is owner-only, never leaked to other users). Mirrors
+    the `_attach_active_application_status` per-batch attach pattern; needs
+    no query (audience is a local JSON column already on the row)."""
+    uid = getattr(user, "id", None)
+    for jp in job_posts:
+        if uid is not None and jp.created_by_id == uid:
+            audience = jp.audience if isinstance(jp.audience, list) else []
+            jp._published_for_owner = AS2_PUBLIC in audience
+
+
 @extend_schema_view(
     list=extend_schema(
         tags=["Job Posts"],
@@ -480,6 +494,7 @@ class JobPostViewSet(BaseViewSet):
                 jp._top_score = top_score_map.get(jp.id)
 
             _attach_active_application_status(items, request.user.id)
+            _attach_published_state(items, request.user)
 
         ser = self.get_serializer()
         data = [ser.to_resource(o) for o in items]
@@ -529,6 +544,7 @@ class JobPostViewSet(BaseViewSet):
         # shared JobPosts (extension popup-open lookup is the canonical leak path).
         obj._top_score = obj.scores.filter(user_id=request.user.id).order_by("-score").first()
         _attach_active_application_status([obj], request.user.id)
+        _attach_published_state([obj], request.user)
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(obj)}
         include_rels = self._parse_include(request)
@@ -1494,6 +1510,9 @@ class JobPostViewSet(BaseViewSet):
         obj._top_score = (
             obj.scores.filter(user_id=request.user.id).order_by("-score").first()
         )
+        # Reflect the new published state so the frontend re-reads it off
+        # the response without a second fetch (BACK-102).
+        _attach_published_state([obj], request.user)
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
 
@@ -1531,6 +1550,7 @@ class JobPostViewSet(BaseViewSet):
         obj._top_score = (
             obj.scores.filter(user_id=request.user.id).order_by("-score").first()
         )
+        _attach_published_state([obj], request.user)
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(obj)})
 

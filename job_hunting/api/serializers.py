@@ -457,6 +457,7 @@ class DjangoUserSerializer:
         onboarding = None
         auto_score = False
         federate_posts = False
+        federate_rich = False
         prof = None
         try:
             from job_hunting.models import Profile
@@ -471,6 +472,7 @@ class DjangoUserSerializer:
                 onboarding = prof.resolved_onboarding()
                 auto_score = bool(getattr(prof, "auto_score", False))
                 federate_posts = bool(getattr(prof, "federate_posts", False))
+                federate_rich = bool(getattr(prof, "federate_rich", False))
         except Exception:
             phone = ""
         if onboarding is None:
@@ -505,6 +507,7 @@ class DjangoUserSerializer:
             "onboarding": onboarding,
             "auto_score": auto_score,
             "federate_posts": federate_posts,
+            "federate_rich": federate_rich,
         }
         # JSON:API sparse-fieldsets: `?fields[user]=username,email`. Unknown
         # keys are silently dropped, matching the BaseSerializer behavior.
@@ -591,7 +594,7 @@ class DjangoUserSerializer:
             "username", "email", "first_name", "last_name", "password",
             "phone", "linkedin", "github", "address", "links",
             "is_staff", "is_active", "onboarding", "auto_score",
-            "federate_posts",
+            "federate_posts", "federate_rich",
         ]:
             if k in attrs_in:
                 out[k] = attrs_in[k]
@@ -603,6 +606,7 @@ class DjangoUserSerializer:
             ("last-name", "last_name"),
             ("auto-score", "auto_score"),
             ("federate-posts", "federate_posts"),
+            ("federate-rich", "federate_rich"),
         ]:
             if hyphen in attrs_in and snake not in out:
                 out[snake] = attrs_in[hyphen]
@@ -1162,6 +1166,17 @@ class JobPostSerializer(BaseSerializer):
             "note": getattr(obj, "_active_reason_note", None),
         }
         res.setdefault("meta", {})["triage"] = triage
+
+        # BACK-102: owner-only published state. `_published_for_owner` is
+        # attached ONLY for posts the requesting user owns (see
+        # `_attach_published_state`); absent → emit nothing, so audience /
+        # published-ness never leaks to non-owners or the public projection.
+        # Lives in `meta` (not `attributes`) like `triage`: it's a view-time
+        # derivation of the per-user-relevant `audience` JSON, not a
+        # round-trippable resource field.
+        published_state = getattr(obj, "_published_for_owner", None)
+        if isinstance(published_state, bool):
+            res.setdefault("meta", {})["published"] = published_state
 
         # Privacy invariant: `top_score` (and the `top-score` relationship)
         # are PER-USER values on a shared JobPost row. The model property

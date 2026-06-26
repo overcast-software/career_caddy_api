@@ -90,7 +90,11 @@ class TestJobPostObjectDeref(TestCase):
         self.assertEqual(body["id"], f"{TEST_ORIGIN}/job-posts/{self.public_post.id}")
         self.assertEqual(body["attributedTo"], f"{TEST_ORIGIN}/actors/dough")
         self.assertIn(AS2_PUBLIC, body["to"])
-        self.assertEqual(body["content"], "<p>A great role</p>")
+        # BACK-97: lean line-composer body (dough has no rich opt-in here),
+        # not the bare description echo; never an AS2 ``summary``.
+        self.assertIn("🟢 Senior Engineer", body["content"])
+        self.assertIn("A great role", body["content"])
+        self.assertNotIn("summary", body)
         self.assertEqual(body["url"], "https://example.com/jobs/1")
 
     def test_trailing_slash_also_serves_note(self):

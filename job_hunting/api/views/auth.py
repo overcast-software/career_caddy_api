@@ -71,6 +71,11 @@ def healthcheck(request):
             "healthy": True,
             "bootstrap_open": user_count == 0,
             "registration_open": settings.REGISTRATION_OPEN,
+            # BACK-102 instance capability — drives the frontend's per-post
+            # publish button gating ({off, operator_only, all_users}).
+            "federation_publish_ui": getattr(
+                settings, "FEDERATION_PUBLISH_UI", "off"
+            ),
         })
 
     return JsonResponse({"error": "method not allowed"}, status=405)

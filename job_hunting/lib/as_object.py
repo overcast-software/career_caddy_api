@@ -17,7 +17,10 @@ API, and no caller in core. Phase 5 federation work will activate it.
 """
 from __future__ import annotations
 
+import html
+import re
 import uuid
+from collections import namedtuple
 from datetime import datetime, time, timezone
 from typing import Any
 
@@ -197,23 +200,426 @@ def _create_activity_uuid(job_post) -> str:
     return str(uuid.uuid5(ACTIVITYPUB_NAMESPACE, f"create:{job_post.pk}"))
 
 
-def _render_note_content(job_post) -> str | None:
-    """Return the HTML body for the wrapped Note, or None if empty.
+# ---------------------------------------------------------------------------
+# BACK-96/97 — Note content builder (lean default + rich personalized).
+#
+# Replaces the old ``_render_note_content`` that echoed raw
+# ``JobPost.description`` as ``<p>{description}</p>`` — the "actively
+# hiring" defect. The body is now a line-composer with two formats:
+#
+#   LEAN (the AP default): 🟢 {title} — {company} / 📍 {location|Remote}
+#     / 💰 {comp} / {hook}(real description only) / external link / hashtags
+#   RICH (opt-in @dough show-off): LEAN + a {verdict} · {score} · applied line
+#
+# Gating + url precedence live with the activity builders below. Every
+# segment is null-safe (drops cleanly, never renders "None"); the whole
+# verdict line drops when verdict + score + applied are all absent. We
+# NEVER emit AS2 ``summary`` — Mastodon reads it as a Content Warning and
+# collapses the post.
 
-    AS2's ``content`` is HTML — peers (Mastodon especially) sanitise on
-    display, so we emit the JobPost description as-is when it looks
-    like HTML and wrap plain text in a single ``<p>``. The detection
-    is shape-only: if the field contains an angle bracket, trust it as
-    pre-rendered markup. Otherwise paragraph-wrap. The slim-payload
-    guard (per the Phase 5b plan): no per-row model lookups — only
-    fields already on the JobPost instance.
+# Per-user annotations the RICH format renders. Resolved from Score /
+# JobApplication / JobApplicationStatus — NOT JobPost.top_score /
+# _active_application_status (the two masking traps, see BACK-96).
+PersonalAnnotations = namedtuple(
+    "PersonalAnnotations", ["verdict", "reason_code", "score", "applied"]
+)
+_EMPTY_ANNOTATIONS = PersonalAnnotations(
+    verdict=None, reason_code=None, score=None, applied=False
+)
+
+# Score bucket thresholds (locked with Doug): >=80 strong, >=60 good,
+# else weak. Raw number always shown in parens: ``Strong match (87)``.
+_SCORE_STRONG = 80
+_SCORE_GOOD = 60
+
+# Rendered-content budget. Mastodon counts a URL as a flat 23 chars
+# regardless of its real length; we shrink the hook first to stay under.
+_HARD_BUDGET = 500
+_HOOK_MAX = 140
+_HOOK_MIN = 20
+
+# Seniority / filler words dropped when deriving a role hashtag so
+# "Senior Platform Engineer" → #platformengineer (deterministic).
+_HASHTAG_STOPWORDS = frozenset(
+    {
+        "senior", "junior", "sr", "jr", "staff", "lead", "principal",
+        "the", "a", "an", "of", "and", "for", "to", "i", "ii", "iii", "iv",
+    }
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def resolve_personal_annotations_batch(job_posts, user_id):
+    """Resolve ``PersonalAnnotations`` for ``user_id`` across ``job_posts``.
+
+    Returns ``{job_post_pk: PersonalAnnotations}`` covering EVERY input pk
+    (empty annotations when the user has no records) in a bounded, fixed
+    number of queries regardless of page size — the Task D N+1 guard. The
+    per-post path (:func:`_resolve_personal_annotations`) delegates here.
+
+    Data sources + traps (BACK-96):
+    - verdict = the LATEST ``Vetted Good`` / ``Vetted Bad``
+      ``JobApplicationStatus`` on the user's application for the post —
+      NOT the active-status rollup (``Applied`` masks the verdict).
+    - score = the user's best ``Score`` for the post — NOT
+      ``JobPost.top_score`` (request-scoped, no request here).
+    - applied = the user has a ``JobApplication`` with
+      ``applied_at`` set (a bare triage-created row is NOT "applied").
     """
-    description = job_post.description
-    if not description:
+    post_ids = [jp.pk for jp in job_posts]
+    result = {pid: _EMPTY_ANNOTATIONS for pid in post_ids}
+    if not post_ids or not user_id:
+        return result
+
+    from job_hunting.models import (
+        JobApplication,
+        JobApplicationStatus,
+        Score,
+    )
+
+    verdict_map: dict = {}
+    reason_map: dict = {}
+    status_rows = (
+        JobApplicationStatus.objects.filter(
+            application__job_post_id__in=post_ids,
+            application__user_id=user_id,
+            status__status__in=("Vetted Good", "Vetted Bad"),
+        )
+        .select_related("status", "application")
+        .order_by("application__job_post_id", "-logged_at", "-created_at")
+    )
+    for jas in status_rows:
+        pid = jas.application.job_post_id
+        if pid in verdict_map:
+            continue
+        verdict_map[pid] = jas.status.status if jas.status_id else None
+        reason_map[pid] = jas.reason_code
+
+    score_map: dict = {}
+    score_rows = (
+        Score.objects.filter(
+            job_post_id__in=post_ids, user_id=user_id, score__isnull=False
+        )
+        .order_by("job_post_id", "-score")
+        .values_list("job_post_id", "score")
+    )
+    for pid, score in score_rows:
+        if pid not in score_map:
+            score_map[pid] = score
+
+    applied_ids = set(
+        JobApplication.objects.filter(
+            job_post_id__in=post_ids,
+            user_id=user_id,
+            applied_at__isnull=False,
+        ).values_list("job_post_id", flat=True)
+    )
+
+    for pid in post_ids:
+        result[pid] = PersonalAnnotations(
+            verdict=verdict_map.get(pid),
+            reason_code=reason_map.get(pid),
+            score=score_map.get(pid),
+            applied=pid in applied_ids,
+        )
+    return result
+
+
+def _resolve_personal_annotations(job_post, user_id) -> PersonalAnnotations:
+    """Single-post ``PersonalAnnotations`` resolver (delegates to the batch)."""
+    return resolve_personal_annotations_batch([job_post], user_id).get(
+        job_post.pk, _EMPTY_ANNOTATIONS
+    )
+
+
+def user_opted_into_rich(user_id) -> bool:
+    """True when the user opted into the rich federated-Note format (Task B)."""
+    if not user_id:
+        return False
+    from job_hunting.models import Profile
+
+    prof = (
+        Profile.objects.filter(user_id=user_id)
+        .only("federate_rich", "user_id")
+        .first()
+    )
+    return bool(prof and prof.federate_rich)
+
+
+def _actor_rich_capable(actor) -> bool:
+    """Actor-level half of the rich gate: a Person actor whose owning user
+    opted into rich. Company / Organization actors are NEVER rich (no
+    owner — would leak one user's private score onto a company page)."""
+    if actor is None:
+        return False
+    from job_hunting.models.actor import ACTOR_TYPE_PERSON
+
+    if getattr(actor, "type", None) != ACTOR_TYPE_PERSON:
+        return False
+    user_id = getattr(actor, "user_id", None)
+    if user_id is None:
+        return False
+    return user_opted_into_rich(user_id)
+
+
+def _should_render_rich(job_post, actor) -> bool:
+    """Full rich gate: a rich-capable Person actor that OWNS this post."""
+    if not _actor_rich_capable(actor):
+        return False
+    return getattr(actor, "user_id", None) == job_post.created_by_id
+
+
+def _clean_text(value) -> str | None:
+    """Strip tags + collapse whitespace; None / empty → None (null-safe)."""
+    if not value:
         return None
-    if "<" in description and ">" in description:
-        return description
-    return f"<p>{description}</p>"
+    text = _TAG_RE.sub(" ", str(value))
+    text = " ".join(text.split())
+    return text or None
+
+
+def _header_line(job_post) -> str | None:
+    """``🟢 {title} — {company}`` — null-safe; drops to title-only or
+    company-only, or omits entirely when both are absent."""
+    title = _clean_text(job_post.title)
+    company = None
+    if job_post.company_id:
+        company = _clean_text(getattr(getattr(job_post, "company", None), "name", None))
+    if title and company:
+        return f"🟢 {title} — {company}"
+    if title:
+        return f"🟢 {title}"
+    if company:
+        return f"🟢 {company}"
+    return None
+
+
+def _location_line(job_post) -> str | None:
+    """``📍 {location}``; falls back to ``Remote`` when the post is flagged
+    remote but carries no location string. Drops when neither applies —
+    we never invent a location, and never render ``📍 None``."""
+    location = _clean_text(job_post.location)
+    if location:
+        return f"📍 {location}"
+    if job_post.remote:
+        return "📍 Remote"
+    return None
+
+
+def _format_money(value) -> str | None:
+    """Format a salary figure as ``$150k`` / ``$80`` (null-safe)."""
+    if value is None:
+        return None
+    try:
+        amount = int(value)
+    except (TypeError, ValueError):
+        return None
+    if amount >= 1000:
+        return f"${round(amount / 1000)}k"
+    return f"${amount}"
+
+
+def _comp_line(job_post) -> str | None:
+    """``💰 {comp}`` from salary_min / salary_max; drops when neither set."""
+    lo = _format_money(job_post.salary_min)
+    hi = _format_money(job_post.salary_max)
+    if lo and hi:
+        comp = lo if lo == hi else f"{lo}–{hi}"
+    elif lo:
+        comp = f"{lo}+"
+    elif hi:
+        comp = f"up to {hi}"
+    else:
+        return None
+    return f"💰 {comp}"
+
+
+def _hook_source(job_post) -> str | None:
+    """Real-description hook text, or None for a thin stub.
+
+    ``complete is False`` is the canonical thin-stub signal (cc_auto email
+    pipeline / ReviewCompleteness / manual "mark incomplete"). Dropping
+    the hook for stubs is precisely what kills the original "This company
+    is actively hiring, based in Seattle, WA." toot."""
+    if not getattr(job_post, "complete", True):
+        return None
+    return _clean_text(job_post.description)
+
+
+def _truncate_hook(text: str, limit: int) -> str:
+    """Truncate ``text`` to ``limit`` visible chars, ellipsizing on a cut."""
+    if len(text) <= limit:
+        return text
+    cut = max(0, limit - 1)
+    return text[:cut].rstrip() + "…"
+
+
+def _verdict_segment(annotations: PersonalAnnotations) -> str | None:
+    """``✅ Vetted good`` / ``❌ Vetted bad (reason_code)`` — never the note."""
+    if annotations.verdict == "Vetted Good":
+        return "✅ Vetted good"
+    if annotations.verdict == "Vetted Bad":
+        if annotations.reason_code:
+            return f"❌ Vetted bad ({annotations.reason_code})"
+        return "❌ Vetted bad"
+    return None
+
+
+def _score_segment(score) -> str | None:
+    """``Strong match (87)`` — bucket label via 80/60 + raw number."""
+    if score is None:
+        return None
+    if score >= _SCORE_STRONG:
+        label = "Strong match"
+    elif score >= _SCORE_GOOD:
+        label = "Good match"
+    else:
+        label = "Weak match"
+    return f"{label} ({score})"
+
+
+def _verdict_line(annotations: PersonalAnnotations) -> str | None:
+    """``{verdict} · {score} · applied`` — each segment null-safe; the whole
+    line drops when verdict + score + applied are all absent."""
+    if annotations is None:
+        return None
+    segments = []
+    verdict = _verdict_segment(annotations)
+    if verdict:
+        segments.append(verdict)
+    score = _score_segment(annotations.score)
+    if score:
+        segments.append(score)
+    if annotations.applied:
+        segments.append("applied")
+    if not segments:
+        return None
+    return " · ".join(segments)
+
+
+def _build_hashtags(job_post) -> str | None:
+    """Deterministic, null-safe hashtag line: ``#hiring`` + a remote tag +
+    a role tag derived from the title (seniority words stripped)."""
+    tags = ["#hiring"]
+    location = _clean_text(job_post.location)
+    if job_post.remote or (location and "remote" in location.lower()):
+        tags.append("#remotejobs")
+    title = _clean_text(job_post.title)
+    if title:
+        words = [
+            re.sub(r"[^a-z0-9]", "", w.lower())
+            for w in title.split()
+        ]
+        words = [
+            w for w in words if w and w not in _HASHTAG_STOPWORDS
+        ]
+        role = "".join(words)[:30]
+        if role:
+            tags.append(f"#{role}")
+    # Dedupe while preserving order (a title word could collide with a tag).
+    seen = set()
+    ordered = []
+    for tag in tags:
+        if tag not in seen:
+            seen.add(tag)
+            ordered.append(tag)
+    return " ".join(ordered) if ordered else None
+
+
+def _compose_note_content(
+    job_post, *, rich: bool = False, annotations: PersonalAnnotations | None = None
+) -> str | None:
+    """Compose the AS2 ``content`` HTML for a JobPost Note (lean or rich).
+
+    Lines are emitted in order — header / location / comp / hook /
+    (rich) verdict / url / hashtags — each one null-safe and dropped when
+    empty. The hook is sized last against the 500-char budget (URL counts
+    23) so it shrinks before anything structural is lost."""
+    header = _header_line(job_post)
+    location = _location_line(job_post)
+    comp = _comp_line(job_post)
+    verdict = _verdict_line(annotations) if (rich and annotations) else None
+    url = _resolve_human_url(job_post)
+    hashtags = _build_hashtags(job_post)
+    hook_source = _hook_source(job_post)
+
+    # Structural (non-hook) lines, with their visible length. A URL line
+    # is counted as a flat 23 per Mastodon's link accounting.
+    structural: list[tuple[str, int]] = []
+    for line in (header, location, comp):
+        if line:
+            structural.append((line, len(line)))
+    hook_slot = len(structural)  # hook is inserted at this index
+    tail: list[tuple[str, int]] = []
+    if verdict:
+        tail.append((verdict, len(verdict)))
+    if url:
+        tail.append((url, 23))
+    if hashtags:
+        tail.append((hashtags, len(hashtags)))
+
+    hook_text = None
+    if hook_source:
+        base_visible = sum(v for _, v in structural) + sum(v for _, v in tail)
+        n_lines = len(structural) + len(tail) + 1  # +1 for the hook line
+        allowance = _HARD_BUDGET - base_visible - (n_lines - 1)
+        hook_len = max(0, min(_HOOK_MAX, allowance))
+        if hook_len >= _HOOK_MIN:
+            hook_text = _truncate_hook(hook_source, hook_len)
+
+    ordered = [line for line, _ in structural]
+    if hook_text:
+        ordered.insert(hook_slot, hook_text)
+    ordered.extend(line for line, _ in tail)
+
+    if not ordered:
+        return None
+    return "<p>" + "<br>".join(html.escape(line) for line in ordered) + "</p>"
+
+
+def _resolve_human_url(job_post) -> str | None:
+    """Human "view original" URL precedence (BACK-97): a RESOLVED
+    ``apply_url`` → ``canonical_link`` → ``link``. The internal
+    ``/job-posts/<pk>`` floor is intentionally dropped — JP pages aren't
+    human-public; the AS2 object ``id`` keeps that URI for machines."""
+    apply_url = job_post.apply_url
+    if apply_url and job_post.apply_url_status == "resolved":
+        return apply_url
+    if job_post.canonical_link:
+        return job_post.canonical_link
+    if job_post.link:
+        return job_post.link
+    return None
+
+
+def build_jobpost_note(
+    job_post,
+    actor_uri_str: str,
+    *,
+    rich: bool = False,
+    annotations: PersonalAnnotations | None = None,
+) -> dict:
+    """The single Note-object builder Create / Update / standalone-fetch all
+    route through (the BACK-96 chokepoint). Sets ``content`` from the
+    lean/rich composer and ``url`` from the resolved-apply precedence;
+    NEVER sets ``summary``. ``id`` stays the AS2 object URI."""
+    note: dict[str, Any] = {
+        "id": object_uri(job_post),
+        "type": "Note",
+        "attributedTo": actor_uri_str,
+        "to": [AS2_PUBLIC],
+    }
+    published = _isoformat(job_post.created_at)
+    if published:
+        note["published"] = published
+    content = _compose_note_content(job_post, rich=rich, annotations=annotations)
+    if content:
+        note["content"] = content
+    url = _resolve_human_url(job_post)
+    if url:
+        note["url"] = url
+    return note
 
 
 def _activity_uuid(kind: str, discriminator: str) -> str:
@@ -233,44 +639,49 @@ def _local_actor_uri(actor) -> str:
     return f"{_instance_origin()}/actors/{actor.preferred_username}"
 
 
-def build_create_activity_for_jobpost(job_post, actor) -> dict:
+def _resolve_rich_and_annotations(job_post, actor, rich, annotations):
+    """Normalize the (rich, annotations) pair for a single-post build.
+
+    ``rich=None`` → derive it from the actor gate. When rich and no
+    annotations were supplied (the single-post Create/Update/standalone
+    path), resolve them per-post; the batch outbox path passes them in
+    pre-resolved so the per-Note builders never re-query (Task D)."""
+    if rich is None:
+        rich = _should_render_rich(job_post, actor)
+    if rich and annotations is None:
+        annotations = _resolve_personal_annotations(job_post, job_post.created_by_id)
+    return rich, annotations
+
+
+def build_create_activity_for_jobpost(
+    job_post, actor, *, rich=None, annotations=None
+) -> dict:
     """Build the AS2 ``Create(Note)`` activity envelope for ``job_post``.
 
     Reused by the Phase 5b outbox view and the Phase 5d dispatch worker
-    (when it lands) so both surfaces emit byte-identical activities for
-    the same JobPost — which matters once peers start signing the
-    fetched objects and we have to round-trip through deduplication on
-    redelivery.
+    so both surfaces emit byte-identical activities for the same JobPost.
+    The Note body routes through :func:`build_jobpost_note` (the BACK-96
+    content chokepoint): lean by default, rich (verdict/score/applied)
+    when ``actor`` is the owning Person actor whose user opted in.
+
+    ``rich`` / ``annotations`` may be supplied by a batch caller (the
+    outbox, Task D) so per-page rendering stays O(1) in query count;
+    otherwise they're resolved per-post here.
 
     ``actor`` is the local ``Actor`` row (Phase 5a model); the activity
-    is attributed to ``actor.uri`` (mirrors the outbox advertising URL).
-    Per the Phase 5b plan: ``to`` is the AS2 Public collection, ``cc``
-    points at the actor's followers collection so future follower
-    fan-out (5d) can address them implicitly.
+    is attributed to ``actor.uri``. ``to`` is the AS2 Public collection,
+    ``cc`` points at the actor's followers collection.
     """
     origin = _instance_origin()
     actor_uri_str = f"{origin}/actors/{actor.preferred_username}"
     published = _isoformat(job_post.created_at)
 
-    note: dict[str, Any] = {
-        "id": object_uri(job_post),
-        "type": "Note",
-        "attributedTo": actor_uri_str,
-        "to": [AS2_PUBLIC],
-    }
-    if published:
-        note["published"] = published
-
-    content = _render_note_content(job_post)
-    if content:
-        note["content"] = content
-
-    # Prefer the post's canonical (deduped) link as the human-resolvable
-    # URL — peer UIs surface this as the "view original" link. Fall back
-    # to the raw link when canonicalisation hasn't run yet.
-    url = job_post.canonical_link or job_post.link
-    if url:
-        note["url"] = url
+    rich, annotations = _resolve_rich_and_annotations(
+        job_post, actor, rich, annotations
+    )
+    note = build_jobpost_note(
+        job_post, actor_uri_str, rich=rich, annotations=annotations
+    )
 
     activity: dict[str, Any] = {
         "@context": AS2_CONTEXT,
@@ -287,36 +698,18 @@ def build_create_activity_for_jobpost(job_post, actor) -> dict:
     return activity
 
 
-def _note_for_jobpost(job_post, actor_uri_str: str) -> dict:
-    """Return the Note object for a JobPost — the shape both 5b Create
-    and 5d Update wrap.
-
-    Kept tiny and pure (no env / settings reads) so the wrappers around
-    it can drift independently (e.g. Update may want different ``cc``
-    targeting than Create). Doesn't unify the Phase 4 ``job_post_as_object``
-    helper — that one carries the ``careercaddy:`` extension namespace
-    and renders for the latent /as-object/ adapter, not for activity
-    envelopes that hit federation peers.
-    """
-    note: dict[str, Any] = {
-        "id": object_uri(job_post),
-        "type": "Note",
-        "attributedTo": actor_uri_str,
-        "to": [AS2_PUBLIC],
-    }
-    published = _isoformat(job_post.created_at)
-    if published:
-        note["published"] = published
-    content = _render_note_content(job_post)
-    if content:
-        note["content"] = content
-    url = job_post.canonical_link or job_post.link
-    if url:
-        note["url"] = url
-    return note
+def _note_for_jobpost(
+    job_post, actor_uri_str: str, *, rich: bool = False, annotations=None
+) -> dict:
+    """Return the Note object for a JobPost — the shape both 5b Create and
+    5d Update wrap. Thin alias over :func:`build_jobpost_note` so the
+    lean/rich content + url logic has exactly one home (BACK-96)."""
+    return build_jobpost_note(
+        job_post, actor_uri_str, rich=rich, annotations=annotations
+    )
 
 
-def build_note_object_for_jobpost(job_post, actor=None) -> dict:
+def build_note_object_for_jobpost(job_post, actor=None, *, annotations=None) -> dict:
     """Standalone, dereferenceable AS2 Note for a JobPost object id.
 
     Served at the public ``/job-posts/<pk>`` object URI so a federation
@@ -338,22 +731,36 @@ def build_note_object_for_jobpost(job_post, actor=None) -> dict:
     """
     if actor is not None:
         actor_uri_str = _local_actor_uri(actor)
+        rich = _should_render_rich(job_post, actor)
     else:
+        # No Actor row to authenticate ownership against → lean only. We
+        # can't confirm a rich-opted-in Person owner, and must not leak
+        # private vetting on a bare anonymous-attributed fetch.
         author = getattr(job_post, "created_by", None)
         handle = getattr(author, "username", None) or "anonymous"
         actor_uri_str = actor_uri(handle, job_post.source_instance)
-    note = _note_for_jobpost(job_post, actor_uri_str)
+        rich = False
+    rich, annotations = _resolve_rich_and_annotations(
+        job_post, actor, rich, annotations
+    )
+    note = _note_for_jobpost(
+        job_post, actor_uri_str, rich=rich, annotations=annotations
+    )
     return {"@context": AS2_CONTEXT, **note}
 
 
-def build_update_activity_for_jobpost(job_post, actor, *, edit_marker=None) -> dict:
+def build_update_activity_for_jobpost(
+    job_post, actor, *, edit_marker=None, rich=None, annotations=None
+) -> dict:
     """Build the AS2 ``Update(Note)`` activity envelope for ``job_post``.
 
     Phase 5d worker entry point. Mirrors ``build_create_activity_for_jobpost``
     but wraps the same Note in an ``Update`` activity and derives a
     per-edit activity id so subsequent edits don't collide with one
     another (Create's id deliberately doesn't change across edits — it
-    pins to the JobPost identity, not the revision).
+    pins to the JobPost identity, not the revision). Carries the same
+    lean/rich body as the Create (BACK-96) so a vet/score/apply Update
+    is what actually surfaces the rich data on the fediverse (BACK-99).
 
     ``edit_marker`` is the discriminator folded into the activity id.
     Caller passes JobPost.updated_at when available; falls back to a
@@ -362,7 +769,12 @@ def build_update_activity_for_jobpost(job_post, actor, *, edit_marker=None) -> d
     """
     origin = _instance_origin()
     actor_uri_str = _local_actor_uri(actor)
-    note = _note_for_jobpost(job_post, actor_uri_str)
+    rich, annotations = _resolve_rich_and_annotations(
+        job_post, actor, rich, annotations
+    )
+    note = _note_for_jobpost(
+        job_post, actor_uri_str, rich=rich, annotations=annotations
+    )
 
     if edit_marker is None:
         edit_marker = datetime.now(tz=timezone.utc).isoformat()
