@@ -1833,7 +1833,13 @@ class JobApplicationViewSet(BaseViewSet):
     serializer_class = JobApplicationSerializer
 
     def list(self, request):
-        qs = JobApplication.objects.filter(user_id=request.user.id)
+        # CC-91: select_related the to-one FKs + prefetch application-statuses
+        # so the page serializes in a bounded number of queries instead of a
+        # per-row N+1. The filter/sort clauses below clone this queryset and
+        # preserve the select_related/prefetch.
+        qs = self.serializer_class.optimize_queryset(
+            JobApplication.objects.filter(user_id=request.user.id)
+        )
 
         company_id_filter = request.query_params.get("filter[company_id]")
         if company_id_filter is not None:

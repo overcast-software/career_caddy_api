@@ -403,9 +403,16 @@ class BaseViewSet(viewsets.ViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        items = list(self.model.objects.all())
-        items = self.paginate(items)
         ser = self.get_serializer()
+        qs = self.model.objects.all()
+        # CC-91: let the serializer pull its to-one FKs + linked to-manys in a
+        # bounded number of queries instead of a per-row N+1 in to_resource().
+        # No-op for serializers that declare no optimization hints.
+        optimize = getattr(ser, "optimize_queryset", None)
+        if optimize is not None:
+            qs = optimize(qs)
+        items = list(qs)
+        items = self.paginate(items)
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
         include_rels = self._parse_include(request)
