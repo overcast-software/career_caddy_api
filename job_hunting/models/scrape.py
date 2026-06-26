@@ -188,6 +188,29 @@ class Scrape(GetMixin, NanoIDModel):
 
     class Meta:
         db_table = "scrape"
+        indexes = [
+            # Partial composite index backing POST /scrapes/claim-next/
+            # (CC-96). The claim query is
+            #   WHERE status='hold' AND claimed_at IS NULL
+            #   ORDER BY created_at ASC NULLS FIRST, id
+            #   LIMIT 1 FOR UPDATE SKIP LOCKED
+            # A scrape is a scrape (CC-114): the hold queue is a single
+            # FIFO with no attended partition, so the index leads with the
+            # ORDER BY columns directly. The condition prunes the index to
+            # just the active hold queue (tiny vs the unbounded, ever-
+            # growing scrape table); created_at NULLS FIRST + id match the
+            # ORDER BY exactly so the planner satisfies it from the index
+            # with no Seq Scan + Sort. Pre-CC-77 rows carry a NULL
+            # created_at and sort first as the oldest holds — hence
+            # nulls_first on the index too, so the ordering stays
+            # index-only.
+            models.Index(
+                models.F("created_at").asc(nulls_first=True),
+                models.F("id"),
+                name="scrape_claim_queue_idx",
+                condition=models.Q(status="hold", claimed_at__isnull=True),
+            ),
+        ]
 
     @property
     def host(self):
