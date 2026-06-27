@@ -1956,3 +1956,186 @@ class TestTightenLinkedinExtractionHintsMigration(TestCase):
         # Also runs end-to-end without raising (the linkedin.com row
         # path is exercised by the other tests).
         module.tighten_linkedin_extraction_hints(apps, schema_editor=None)
+
+
+class TestLinkedScrapeAugment(TestCase):
+    """BACK-104: a scrape explicitly linked to a JobPost (``job_post_id``
+    set) augments THAT post on the runner path (force=False), even when
+    ``scrape.url`` has diverged from the post's stored ``link``.
+
+    The motivating case is a forwarded ZipRecruiter ``/km/<token>`` digest
+    link: cc_auto creates a JobPost from the ephemeral tracker URL and a
+    ``hold`` scrape carrying ``job_post_id``; the browser runner resolves
+    the real job URL (which no longer matches the stored ``/km/`` link) and
+    POSTs the extraction with force=False. Before this fix the URL-based
+    dedupe missed and the get_or_create cold path forked a SECOND JobPost,
+    orphaning the linked one.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="auguser", password="pw")
+
+    def _scrape(self, post, url, source="scrape"):
+        return Scrape.objects.create(
+            url=url,
+            status="extracting",
+            created_by=self.user,
+            job_post=post,
+            source=source,
+        )
+
+    def test_km_forward_augmented_in_place_not_forked(self):
+        """source='email' (trust 20) < scrape (70): trust-aware overwrite
+        fires, adopting the resolved canonical + full JD in place. No fork."""
+        km = "https://www.ziprecruiter.com/km/AAEXopaquetoken"
+        post = JobPost.objects.create(
+            title="Senior Engineer",
+            company=None,  # /km/ digest stub: link known, company unknown
+            link=km,
+            canonical_link=km,  # opaque token IS the identifier; left alone
+            source="email",
+            complete=False,
+            created_by=self.user,
+        )
+        resolved = "https://www.ziprecruiter.com/c/Acme/Job/Senior-Engineer"
+        scrape = self._scrape(post, resolved)
+        parsed = ParsedJobData(
+            title="Senior Software Engineer",
+            company_name="Acme Corp",
+            company_display_name="Acme",
+            description="Full job description body. " * 30,
+            location="Remote",
+        )
+
+        ok = JobPostExtractor().process_evaluation(
+            scrape, parsed, user=self.user, force=False
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            JobPost.objects.count(), 1,
+            "augment the linked post in place — no fork at get_or_create",
+        )
+        post.refresh_from_db()
+        self.assertEqual(post.link, resolved, "adopts the browser-resolved URL")
+        self.assertNotIn("/km/", post.link or "")
+        self.assertIn("Full job description", post.description or "")
+        self.assertTrue(post.complete)
+        self.assertIsNotNone(post.company_id, "company linked on augment")
+        self.assertEqual(post.company.name, "Acme Corp")
+        scrape.refresh_from_db()
+        self.assertEqual(scrape.job_post_id, post.id)
+        # Higher-trust overwrite of a lower-trust post leaves an audit row.
+        self.assertTrue(
+            JobPostOverwriteDecision.objects.filter(job_post=post).exists()
+        )
+
+    def test_linked_scrape_does_not_clobber_human_verified_post(self):
+        """source='extension' (trust 100) > scrape (70): a background re-scrape
+        whose URL diverges must NOT overwrite human-verified fields, and must
+        NOT fork. Trust-aware gate holds for the FK path too."""
+        company = Company.objects.create(name="Acme Corp")
+        human_desc = "Curated by the user via the extension. " * 30
+        verified_link = "https://www.ziprecruiter.com/c/Acme/Job/Staff-Engineer"
+        post = JobPost.objects.create(
+            title="Staff Engineer (verified)",
+            company=company,
+            link=verified_link,
+            source="extension",
+            description=human_desc,
+            location="NYC",
+            complete=True,
+            created_by=self.user,
+        )
+        # Diverging tracker URL + wrong extracted fields; description omitted
+        # so the (complete-path) description arbiter never engages.
+        scrape = self._scrape(post, "https://www.ziprecruiter.com/km/freshtoken")
+        parsed = ParsedJobData(
+            title="WRONG TITLE",
+            company_name="Acme Corp",
+            company_display_name="Acme",
+            location="WRONG LOCATION",
+        )
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(scrape, parsed, user=self.user, force=False)
+
+        self.assertEqual(JobPost.objects.count(), 1)
+        post.refresh_from_db()
+        self.assertEqual(post.title, "Staff Engineer (verified)")
+        self.assertEqual(post.description, human_desc)
+        self.assertEqual(post.location, "NYC")
+        self.assertEqual(post.link, verified_link, "verified link preserved")
+        self.assertEqual(extractor.last_outcome, "duplicate")
+        self.assertFalse(
+            JobPostOverwriteDecision.objects.filter(job_post=post).exists()
+        )
+
+    def test_email_forward_stub_adopts_resolved_link(self):
+        """source='email-forward' (trust 75) does NOT outrank scrape (70), so
+        the trust-aware overwrite is skipped — but the FK stub-upgrade path
+        still adopts the resolved, known-good URL (the /km/ tracker is
+        ephemeral) so the post ends with the real canonical."""
+        km = "https://www.ziprecruiter.com/km/forwardtoken"
+        post = JobPost.objects.create(
+            title="Engineer",
+            company=None,
+            link=km,
+            canonical_link=km,
+            source="email-forward",
+            complete=False,
+            created_by=self.user,
+        )
+        resolved = "https://www.ziprecruiter.com/c/Acme/Job/Engineer-99"
+        scrape = self._scrape(post, resolved)
+        parsed = ParsedJobData(
+            title="Engineer",
+            company_name="Acme Corp",
+            company_display_name="Acme",
+            description="Full description body with plenty of words. " * 20,
+            location="Remote",
+        )
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(scrape, parsed, user=self.user, force=False)
+
+        self.assertEqual(JobPost.objects.count(), 1)
+        post.refresh_from_db()
+        self.assertEqual(
+            post.link, resolved, "FK stub-upgrade adopts the resolved URL"
+        )
+        self.assertNotIn("/km/", post.link or "")
+        self.assertTrue(post.complete)
+        self.assertEqual(extractor.last_outcome, "updated_stub")
+
+    def test_non_linked_scrape_still_dedupes_by_url(self):
+        """A scrape WITHOUT job_post_id keeps the existing URL-based dedupe —
+        the FK branch must not perturb it."""
+        company = Company.objects.create(name="Acme Corp")
+        existing = JobPost.objects.create(
+            title="Existing Role",
+            company=company,
+            link="https://example.com/job/xyz",
+            complete=False,
+            created_by=self.user,
+        )
+        scrape = Scrape.objects.create(
+            url="https://example.com/job/xyz",  # matches existing by link
+            status="extracting",
+            created_by=self.user,
+            source="scrape",
+            # no job_post — unlinked
+        )
+        parsed = ParsedJobData(
+            title="Existing Role",
+            company_name="Acme Corp",
+            company_display_name="Acme",
+            description="Full body with enough words to clear the stub gate. " * 20,
+            location="Remote",
+        )
+
+        JobPostExtractor().process_evaluation(
+            scrape, parsed, user=self.user, force=False
+        )
+        self.assertEqual(JobPost.objects.count(), 1)
+        scrape.refresh_from_db()
+        self.assertEqual(scrape.job_post_id, existing.id)
