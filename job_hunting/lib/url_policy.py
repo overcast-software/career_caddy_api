@@ -9,20 +9,33 @@ POLICY (always-on, blocking) lives here. PROVENANCE (soft-verify the
 because the trust posture is different.
 
 Phase 0 checks:
-  1. Scheme allowlist (http, https only)
+  1. Scheme allowlist (http, https — plus opt-in mailto, see below)
   2. SELF_HOSTS blocklist (careercaddy.online + www variant)
   3. Private/loopback host blocklist (literals + suffix match)
 
 Phase 2 will add DNS resolution to catch IP-literal bypasses.
+
+`mailto:` is a special case: a recruiter direct-solicitation job post's
+apply target IS the recruiter's email address (cc-auto `a6ebcc0` makes
+``mailto:foo@bar.com`` a valid JobPost.link). It is allowed ONLY when the
+caller passes ``allow_mailto=True`` — today just the JobPost.link write
+path. Scrape ingestion leaves it ``False`` so an email address can never
+enter the scrape pipeline (there is nothing to scrape at a mailto).
 """
 
 from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from urllib.parse import urlsplit
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+# A mailto: apply target must carry a plausible single address (local@domain
+# with a dotted domain). Loose by intent — we gate recruiter solicitations,
+# not RFC 5321 conformance. urlsplit puts the address(es) in `.path`.
+_MAILTO_ADDR_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # Hosts that represent Career Caddy itself. Submitting our own domain as a
 # "job posting" produces garbage and pollutes our index — block it. Operators
@@ -137,13 +150,33 @@ def _is_private_host(host: str) -> bool:
     )
 
 
-def validate_submission_url(raw: str) -> str:
+def _mailto_address(raw: str) -> str | None:
+    """Return the first plausible address from a ``mailto:`` URI, else None.
+
+    ``mailto:foo@bar.com`` → ``foo@bar.com``; ``mailto:a@x.com,b@y.com`` →
+    ``a@x.com``; ``mailto:foo@bar.com?subject=Hi`` → ``foo@bar.com``. Empty
+    or malformed (``mailto:``, ``mailto:notanemail``) → None.
+    """
+    parts = urlsplit(raw)
+    if (parts.scheme or "").lower() != "mailto":
+        return None
+    candidate = parts.path.split(",", 1)[0].strip()
+    if not candidate or not _MAILTO_ADDR_RE.match(candidate):
+        return None
+    return candidate
+
+
+def validate_submission_url(raw: str, *, allow_mailto: bool = False) -> str:
     """Validate a URL for ingestion.
 
     Returns the input string unchanged on success (callers may layer
     normalization separately). Raises UrlPolicyError on rejection — the
     `code` attribute is one of: blocked_scheme, blocked_self, blocked_private,
     blocked_malformed.
+
+    ``allow_mailto`` opts the caller into accepting a ``mailto:<address>``
+    apply target (recruiter direct solicitations — see module docstring).
+    Off by default so scrape ingestion keeps rejecting it.
     """
     if not raw or not isinstance(raw, str):
         raise UrlPolicyError("blocked_malformed", "URL is required")
@@ -154,6 +187,19 @@ def validate_submission_url(raw: str) -> str:
         raise UrlPolicyError("blocked_malformed", f"URL could not be parsed: {e}")
 
     scheme = (parts.scheme or "").lower()
+
+    # mailto: opt-in apply target — the recruiter's address IS the apply
+    # link. Validated and returned here (a mailto has no host, so it skips
+    # the host/self/private checks below). When `allow_mailto` is False this
+    # falls through to the generic scheme reject (blocked_scheme), preserving
+    # the scrape-ingestion contract.
+    if scheme == "mailto" and allow_mailto:
+        if not _mailto_address(raw.strip()):
+            raise UrlPolicyError(
+                "blocked_malformed", "mailto: target has no usable address."
+            )
+        return raw
+
     if scheme not in ALLOWED_SCHEMES:
         raise UrlPolicyError(
             "blocked_scheme",

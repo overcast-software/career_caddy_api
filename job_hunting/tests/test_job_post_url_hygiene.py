@@ -77,3 +77,19 @@ class TestJobPostUrlPolicy(TestCase):
         )
         self.assertIn(r.status_code, (200, 201))
         self.assertEqual(JobPost.objects.count(), 1)
+
+    def test_mailto_link_creates(self):
+        # Recruiter direct-solicitation: the apply target IS the recruiter's
+        # address (cc-auto a6ebcc0). The JobPost.link write path opts into
+        # mailto, so the post is created with the mailto stored verbatim.
+        r = self._post("mailto:recruiter@acme.com", title="QA Engineers")
+        self.assertIn(r.status_code, (200, 201))
+        self.assertEqual(JobPost.objects.count(), 1)
+        jp = JobPost.objects.get()
+        self.assertEqual(jp.link, "mailto:recruiter@acme.com")
+
+    def test_malformed_mailto_rejected(self):
+        r = self._post("mailto:notanemail")
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["errors"][0]["code"], "blocked_malformed")
+        self.assertEqual(JobPost.objects.count(), 0)

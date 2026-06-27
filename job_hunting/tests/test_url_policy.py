@@ -134,3 +134,37 @@ class TestValidateSubmissionUrl(SimpleTestCase):
             validate_submission_url("https://8.8.8.8/x"),
             "https://8.8.8.8/x",
         )
+
+    # --- mailto: opt-in apply target (recruiter direct solicitations) ---
+
+    def test_mailto_blocked_by_default(self):
+        # Scrape ingestion (the default caller) must keep rejecting mailto —
+        # an email address is not scrapeable.
+        with self.assertRaises(UrlPolicyError) as ctx:
+            validate_submission_url("mailto:recruiter@acme.com")
+        self.assertEqual(ctx.exception.code, "blocked_scheme")
+
+    def test_mailto_allowed_when_opted_in(self):
+        url = "mailto:recruiter@acme.com"
+        self.assertEqual(validate_submission_url(url, allow_mailto=True), url)
+
+    def test_mailto_returns_raw_unchanged(self):
+        # Whitespace + query params survive verbatim (parsing tolerates them).
+        url = "  mailto:hr@acme.io?subject=Apply  "
+        self.assertEqual(validate_submission_url(url, allow_mailto=True), url)
+
+    def test_mailto_empty_address_malformed(self):
+        with self.assertRaises(UrlPolicyError) as ctx:
+            validate_submission_url("mailto:", allow_mailto=True)
+        self.assertEqual(ctx.exception.code, "blocked_malformed")
+
+    def test_mailto_non_address_malformed(self):
+        with self.assertRaises(UrlPolicyError) as ctx:
+            validate_submission_url("mailto:notanemail", allow_mailto=True)
+        self.assertEqual(ctx.exception.code, "blocked_malformed")
+
+    def test_other_schemes_still_blocked_even_with_mailto_opt_in(self):
+        # allow_mailto only relaxes mailto — javascript: stays blocked.
+        with self.assertRaises(UrlPolicyError) as ctx:
+            validate_submission_url("javascript:alert(1)", allow_mailto=True)
+        self.assertEqual(ctx.exception.code, "blocked_scheme")
