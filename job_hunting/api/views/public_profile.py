@@ -66,6 +66,7 @@ from job_hunting.lib.as_object import (
     resolve_personal_annotations_batch,
     user_opted_into_rich,
 )
+from job_hunting.lib.services.application_flow import build_flow
 
 
 # Deliberate public projection. Display-only fields a visitor needs to
@@ -321,6 +322,99 @@ def public_user_federated_job_posts(request, username):
         "meta": {"next_cursor": next_cursor},
     }
     return Response(payload)
+
+
+# The empty Sankey payload returned whenever a populated flow must be
+# suppressed (federate_rich off, unknown username, or no published posts).
+# Same key set build_flow emits for an empty queryset, so the frontend's
+# existing application-flow model deserializes it without a special case.
+_EMPTY_FLOW = {
+    "nodes": [],
+    "links": [],
+    "total_job_posts": 0,
+    "total_applications": 0,
+}
+
+
+def _application_flow_response(flow: dict) -> Response:
+    """Wrap a flow payload in the SAME JSON:API single-resource envelope the
+    authed ``application_flow_report`` view emits (``type: report``, ``id:
+    application-flow``, attrs ``nodes``/``links``/``total_job_posts``/
+    ``total_applications``) so the frontend's existing model/serializer Just
+    Works. ``scope`` is ``public_profile`` to distinguish this surface from
+    the authed ``mine``/``all`` and the anonymous ``public_demo`` scopes."""
+    return Response(
+        {
+            "data": {
+                "type": "report",
+                "id": "application-flow",
+                "attributes": {**flow, "scope": "public_profile"},
+            }
+        }
+    )
+
+
+@extend_schema(
+    tags=["Reports"],
+    summary="Public application-flow (Sankey) funnel for a user's profile",
+    description=(
+        "Public, no-auth read of a user's job-hunt funnel — the Sankey "
+        "rendered at the top of the ``/<username>`` profile. Runs the same "
+        "``build_flow`` aggregation the authed "
+        "``/api/v1/reports/application-flow/`` uses, but over EXACTLY the "
+        "published (audience-public) job posts that back the public "
+        "federated feed — the same posts that render as cards below the "
+        "chart, never the full pipeline. Gated on the profile owner's "
+        "``federate_rich`` opt-in: when ``federate_rich`` is off, the "
+        "username doesn't resolve, or there are no published posts, the "
+        "endpoint returns an EMPTY flow (``nodes``/``links`` empty, totals "
+        "0) with HTTP 200 — never 403/404 — so an anonymous visitor to a "
+        "non-rich profile simply gets a chart the frontend can hide. The "
+        "envelope is identical to the authed report (``type: report``, "
+        "``id: application-flow``) with ``scope: public_profile``."
+    ),
+    parameters=[
+        OpenApiParameter(
+            "username",
+            OpenApiTypes.STR,
+            OpenApiParameter.PATH,
+            description="Username (not id) of the profile owner",
+        ),
+    ],
+    responses={
+        200: OpenApiResponse(
+            description="JSON:API application-flow report (possibly empty)"
+        ),
+    },
+)
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def public_user_application_flow(request, username):
+    """GET /api/v1/users/<username>/application-flow/ — see module/decorator docs.
+
+    Mirrors :func:`public_user_federated_job_posts`' username resolution and
+    published-post selection so the funnel reflects PRECISELY the posts that
+    render as cards on the public profile (PUBLISHED ONLY — not the full
+    pipeline). Suppressed to an empty flow (HTTP 200, no 403/404) when the
+    owner hasn't opted into rich federation, the username doesn't resolve, or
+    they have no published posts. ``user_id`` is passed to ``build_flow`` so
+    the funnel counts only the owner's own applications/scores on those posts.
+    """
+    User = get_user_model()
+    user = User.objects.filter(username=username).first()
+    # Gate: only a resolvable, rich-opted-in owner gets a populated funnel.
+    # Anything else collapses to the empty chart — no leak, no error status.
+    if user is None or not user_opted_into_rich(user.id):
+        return _application_flow_response(_EMPTY_FLOW)
+
+    # Exact same post selection as the public federated feed (the cards on
+    # the page). prefetch the status chain build_flow walks per post so this
+    # AllowAny endpoint stays O(1)-ish in queries instead of N+1 per app.
+    qs = public_jobpost_queryset_for_user(user.id).prefetch_related(
+        "applications__application_statuses__status"
+    )
+    flow = build_flow(qs, user_id=user.id)
+    return _application_flow_response(flow)
 
 
 def _public_user_resource(user) -> dict:
