@@ -704,8 +704,29 @@ class JobPostExtractor:
         # (title, company), which forks a new JobPost when the
         # extractor finds the company but the existing stub had
         # company=NULL. jp 1918 / jp 1922 incident (2026-05-08).
+        # BACK-104: a scrape that is explicitly linked to a JobPost
+        # (``job_post_id`` set) augments THAT post — authoritative over the
+        # URL-based dedupe below. ``force=True`` is already handled above
+        # (explicit re-parse merge); this covers the runner / poller path,
+        # where the scrape-graph's PersistJobPost node POSTs to
+        # persist-extraction with force=False. On that path ``scrape.url``
+        # may have diverged from the post's stored ``link`` after a
+        # tracker-unwrap or a ResolveFinalUrl redirect — ZipRecruiter
+        # ``/km/<token>`` email forwards are the canonical case: the post is
+        # created from the ephemeral, browser-only-resolvable tracker link,
+        # then the runner resolves the real job URL. Without this, the
+        # ``link`` / ``canonical_link`` lookup misses and the get_or_create
+        # cold path forks a NEW JobPost, orphaning the linked one (the
+        # failure mode BACK-104 fixes). Route the linked post through the
+        # same trust-aware branches the URL link-hit uses (higher-trust
+        # source wins; otherwise stub-upgrade / fill) so human-verified
+        # fields are never clobbered.
         link_hit = None
-        if job is None and link:
+        link_hit_via_fk = False
+        if job is None and scrape.job_post_id:
+            link_hit = JobPost.objects.filter(pk=scrape.job_post_id).first()
+            link_hit_via_fk = link_hit is not None
+        if link_hit is None and job is None and link:
             canonical = canonicalize_link(link)
             # Order complete=True first when multiple JPs share the
             # canonical_link (link is unique, but canonical_link isn't):
@@ -737,6 +758,25 @@ class JobPostExtractor:
             elif not link_hit.complete:
                 self.last_outcome = "updated_stub"
                 update_fields = []
+                # FK-linked augment (BACK-104): when the post was matched by
+                # ``job_post_id`` rather than by URL, its stored ``link`` is
+                # the original submission URL — possibly an ephemeral tracker
+                # (a ZR ``/km/`` redirect) — while ``scrape.url`` is the
+                # browser-resolved, known-good destination. Adopt the resolved
+                # URL as the canonical link unless the post carries
+                # extension-direct provenance (the user-rendered URL wins —
+                # see ``prefer_extension_direct_link``). This branch only
+                # runs when the incoming source does NOT outrank the existing
+                # one (a higher-trust scrape already adopted the link via
+                # ``_trust_aware_overwrite`` above). A normal URL link-hit
+                # already has ``scrape.url == job.link`` so this is a no-op
+                # there — only the FK path can diverge.
+                if link_hit_via_fk:
+                    chosen_link = prefer_extension_direct_link(job, scrape, link)
+                    if chosen_link and job.link != chosen_link:
+                        job.link = chosen_link
+                        job.canonical_link = canonicalize_link(chosen_link)
+                        update_fields.extend(["link", "canonical_link"])
                 if validated_data.title and job.title != validated_data.title:
                     job.title = validated_data.title
                     update_fields.append("title")

@@ -142,6 +142,23 @@ class ScrapeViewSet(BaseViewSet):
         if status_filter:
             qs = qs.filter(status=status_filter)
 
+        # Scope to a specific JobPost. cc_auto's forward-path enrich check
+        # (GET /scrapes/?filter[job_post_id]=<id>) relies on this to decide
+        # whether a freshly-created known-good post already has a claimable
+        # scrape before queueing its own `hold` scrape. Without the filter
+        # the list silently ignored the param and returned the principal's
+        # newest scrape regardless of post (per_page=1 → always 1 row),
+        # producing a false "scrape already present" skip that stranded
+        # ZipRecruiter /km/ forwards with no scrape at all (finding #3 /
+        # BACK-104). Accept the `job_post` relationship alias too. job_post_id
+        # is a NanoID string PK; pass it straight through.
+        job_post_filter = (
+            request.query_params.get("filter[job_post_id]")
+            or request.query_params.get("filter[job_post]")
+        )
+        if job_post_filter:
+            qs = qs.filter(job_post_id=job_post_filter)
+
         # has_score filter — scope to scrapes whose linked JobPost either has
         # or lacks a Score record. Drives the auto-score daemon's candidate
         # list: it polls completed+has_score=false to find new posts to score.
