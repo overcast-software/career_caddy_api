@@ -80,9 +80,11 @@ class TestPublicApplicationFlow(TestCase):
         self.client = APIClient()
         self.company = Company.objects.create(name="Bushwood CC")
 
-        # Rich owner: opted into federate_rich, with one PUBLISHED post that
-        # carries a real application (Applied) so totals are non-zero, plus a
-        # PRIVATE post that also has an application — it must never count.
+        # Rich owner: opted into federate_rich, with one PUBLISHED post the
+        # owner TRIAGED ("Vetted Good") and then advanced to Applied, so it
+        # survives the CC-107 vetted-only filter and totals are non-zero,
+        # plus a PRIVATE post that also has an application — it must never
+        # count.
         self.rich = User.objects.create_user(username="dough", password="pass")
         Profile.objects.create(user=self.rich, federate_rich=True)
 
@@ -97,6 +99,9 @@ class TestPublicApplicationFlow(TestCase):
         pub_app = JobApplication.objects.create(
             job_post=self.published, user=self.rich
         )
+        # Vetted Good first, then Applied later: latest status is Applied,
+        # but the existence of a vetting verdict keeps the post in the funnel.
+        _log(pub_app, "Vetted Good", days_ago=6)
         _log(pub_app, "Applied", days_ago=5)
 
         # Private (audience=[]) — excluded from the published queryset, so
@@ -199,3 +204,127 @@ class TestPublicApplicationFlow(TestCase):
         no_slash = self.client.get("/api/v1/users/dough/application-flow")
         self.assertEqual(with_slash.status_code, 200)
         self.assertEqual(no_slash.status_code, 200)
+
+
+class TestPublicApplicationFlowVettedOnly(TestCase):
+    """CC-107 — the PUBLIC funnel counts ONLY posts the owner has triaged.
+
+    A post is "vetted" iff the OWNER logged at least one "Vetted Good" or
+    "Vetted Bad" status on it — an EXISTENCE test (matching ``_vetting_hub``),
+    NOT a latest-status check. Unvetted / no-verdict published posts are
+    excluded; a verdict by a different user can't pull a post in.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.company = Company.objects.create(name="Bushwood CC")
+        self.owner = User.objects.create_user(username="webb", password="pass")
+        Profile.objects.create(user=self.owner, federate_rich=True)
+
+        # Vetted Good — counted, terminates at the vetted_good hub (its only
+        # status is a triage label, so it yields no "real" application).
+        good = self._pub("https://example.com/v/good", "Vetted good role")
+        _log(JobApplication.objects.create(job_post=good, user=self.owner),
+             "Vetted Good", days_ago=4)
+
+        # Vetted Bad — counted in total_job_posts, terminates at vetted_bad.
+        bad = self._pub("https://example.com/v/bad", "Vetted bad role")
+        _log(JobApplication.objects.create(job_post=bad, user=self.owner),
+             "Vetted Bad", days_ago=4)
+
+        # Unvetted (Applied only, no verdict) — EXCLUDED by the filter.
+        unvetted = self._pub("https://example.com/v/unvetted", "Unvetted role")
+        _log(JobApplication.objects.create(job_post=unvetted, user=self.owner),
+             "Applied", days_ago=3)
+
+        # No verdict AND no application at all — EXCLUDED.
+        self._pub("https://example.com/v/bare", "Bare role")
+
+    def _pub(self, link: str, title: str) -> JobPost:
+        return JobPost.objects.create(
+            created_by=self.owner,
+            title=title,
+            description=title,
+            link=link,
+            company=self.company,
+            audience=[AS2_PUBLIC],
+        )
+
+    def _attrs(self, username: str):
+        resp = self.client.get(URL.format(username=username))
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["type"], "report")
+        self.assertEqual(data["id"], "application-flow")
+        attrs = data["attributes"]
+        self.assertEqual(set(attrs.keys()), _EXPECTED_ATTR_KEYS)
+        self.assertEqual(attrs["scope"], "public_profile")
+        return attrs
+
+    def test_counts_only_vetted_posts(self):
+        # owner has 4 published posts: 1 Vetted Good + 1 Vetted Bad (counted)
+        # and 1 unvetted + 1 no-verdict (excluded). total == good + bad.
+        attrs = self._attrs("webb")
+        self.assertEqual(attrs["total_job_posts"], 2)
+
+    def test_no_orphan_unvetted_or_stub_nodes(self):
+        # With every unvetted post filtered out, build_flow's used_nodes drops
+        # the now-orphaned unvetted + stub nodes automatically.
+        attrs = self._attrs("webb")
+        node_ids = {n["id"] for n in attrs["nodes"]}
+        self.assertNotIn("unvetted", node_ids)
+        self.assertNotIn("stub", node_ids)
+
+    def test_root_job_posts_node_kept(self):
+        # The approved shape is "filter only, keep root" — job_posts stays.
+        attrs = self._attrs("webb")
+        node_ids = {n["id"] for n in attrs["nodes"]}
+        self.assertIn("job_posts", node_ids)
+
+    def test_vetted_then_applied_still_counted_regression(self):
+        # THE WHOLE POINT: a post vetted Good then advanced to Applied has
+        # LATEST status "Applied" — a latest-status filter would drop it. The
+        # existence filter keeps it, and it flows all the way to "applied".
+        carl = User.objects.create_user(username="carl", password="pass")
+        Profile.objects.create(user=carl, federate_rich=True)
+        advanced = JobPost.objects.create(
+            created_by=carl,
+            title="Assistant greenskeeper",
+            description="Advanced post",
+            link="https://example.com/v/advanced",
+            company=self.company,
+            audience=[AS2_PUBLIC],
+        )
+        app = JobApplication.objects.create(job_post=advanced, user=carl)
+        _log(app, "Vetted Good", days_ago=10)  # older verdict
+        _log(app, "Applied", days_ago=2)        # newer — latest status
+
+        attrs = self._attrs("carl")
+        # Counted despite latest status being "Applied"...
+        self.assertEqual(attrs["total_job_posts"], 1)
+        self.assertEqual(attrs["total_applications"], 1)
+        # ...and it flows PAST the vetting hub all the way to applied.
+        self.assertEqual(_edge(attrs, "job_posts", "vetted_good"), 1)
+        self.assertEqual(_edge(attrs, "applications", "applied"), 1)
+
+    def test_other_users_verdict_does_not_pull_post_in(self):
+        # Owner-scoping: lacey owns an otherwise-unvetted published post; a
+        # DIFFERENT user logs "Vetted Good" against it. lacey's funnel must
+        # NOT count it — the Exists subquery is scoped to the owner.
+        lacey = User.objects.create_user(username="lacey", password="pass")
+        Profile.objects.create(user=lacey, federate_rich=True)
+        post = JobPost.objects.create(
+            created_by=lacey,
+            title="Caddy master",
+            description="Owner unvetted post",
+            link="https://example.com/v/foreign",
+            company=self.company,
+            audience=[AS2_PUBLIC],
+        )
+        stranger = User.objects.create_user(username="spackler", password="pass")
+        foreign_app = JobApplication.objects.create(job_post=post, user=stranger)
+        _log(foreign_app, "Vetted Good", days_ago=1)
+
+        attrs = self._attrs("lacey")
+        self.assertEqual(attrs["total_job_posts"], 0)
+        self.assertEqual(attrs["nodes"], [])

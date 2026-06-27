@@ -53,7 +53,7 @@ import binascii
 from datetime import datetime
 
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
 from rest_framework.decorators import api_view, permission_classes
@@ -62,6 +62,7 @@ from rest_framework.response import Response
 
 from job_hunting.api.serializers import _to_primitive
 from job_hunting.api.views.federation import public_jobpost_queryset_for_user
+from job_hunting.models import JobApplicationStatus
 from job_hunting.lib.as_object import (
     resolve_personal_annotations_batch,
     user_opted_into_rich,
@@ -393,12 +394,14 @@ def public_user_application_flow(request, username):
     """GET /api/v1/users/<username>/application-flow/ — see module/decorator docs.
 
     Mirrors :func:`public_user_federated_job_posts`' username resolution and
-    published-post selection so the funnel reflects PRECISELY the posts that
-    render as cards on the public profile (PUBLISHED ONLY — not the full
-    pipeline). Suppressed to an empty flow (HTTP 200, no 403/404) when the
-    owner hasn't opted into rich federation, the username doesn't resolve, or
-    they have no published posts. ``user_id`` is passed to ``build_flow`` so
-    the funnel counts only the owner's own applications/scores on those posts.
+    published-post selection, then narrows to posts the OWNER has TRIAGED —
+    those carrying a "Vetted Good"/"Vetted Bad" verdict (CC-107) — so the
+    public funnel counts only deliberately-vetted posts (PUBLISHED + VETTED,
+    not the full pipeline). Suppressed to an empty flow (HTTP 200, no
+    403/404) when the owner hasn't opted into rich federation, the username
+    doesn't resolve, or they have no published+vetted posts. ``user_id`` is
+    passed to ``build_flow`` so the funnel counts only the owner's own
+    applications/scores on those posts.
     """
     User = get_user_model()
     user = User.objects.filter(username=username).first()
@@ -407,11 +410,28 @@ def public_user_application_flow(request, username):
     if user is None or not user_opted_into_rich(user.id):
         return _application_flow_response(_EMPTY_FLOW)
 
-    # Exact same post selection as the public federated feed (the cards on
-    # the page). prefetch the status chain build_flow walks per post so this
-    # AllowAny endpoint stays O(1)-ish in queries instead of N+1 per app.
-    qs = public_jobpost_queryset_for_user(user.id).prefetch_related(
-        "applications__application_statuses__status"
+    # Start from the exact post selection that backs the public federated
+    # feed (the cards on the page), then keep ONLY posts the OWNER has
+    # actually triaged — i.e. carrying at least one "Vetted Good" or
+    # "Vetted Bad" verdict (CC-107). This mirrors ``_vetting_hub``'s
+    # EXISTENCE test exactly: a post is "vetted" iff such a status row
+    # exists, regardless of any LATER status. Using ``Exists`` (not a
+    # latest-status ``Subquery``) is deliberate — a post vetted Good then
+    # advanced to "Applied" has latest status "Applied" but MUST still
+    # count, since it flows furthest through the funnel. Owner-scoped via
+    # ``application__user_id`` so a different user's verdict can't pull an
+    # otherwise-unvetted post into this funnel.
+    owner_vetted = JobApplicationStatus.objects.filter(
+        application__job_post=OuterRef("pk"),
+        application__user_id=user.id,
+        status__status__in=("Vetted Good", "Vetted Bad"),
+    )
+    # prefetch the status chain build_flow walks per post so this AllowAny
+    # endpoint stays O(1)-ish in queries instead of N+1 per app.
+    qs = (
+        public_jobpost_queryset_for_user(user.id)
+        .filter(Exists(owner_vetted))
+        .prefetch_related("applications__application_statuses__status")
     )
     flow = build_flow(qs, user_id=user.id)
     return _application_flow_response(flow)
