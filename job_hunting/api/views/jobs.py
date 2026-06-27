@@ -704,7 +704,10 @@ class JobPostViewSet(BaseViewSet):
                 validate_submission_url,
             )
             try:
-                attrs["link"] = validate_submission_url(link)
+                # allow_mailto: a recruiter direct-solicitation post's apply
+                # target is the recruiter's address (cc-auto a6ebcc0). Only
+                # the JobPost.link path opts in; scrape ingestion never does.
+                attrs["link"] = validate_submission_url(link, allow_mailto=True)
             except UrlPolicyError as e:
                 logger.info(
                     "JobPostViewSet.create: rejecting link=%s — %s (%s)",
