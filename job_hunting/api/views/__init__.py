@@ -61,7 +61,11 @@ from .graph import (
     graph_aggregate,
     graph_mermaid,
 )
-from .public_profile import public_user_federated_job_posts, public_user_profile
+from .public_profile import (
+    public_user_application_flow,
+    public_user_federated_job_posts,
+    public_user_profile,
+)
 
 __all__ = [
     # ViewSets
@@ -116,6 +120,7 @@ __all__ = [
     "graph_structure",
     "graph_aggregate",
     "graph_mermaid",
+    "public_user_application_flow",
     "public_user_federated_job_posts",
     "public_user_profile",
 ]

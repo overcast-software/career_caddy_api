@@ -95,6 +95,7 @@ from job_hunting.api.views import (
     scrape_queue_health,
     public_user_federated_job_posts,
     public_user_profile,
+    public_user_application_flow,
 )
 
 
@@ -255,6 +256,17 @@ urlpatterns = [
         r"^api/v1/users/(?P<username>[^/]+)/job-posts/federated/?$",
         public_user_federated_job_posts,
         name="user-federated-job-posts",
+    ),
+    # CC-105 — public (AllowAny) application-flow (Sankey) funnel for the
+    # /<username> profile header. Same published-post selection + username
+    # resolution as the federated feed above; gated on the owner's
+    # federate_rich opt-in and degrades to an empty flow (200, never 403/404).
+    # Multi-segment path so the numeric-guarded /users/<username>/ catch-all
+    # below never shadows it; placed before the router include all the same.
+    re_path(
+        r"^api/v1/users/(?P<username>[^/]+)/application-flow/?$",
+        public_user_application_flow,
+        name="public-user-application-flow",
     ),
     # CC #51 — public (AllowAny) read of a single user as a JSON:API `user`
     # resource (the federated relationship owner; powers the /<username>
