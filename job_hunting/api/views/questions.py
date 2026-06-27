@@ -73,7 +73,10 @@ class QuestionViewSet(BaseViewSet):
         if application_filter:
             qs = qs.filter(application_id=application_filter)
 
-        qs = qs.order_by("-id")
+        # NanoID PKs sort lexically, not by recency (CC-77) — order by
+        # created_at so the list is genuinely newest-first; -id is only a
+        # deterministic tiebreaker for rows sharing a timestamp.
+        qs = qs.order_by("-created_at", "-id")
         total = qs.count()
         page_number, page_size = self._page_params()
         total_pages = math.ceil(total / page_size) if page_size else 1
@@ -279,7 +282,10 @@ class AnswerViewSet(BaseViewSet):
         if question_filter:
             qs = qs.filter(question_id=question_filter)
 
-        qs = qs.order_by("-id")
+        # NanoID PKs sort lexically, not by recency (CC-77) — order by
+        # created_at so the list is genuinely newest-first; -id is only a
+        # deterministic tiebreaker for rows sharing a timestamp.
+        qs = qs.order_by("-created_at", "-id")
         total = qs.count()
         page_number, page_size = self._page_params()
         total_pages = math.ceil(total / page_size) if page_size else 1
