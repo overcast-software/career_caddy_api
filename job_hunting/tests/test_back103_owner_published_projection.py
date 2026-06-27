@@ -1,12 +1,15 @@
-"""BACK-103 (Task E) — owner-published federated projection exposes
-verdict / score / applied.
+"""BACK-103 / CC-104 — federate_rich drives the public federated projection.
 
-The CC-51 public federated collection stays public-safe for anonymous /
-non-owner visitors, but when the OWNER views their own page (SPA sends
-its JWT on this AllowAny route) each published post carries the owner's
-verdict / score / applied under ``meta.federation`` for the rich /@dough
-page. The enrichment is resolved for the whole page in a bounded query
-count (reuses the Task D batch resolver).
+The CC-51 public federated collection carries the owner's verdict / score /
+applied under ``meta.federation`` for the rich /@dough page. CC-104 widens
+the gate from owner-only to ``is_owner OR user_opted_into_rich(user.id)``:
+when the profile owner has ``Profile.federate_rich=True`` every visitor
+(anonymous included) sees ``meta.federation`` publicly — consistent with the
+fediverse Note that already publishes the same signals. With ``federate_rich``
+off, only the authenticated owner keeps their own preview (the ``is_owner``
+leg); anonymous + non-owner visitors stay public-safe. The enrichment is
+resolved for the whole page in a bounded query count (reuses the Task D
+batch resolver).
 """
 from __future__ import annotations
 
@@ -69,21 +72,28 @@ class TestOwnerPublishedProjection(TestCase):
         self.assertEqual(meta["verdict"], "Vetted Good")
         self.assertTrue(meta["applied"])
 
-    def test_anonymous_gets_public_safe_only(self):
+    def test_anonymous_sees_federation_when_rich(self):
+        # federate_rich=True (seeded in setUp) → the public web profile
+        # exposes meta.federation to anonymous visitors too (CC-104).
         self._seed(1, score=87, vet="Vetted Good", applied=True)
         resp = APIClient().get(self.url)
         self.assertEqual(resp.status_code, 200)
-        resource = resp.json()["data"][0]
-        self.assertNotIn("federation", resource.get("meta", {}))
+        meta = resp.json()["data"][0]["meta"]["federation"]
+        self.assertEqual(meta["score"], 87)
+        self.assertEqual(meta["verdict"], "Vetted Good")
+        self.assertTrue(meta["applied"])
 
-    def test_non_owner_gets_public_safe_only(self):
+    def test_non_owner_sees_federation_when_rich(self):
+        # federate_rich=True → a different authenticated visitor also sees it.
         self._seed(1, score=87, vet="Vetted Good", applied=True)
         other = User.objects.create_user(username="snoop", password="p")
         client = APIClient()
         client.force_authenticate(user=other)
         resp = client.get(self.url)
-        resource = resp.json()["data"][0]
-        self.assertNotIn("federation", resource.get("meta", {}))
+        meta = resp.json()["data"][0]["meta"]["federation"]
+        self.assertEqual(meta["score"], 87)
+        self.assertEqual(meta["verdict"], "Vetted Good")
+        self.assertTrue(meta["applied"])
 
     def test_owner_projection_query_count_constant(self):
         self._seed(1, score=80, vet="Vetted Good")
@@ -104,3 +114,53 @@ class TestOwnerPublishedProjection(TestCase):
             q_small, q_big,
             f"owner projection N+1'd: {q_small} (2) vs {q_big} (6)",
         )
+
+
+@override_settings(INSTANCE_ORIGIN="http://testserver", CAREER_CADDY_INSTANCE="testserver")
+class TestPublishedProjectionRichOff(TestCase):
+    """federate_rich=False — the public web profile stays plain for every
+    PUBLIC visitor; only the authenticated owner keeps their own preview via
+    the ``is_owner`` leg of the CC-104 ``is_owner OR federate_rich`` gate."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username="dough", password="p")
+        Profile.objects.create(user=self.owner, federate_rich=False)
+        self.url = "/api/v1/users/dough/job-posts/federated/"
+        company = Company.objects.create(name="Acme off")
+        post = JobPost.objects.create(
+            created_by=self.owner, title="Engineer off", description="d",
+            complete=True, link="https://x.example/j/off", company=company,
+            audience=[AS2_PUBLIC],
+        )
+        Score.objects.create(job_post=post, user=self.owner, score=91)
+        app = JobApplication.objects.create(
+            job_post=post, user=self.owner, applied_at=timezone.now(),
+        )
+        status = Status.objects.get_or_create(status="Vetted Good")[0]
+        JobApplicationStatus.objects.create(
+            application=app, status=status, logged_at=timezone.now()
+        )
+
+    def test_anonymous_sees_public_safe_only(self):
+        resp = APIClient().get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        resource = resp.json()["data"][0]
+        self.assertNotIn("federation", resource.get("meta", {}))
+
+    def test_non_owner_sees_public_safe_only(self):
+        other = User.objects.create_user(username="snoop", password="p")
+        client = APIClient()
+        client.force_authenticate(user=other)
+        resp = client.get(self.url)
+        resource = resp.json()["data"][0]
+        self.assertNotIn("federation", resource.get("meta", {}))
+
+    def test_owner_still_sees_own_preview(self):
+        client = APIClient()
+        client.force_authenticate(user=self.owner)
+        resp = client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        meta = resp.json()["data"][0]["meta"]["federation"]
+        self.assertEqual(meta["score"], 91)
+        self.assertEqual(meta["verdict"], "Vetted Good")
+        self.assertTrue(meta["applied"])

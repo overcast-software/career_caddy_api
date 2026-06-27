@@ -62,7 +62,10 @@ from rest_framework.response import Response
 
 from job_hunting.api.serializers import _to_primitive
 from job_hunting.api.views.federation import public_jobpost_queryset_for_user
-from job_hunting.lib.as_object import resolve_personal_annotations_batch
+from job_hunting.lib.as_object import (
+    resolve_personal_annotations_batch,
+    user_opted_into_rich,
+)
 
 
 # Deliberate public projection. Display-only fields a visitor needs to
@@ -101,12 +104,13 @@ def _public_jobpost_resource(job_post, annotations=None) -> dict:
     shared resource and there is no public Company read endpoint, so the
     name is inlined rather than linked).
 
-    ``annotations`` (BACK-103 / Task E) is a ``PersonalAnnotations`` and is
-    supplied ONLY when the requester is the profile OWNER viewing their own
-    page — it surfaces the owner's verdict / score / applied under
-    ``meta.federation`` so the rich ``/@dough`` page can render its
-    show-off line. The generic anonymous/non-owner projection passes None
-    and stays public-safe (no private vetting leak).
+    ``annotations`` (BACK-103 / CC-104) is a ``PersonalAnnotations`` and is
+    supplied when the profile owner has ``federate_rich=True`` (publicly, to
+    ALL visitors) OR when the requester is the authenticated owner viewing
+    their own page — it surfaces the owner's verdict / score / applied under
+    ``meta.federation`` so the rich ``/@dough`` page can render its show-off
+    line. When ``federate_rich`` is off, the anonymous/non-owner projection
+    passes None and stays public-safe (no private vetting leak).
     """
     attrs = {name: _to_primitive(getattr(job_post, name)) for name in _PUBLIC_ATTRS}
     company_name = None
@@ -285,19 +289,28 @@ def public_user_federated_job_posts(request, username):
     if next_cursor is not None:
         links["next"] = f"{self_url}?page[size]={page_size}&page[after]={next_cursor}"
 
-    # BACK-103 (Task E): when the authenticated requester IS the profile
-    # owner (the SPA sends its JWT even on this AllowAny route), enrich each
-    # published post with the owner's verdict / score / applied for the rich
-    # /@dough page. Anonymous + non-owner visitors get the public-safe
-    # projection only — another user's private vetting never leaks.
+    # CC-104: when the profile owner has opted into rich federation
+    # (``Profile.federate_rich``), enrich each published post with the
+    # owner's verdict / score / applied under ``meta.federation`` for ALL
+    # visitors (anonymous included) — the web /@dough page renders rich,
+    # consistent with the fediverse Note that already publishes these same
+    # signals publicly (``as_object._should_render_rich``). The ``is_owner``
+    # leg stays as an OR so the owner keeps their own preview even before
+    # opting in (the SPA sends its JWT even on this AllowAny route). When
+    # ``federate_rich`` is off, anonymous + non-owner visitors get the
+    # public-safe projection only — another user's private vetting never
+    # leaks.
     viewer = getattr(request, "user", None)
     is_owner = bool(
         viewer is not None
         and getattr(viewer, "is_authenticated", False)
         and viewer.id == user.id
     )
+    expose_federation = is_owner or user_opted_into_rich(user.id)
     annotation_map = (
-        resolve_personal_annotations_batch(items, user.id) if is_owner else {}
+        resolve_personal_annotations_batch(items, user.id)
+        if expose_federation
+        else {}
     )
     payload = {
         "data": [
