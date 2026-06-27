@@ -11,6 +11,11 @@ from drf_spectacular.utils import (
 )
 
 from .base import BaseViewSet
+from ._sorting import (
+    InvalidSortField,
+    parse_sort_fields,
+    sort_error_response_body,
+)
 from ._schema import _JSONAPI_LIST
 from ..serializers import (
     CompanySerializer,
@@ -46,6 +51,17 @@ class CompanyViewSet(BaseViewSet):
     model = Company
     serializer_class = CompanySerializer
 
+    # Whitelist of explicit `?sort=` fields. The default `relevant`/`-relevant`
+    # is handled separately (it's an annotation, not a column). Unknown field
+    # -> 400 (not a FieldError 500).
+    SORT_FIELDS = frozenset({
+        "id",
+        "name",
+        "display_name",
+        "created_at",
+        "slug",
+    })
+
     def create(self, request):
         ser = self.get_serializer()
         try:
@@ -80,13 +96,15 @@ class CompanyViewSet(BaseViewSet):
                 )
             ).order_by("-latest_job_post")
         elif sort_param:
-            sort_fields = []
-            for field in sort_param.split(","):
-                field = field.strip()
-                if field.startswith("-"):
-                    sort_fields.append(f"-{field[1:]}")
-                else:
-                    sort_fields.append(field)
+            # Validate against the whitelist first so an unknown field returns
+            # 400 here instead of a FieldError 500 at qs.count() below.
+            try:
+                sort_fields = parse_sort_fields(sort_param, self.SORT_FIELDS)
+            except InvalidSortField as e:
+                return Response(
+                    sort_error_response_body(e),
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 

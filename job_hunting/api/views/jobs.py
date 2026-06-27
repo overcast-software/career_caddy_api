@@ -4,7 +4,7 @@ import math
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Q, F, OuterRef, Subquery
+from django.db.models import Q, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -17,6 +17,11 @@ from drf_spectacular.utils import (
 )
 
 from .base import BaseViewSet
+from ._sorting import (
+    InvalidSortField,
+    parse_sort_fields,
+    sort_error_response_body,
+)
 from ._schema import (
     _PAGE_PARAMS,
     _SORT_PARAM,
@@ -144,6 +149,23 @@ def _attach_published_state(job_posts, user):
 class JobPostViewSet(BaseViewSet):
     model = JobPost
     serializer_class = JobPostSerializer
+
+    # Whitelist of fields `?sort=` may reference. Anything else -> 400 (not a
+    # 500 FieldError at qs.count()). NOTE there is no `updated_at` column on
+    # JobPost (only `created_at`) — that was the CC-93 500.
+    SORT_FIELDS = frozenset({
+        "id",
+        "created_at",
+        "posted_date",
+        "extraction_date",
+        "last_seen_at",
+        "title",
+        "salary_min",
+        "salary_max",
+        "location",
+        "posting_status",
+        "apply_url_resolved_at",
+    })
 
     @staticmethod
     def _snapshot_duplicate_signals(post, request):
@@ -456,21 +478,19 @@ class JobPostViewSet(BaseViewSet):
 
         sort_param = request.query_params.get("sort")
         if sort_param:
-            sort_fields = []
-            sort_field_names: set[str] = set()
-            for field in sort_param.split(","):
-                field = field.strip()
-                name = field.lstrip("-")
-                sort_field_names.add(name)
-                if field.startswith("-"):
-                    sort_fields.append(F(name).desc(nulls_last=True))
-                else:
-                    sort_fields.append(F(name).asc(nulls_last=True))
-            # Deterministic tiebreak: fall through to -id when the user's
-            # sort could otherwise leave same-day rows in index-random order
-            # (e.g. sort=-posted_date with many rows sharing today's date).
-            if sort_fields and "id" not in sort_field_names:
-                sort_fields.append(F("id").desc())
+            # Validate against the whitelist BEFORE order_by so an unknown
+            # field (e.g. `-updated_at` — JobPost has only `created_at`)
+            # returns a 400 here instead of a FieldError 500 at qs.count()
+            # below. The helper appends a deterministic `-id` tiebreak so
+            # same-day rows (e.g. many sharing today's posted_date) don't
+            # reshuffle across pages.
+            try:
+                sort_fields = parse_sort_fields(sort_param, self.SORT_FIELDS)
+            except InvalidSortField as e:
+                return Response(
+                    sort_error_response_body(e),
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 
@@ -1852,6 +1872,17 @@ class JobApplicationViewSet(BaseViewSet):
     model = JobApplication
     serializer_class = JobApplicationSerializer
 
+    # Whitelist of `?sort=` fields — mirrors the public MCP
+    # get_job_applications enum. Unknown field -> 400 (not a FieldError 500).
+    SORT_FIELDS = frozenset({
+        "id",
+        "applied_at",
+        "status",
+        "job_post_id",
+        "company_id",
+        "notes",
+    })
+
     def list(self, request):
         # CC-91: select_related the to-one FKs + prefetch application-statuses
         # so the page serializes in a bounded number of queries instead of a
@@ -1883,24 +1914,17 @@ class JobApplicationViewSet(BaseViewSet):
                 | Q(notes__icontains=query_filter)
             ).distinct()
 
-        # Handle sorting
+        # Handle sorting — validate against the whitelist first so an unknown
+        # field returns 400 here instead of a FieldError 500 at qs.count().
         sort_param = request.query_params.get("sort")
         if sort_param:
-            sort_fields = []
-            sort_field_names: set[str] = set()
-            for field in sort_param.split(","):
-                field = field.strip()
-                name = field.lstrip("-")
-                sort_field_names.add(name)
-                if field.startswith("-"):
-                    sort_fields.append(F(name).desc(nulls_last=True))
-                else:
-                    sort_fields.append(F(name).asc(nulls_last=True))
-            # Deterministic tiebreak: fall through to -id when the user's
-            # sort could otherwise leave same-day rows in index-random order
-            # (e.g. sort=-posted_date with many rows sharing today's date).
-            if sort_fields and "id" not in sort_field_names:
-                sort_fields.append(F("id").desc())
+            try:
+                sort_fields = parse_sort_fields(sort_param, self.SORT_FIELDS)
+            except InvalidSortField as e:
+                return Response(
+                    sort_error_response_body(e),
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
 

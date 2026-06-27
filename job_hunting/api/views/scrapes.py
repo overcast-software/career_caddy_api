@@ -19,6 +19,11 @@ from rest_framework import serializers as drf_serializers
 from django_q.tasks import async_task
 
 from .base import BaseViewSet
+from ._sorting import (
+    InvalidSortField,
+    parse_sort_fields,
+    sort_error_response_body,
+)
 from ._schema import (
     _PAGE_PARAMS,
     _SORT_PARAM,
@@ -103,6 +108,17 @@ class ScrapeViewSet(BaseViewSet):
     model = Scrape
     serializer_class = ScrapeSerializer
 
+    # Whitelist of `?sort=` fields. Unknown field -> 400 (not a FieldError 500).
+    SORT_FIELDS = frozenset({
+        "id",
+        "created_at",
+        "scraped_at",
+        "status",
+        "claimed_at",
+        "attended",
+        "source",
+    })
+
     def list(self, request):
         qs = Scrape.objects.filter(
             Q(created_by=request.user)
@@ -116,18 +132,15 @@ class ScrapeViewSet(BaseViewSet):
         # pages. Default sort is created_at DESC nulls-last, then -id.
         sort_param = request.query_params.get("sort")
         if sort_param:
-            sort_fields = []
-            sort_field_names: set[str] = set()
-            for field in sort_param.split(","):
-                field = field.strip()
-                name = field.lstrip("-")
-                sort_field_names.add(name)
-                if field.startswith("-"):
-                    sort_fields.append(F(name).desc(nulls_last=True))
-                else:
-                    sort_fields.append(F(name).asc(nulls_last=True))
-            if sort_fields and "id" not in sort_field_names:
-                sort_fields.append(F("id").desc())
+            # Validate against the whitelist first so an unknown field returns
+            # 400 here instead of a FieldError 500 at qs.count() below.
+            try:
+                sort_fields = parse_sort_fields(sort_param, self.SORT_FIELDS)
+            except InvalidSortField as e:
+                return Response(
+                    sort_error_response_body(e),
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if sort_fields:
                 qs = qs.order_by(*sort_fields)
         else:
