@@ -65,6 +65,7 @@ from job_hunting.api.views.federation import public_jobpost_queryset_for_user
 from job_hunting.models import JobApplicationStatus
 from job_hunting.lib.as_object import (
     resolve_personal_annotations_batch,
+    resolve_status_timeline_batch,
     user_opted_into_rich,
 )
 from job_hunting.lib.services.application_flow import build_flow
@@ -94,7 +95,7 @@ _PUBLIC_ATTRS = (
 )
 
 
-def _public_jobpost_resource(job_post, annotations=None) -> dict:
+def _public_jobpost_resource(job_post, annotations=None, timeline=None) -> dict:
     """Build the public JSON:API ``job-post`` resource for ``job_post``.
 
     Emits the NORMAL ``type: "job-post"`` — this is a PARTIAL payload of
@@ -113,6 +114,13 @@ def _public_jobpost_resource(job_post, annotations=None) -> dict:
     ``meta.federation`` so the rich ``/@dough`` page can render its show-off
     line. When ``federate_rich`` is off, the anonymous/non-owner projection
     passes None and stays public-safe (no private vetting leak).
+
+    ``timeline`` (CC-112) is the owner's JobApplication status history for this
+    post — ``[{status, at}, ...]`` ascending — riding the SAME ``federate_rich``
+    gate as the rest of ``meta.federation`` (it is only attached when
+    ``annotations`` is supplied). Each entry carries the status NAME and its
+    timestamp ONLY; ``reason_code`` / ``note`` / ``tracking_url`` are never
+    surfaced (resolved in :func:`...as_object.resolve_status_timeline_batch`).
     """
     attrs = {name: _to_primitive(getattr(job_post, name)) for name in _PUBLIC_ATTRS}
     company_name = None
@@ -134,6 +142,7 @@ def _public_jobpost_resource(job_post, annotations=None) -> dict:
                 "verdict_reason_code": annotations.reason_code,
                 "score": annotations.score,
                 "applied": annotations.applied,
+                "timeline": timeline or [],
             }
         }
     return resource
@@ -314,9 +323,20 @@ def public_user_federated_job_posts(request, username):
         if expose_federation
         else {}
     )
+    # CC-112: the per-post JobApplication status timeline rides the SAME
+    # federate_rich gate as the rest of meta.federation. Resolved in one
+    # batched query (no N+1 across the page); skipped entirely when the
+    # federation block is suppressed so an off-profile never queries it.
+    timeline_map = (
+        resolve_status_timeline_batch(items, user.id) if expose_federation else {}
+    )
     payload = {
         "data": [
-            _public_jobpost_resource(jp, annotations=annotation_map.get(jp.pk))
+            _public_jobpost_resource(
+                jp,
+                annotations=annotation_map.get(jp.pk),
+                timeline=timeline_map.get(jp.pk),
+            )
             for jp in items
         ],
         "links": links,
