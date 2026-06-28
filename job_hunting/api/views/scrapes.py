@@ -50,23 +50,6 @@ FROM_TEXT_MAX_LEN = 500_000  # 500KB; keeps a single LLM call within budget
 logger = logging.getLogger(__name__)
 
 
-def _coerce_bool(raw):
-    """Coerce a request-body value to a strict bool.
-
-    Real JSON booleans (the wire shape cc_auto + the frontend send) pass
-    through untouched. Plain-JSON string clients may send ``"true"`` /
-    ``"false"`` — guard the well-known string-truthiness footgun where
-    ``bool("false")`` is ``True``. Anything else (None, "", junk) is
-    False, which is the safe default for ``attended`` (route to the
-    normal unattended runner queue).
-    """
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() in ("true", "1", "yes")
-    return bool(raw)
-
-
 _SOURCE_HINT_RE = re.compile(r"^[a-z0-9_\-]{1,32}$")
 
 
@@ -563,21 +546,12 @@ class ScrapeViewSet(BaseViewSet):
                 )
 
         source = attrs.get("source") or data.get("source") or "scrape"
-        # Attended-scrape routing. Default False (model default) when the
-        # caller omits it; coerced to a real bool so a stray "false"/"true"
-        # string from a plain-JSON client doesn't persist as truthy. Only
-        # an attended runner can claim the resulting hold scrape — see
-        # claim_next and Scrape.attended.
-        attended_attr = (
-            attrs.get("attended") if "attended" in attrs else data.get("attended")
-        )
         create_kwargs = dict(
             url=url,
             source_link=source_link,
             status="hold",
             created_by=request.user,
             source=source,
-            attended=_coerce_bool(attended_attr),
         )
         if source_mode_attr is not None:
             create_kwargs["source_mode"] = source_mode_attr
@@ -1105,18 +1079,6 @@ class ScrapeViewSet(BaseViewSet):
                         "the request's User-Agent if absent."
                     ),
                 ),
-                "attended": drf_serializers.BooleanField(
-                    required=False,
-                    default=False,
-                    help_text=(
-                        "Which partition of the hold queue to claim from. "
-                        "False (default) claims only attended=False rows — "
-                        "the normal unattended-runner queue. True claims "
-                        "only attended=True rows — a human-driven headed "
-                        "browser. The two queues never cross: a default "
-                        "runner NEVER claims an attended-marked scrape."
-                    ),
-                ),
             },
         ),
         responses={
@@ -1134,26 +1096,12 @@ class ScrapeViewSet(BaseViewSet):
         pattern. Atomically:
 
         - Picks the oldest Scrape where status='hold' AND
-          claimed_at IS NULL AND attended = <requested partition>.
+          claimed_at IS NULL — a single FIFO hold queue. A scrape is a
+          scrape: headed-vs-headless is a property of the runner, not a
+          flag on the row, so every runner draws from the same queue.
         - Sets claimed_at = NOW(), claimed_by = <runner_name>,
           status = 'running'.
         - Returns the row to the caller.
-
-        Attended-scrape routing: the optional body field ``attended``
-        (bool, default False) selects which partition of the hold queue
-        this runner draws from:
-
-        - ``attended`` absent/False -> claims the oldest hold row with
-          ``attended=False`` (the normal unattended-runner queue).
-        - ``attended=True`` -> claims the oldest hold row with
-          ``attended=True`` (a human-driven headed browser).
-
-        The two partitions NEVER cross. A default/unattended runner can
-        NOT claim an attended-marked scrape — that is intentional.
-        OPERATIONAL CONSEQUENCE: an attended-marked scrape is processed
-        ONLY while an attended runner is polling; if none runs it sits in
-        `hold` indefinitely. v1 accepts this (a staleness fallback is a
-        possible follow-up, not built here).
 
         Uses SELECT FOR UPDATE SKIP LOCKED so N concurrent runners
         (omarchy, pibu, …) never pick up the same row. The loser
@@ -1177,10 +1125,6 @@ class ScrapeViewSet(BaseViewSet):
             or request.META.get("HTTP_USER_AGENT", "")[:100]
             or "anonymous"
         )
-        # Attended-scrape routing. Partition the hold queue on the
-        # `attended` flag so an unattended runner never claims a scrape
-        # marked for the human-driven headed browser, and vice versa.
-        attended = _coerce_bool(data.get("attended"))
 
         # Atomic claim — wrap in a transaction so SELECT FOR UPDATE
         # holds the row lock until the UPDATE commits. SKIP LOCKED
@@ -1192,7 +1136,6 @@ class ScrapeViewSet(BaseViewSet):
                 .filter(
                     status="hold",
                     claimed_at__isnull=True,
-                    attended=attended,
                 )
                 # FIFO by creation time. The PK is a random NanoID (CC-77)
                 # so it can no longer stand in as the arrival-order key;

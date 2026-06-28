@@ -135,19 +135,6 @@ class Scrape(GetMixin, NanoIDModel):
     # status is non-terminal (covers runner-crash recovery).
     claimed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     claimed_by = models.CharField(max_length=100, null=True, blank=True)
-    # Attended-scrape routing. Partitions the `status='hold'` claim queue
-    # so an interactive ("attended") runner — a headed browser a human is
-    # actively driving to solve logins/captchas — picks up ONLY the rows
-    # flagged for it, and the default unattended runners NEVER do.
-    # POST /scrapes/claim-next/ filters on this column (hence db_index):
-    #   attended absent/False -> claims oldest hold AND attended=False
-    #   attended=True          -> claims oldest hold AND attended=True
-    # OPERATIONAL CONSEQUENCE: an attended-marked scrape is processed ONLY
-    # when an attended runner is running. If none is, it sits in `hold`
-    # indefinitely — default runners skip it by design. v1 accepts this;
-    # a staleness fallback (auto-demote stale attended holds) is a possible
-    # follow-up but is intentionally NOT built here.
-    attended = models.BooleanField(default=False, db_index=True)
     # Phase A — Extension direct-POST plan. How this scrape was *captured*,
     # as opposed to `source` which records the JobPost write provenance.
     # `browser`        — historical default. Camoufox/Playwright fetches
