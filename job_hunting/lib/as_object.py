@@ -326,6 +326,71 @@ def resolve_personal_annotations_batch(job_posts, user_id):
     return result
 
 
+def resolve_status_timeline_batch(job_posts, user_id):
+    """Resolve the owner's JobApplication status timeline per post (CC-112).
+
+    Returns ``{job_post_pk: [{"status": <name>, "at": <iso>}, ...]}`` covering
+    EVERY input pk (an empty list when the user has no status rows for that
+    post) in ONE query regardless of page size — the same N+1 guard as
+    :func:`resolve_personal_annotations_batch`. #3b renders a line chart from
+    each list.
+
+    Multi-application merge: a post can carry several of the user's
+    ``JobApplication`` rows; their status rows are merged into ONE timeline
+    sorted ASCENDING by timestamp, with identical ``(status, at)`` pairs
+    collapsed (a duplicate log on a re-application doesn't double a point).
+
+    PRIVACY (CC-112, hard): each entry exposes ONLY the status NAME and its
+    timestamp. ``reason_code`` / ``note`` (on the status row) and
+    ``tracking_url`` (on the application) are NEVER emitted here; the caller's
+    ``federate_rich`` gate alone decides whether this whole block ships.
+
+    The timestamp is ``logged_at`` when set, else the row's ``created_at``
+    (``logged_at`` is nullable, but a chart needs a point on the axis for
+    every status), so a back-dated manual log still sorts by its real moment
+    while auto-stamped rows keep their insertion time.
+    """
+    post_ids = [jp.pk for jp in job_posts]
+    result: dict = {pid: [] for pid in post_ids}
+    if not post_ids or not user_id:
+        return result
+
+    from job_hunting.models import JobApplicationStatus
+
+    rows = JobApplicationStatus.objects.filter(
+        application__job_post_id__in=post_ids,
+        application__user_id=user_id,
+        status__isnull=False,
+    ).values_list(
+        "application__job_post_id",
+        "status__status",
+        "logged_at",
+        "created_at",
+    )
+
+    by_post: dict = {pid: [] for pid in post_ids}
+    for jp_id, status_name, logged_at, created_at in rows:
+        at_dt = logged_at or created_at
+        if status_name is None or at_dt is None:
+            continue
+        by_post[jp_id].append((at_dt, status_name))
+
+    for pid, entries in by_post.items():
+        # Ascending by real timestamp; status name as a stable secondary key.
+        entries.sort(key=lambda pair: (pair[0], pair[1]))
+        seen: set = set()
+        timeline: list = []
+        for at_dt, status_name in entries:
+            at = _isoformat(at_dt)
+            dedupe_key = (status_name, at)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            timeline.append({"status": status_name, "at": at})
+        result[pid] = timeline
+    return result
+
+
 def _resolve_personal_annotations(job_post, user_id) -> PersonalAnnotations:
     """Single-post ``PersonalAnnotations`` resolver (delegates to the batch)."""
     return resolve_personal_annotations_batch([job_post], user_id).get(
