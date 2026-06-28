@@ -118,7 +118,7 @@ def agent_models(request):
             description=(
                 "Hold-queue health snapshot: hold_unclaimed_total, "
                 "hold_unclaimed_stale, oldest_hold_age_seconds, "
-                "attended_breakdown"
+                "stale_minutes"
             )
         )
     },
@@ -129,9 +129,9 @@ def scrape_queue_health(request):
     """Surface the unclaimed-hold count + oldest age for a future admin badge.
 
     Companion read-surface to the ``sweep_stale_unclaimed_holds`` task
-    (PACA CC-74). When no scrape runner is polling a partition, its
-    status='hold' rows never get claimed and rot invisibly; this endpoint
-    lets the admin UI badge that condition.
+    (PACA CC-74). When no scrape runner is polling, status='hold' rows
+    never get claimed and rot invisibly; this endpoint lets the admin UI
+    badge that condition.
 
     Staleness threshold defaults to the sweep's module constant
     (``_DEFAULT_HOLD_STALE_MINUTES``, 30 min); override with

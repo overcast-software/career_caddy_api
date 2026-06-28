@@ -1,14 +1,14 @@
 """PACA CC-74: observability fallback for unclaimed scrape holds.
 
-When no scrape runner polls a claim partition, its status='hold',
-claimed_at IS NULL rows never get claimed and rot invisibly ("I didn't
-see the poller grab it"). ``sweep_stale_unclaimed_holds`` is the
-read-only fallback: a per-partition WARNING so a dead/absent runner
-surfaces, and ``scrape_hold_queue_health`` (also served by
+When no scrape runner polls the single FIFO claim queue, its status='hold',
+claimed_at IS NULL rows never get claimed and rot invisibly ("I didn't see
+the poller grab it"). ``sweep_stale_unclaimed_holds`` is the read-only
+fallback: a WARNING so a dead/absent runner surfaces, and
+``scrape_hold_queue_health`` (also served by
 GET /api/v1/admin/scrape-queue-health/) is the count surface for a future
 admin badge.
 
-The age signal is the audit table — Scrape has no created_at and an
+The age signal is the audit table — Scrape has no held-since clock and an
 unclaimed hold has claimed_at IS NULL — so each helper backdates a
 ``ScrapeStatus`` row (its auto_now_add ``created_at`` overridden via a
 post-insert .update()).
@@ -50,7 +50,6 @@ def _make_status_row(scrape, status_label, created_at):
 def _make_hold(
     *,
     age_minutes,
-    attended=False,
     status="hold",
     claimed_at=None,
     url=None,
@@ -59,7 +58,6 @@ def _make_hold(
     scrape = Scrape.objects.create(
         url=url or "https://example.com/hold",
         status=status,
-        attended=attended,
         claimed_at=claimed_at,
     )
     if with_status_row:
@@ -69,10 +67,10 @@ def _make_hold(
 
 
 class TestSweepStaleUnclaimedHolds(TestCase):
-    def test_stale_unattended_hold_warns_and_counts(self):
-        """A > threshold unattended unclaimed hold → counted stale + one
-        scrape.holds.stale WARNING partitioned attended=False."""
-        _make_hold(age_minutes=85, attended=False)
+    def test_stale_hold_warns_and_counts(self):
+        """A > threshold unclaimed hold → counted stale + one
+        scrape.holds.stale WARNING."""
+        _make_hold(age_minutes=85)
 
         with mock.patch("job_hunting.lib.tasks.logger") as log:
             result = sweep_stale_unclaimed_holds(threshold_minutes=30)
@@ -80,24 +78,20 @@ class TestSweepStaleUnclaimedHolds(TestCase):
         self.assertEqual(result["hold_unclaimed_total"], 1)
         self.assertEqual(result["hold_unclaimed_stale"], 1)
         self.assertGreaterEqual(result["oldest_hold_age_seconds"], 85 * 60)
-        bd = result["attended_breakdown"]
-        self.assertEqual(bd["false"]["stale"], 1)
-        self.assertEqual(bd["true"]["stale"], 0)
 
         log.warning.assert_called_once()
         args = log.warning.call_args.args
         self.assertEqual(
             args[0],
-            "scrape.holds.stale count=%s oldest_age_min=%s attended=%s",
+            "scrape.holds.stale count=%s oldest_age_min=%s",
         )
         self.assertEqual(args[1], 1)  # count
         self.assertGreaterEqual(args[2], 85)  # oldest_age_min
-        self.assertIs(args[3], False)  # attended flag
 
     def test_fresh_hold_not_stale_no_warning(self):
         """A hold younger than the threshold counts in total but not stale,
         and emits no warning."""
-        _make_hold(age_minutes=5, attended=False)
+        _make_hold(age_minutes=5)
 
         with mock.patch("job_hunting.lib.tasks.logger") as log:
             result = sweep_stale_unclaimed_holds(threshold_minutes=30)
@@ -111,7 +105,6 @@ class TestSweepStaleUnclaimedHolds(TestCase):
         ignored entirely."""
         _make_hold(
             age_minutes=120,
-            attended=False,
             status="running",
             claimed_at=timezone.now(),
         )
@@ -125,28 +118,24 @@ class TestSweepStaleUnclaimedHolds(TestCase):
         self.assertEqual(result["hold_unclaimed_stale"], 0)
         self.assertIsNone(result["oldest_hold_age_seconds"])
 
-    def test_both_partitions_break_down_and_warn_separately(self):
-        """Stale holds in both partitions → both breakdown buckets count and
-        a warning fires per partition, each carrying its attended flag."""
-        _make_hold(age_minutes=90, attended=False, url="https://e.com/u")
-        _make_hold(age_minutes=40, attended=True, url="https://e.com/a")
+    def test_multiple_stale_holds_count_and_warn_once(self):
+        """Several stale holds → all counted, a single aggregate warning
+        fires (no per-partition split)."""
+        _make_hold(age_minutes=90, url="https://e.com/u")
+        _make_hold(age_minutes=40, url="https://e.com/a")
 
         with mock.patch("job_hunting.lib.tasks.logger") as log:
             result = sweep_stale_unclaimed_holds(threshold_minutes=30)
 
-        bd = result["attended_breakdown"]
-        self.assertEqual(bd["false"]["stale"], 1)
-        self.assertEqual(bd["true"]["stale"], 1)
+        self.assertEqual(result["hold_unclaimed_total"], 2)
         self.assertEqual(result["hold_unclaimed_stale"], 2)
-
-        self.assertEqual(log.warning.call_count, 2)
-        flags = {c.args[3] for c in log.warning.call_args_list}
-        self.assertEqual(flags, {False, True})
+        log.warning.assert_called_once()
+        self.assertEqual(log.warning.call_args.args[1], 2)  # count
 
     def test_hold_without_status_row_counted_but_not_stale(self):
         """A hold with no ScrapeStatus has held_at=NULL — counted in total
         but never stale (can't prove age)."""
-        _make_hold(age_minutes=0, attended=False, with_status_row=False)
+        _make_hold(age_minutes=0, with_status_row=False)
 
         result = sweep_stale_unclaimed_holds(threshold_minutes=30)
 
@@ -156,7 +145,7 @@ class TestSweepStaleUnclaimedHolds(TestCase):
 
     def test_threshold_override(self):
         """A 90m hold is stale at threshold=30 but fresh at threshold=120."""
-        _make_hold(age_minutes=90, attended=False)
+        _make_hold(age_minutes=90)
 
         self.assertEqual(
             scrape_hold_queue_health(stale_minutes=30)["hold_unclaimed_stale"],
@@ -172,7 +161,7 @@ class TestSweepStaleUnclaimedHolds(TestCase):
         not the original: hold(120m) → running(90m) → failed(80m) →
         re-hold(5m) is fresh at threshold=30 (latest hold is 5m old)."""
         scrape = Scrape.objects.create(
-            url="https://example.com/redo", status="hold", attended=False
+            url="https://example.com/redo", status="hold"
         )
         now = timezone.now()
         _make_status_row(scrape, "hold", now - timedelta(minutes=120))
@@ -211,8 +200,8 @@ class TestScrapeQueueHealthEndpoint(TestCase):
         )
 
     def test_staff_gets_counts(self):
-        _make_hold(age_minutes=85, attended=False)
-        _make_hold(age_minutes=5, attended=False, url="https://e.com/fresh")
+        _make_hold(age_minutes=85)
+        _make_hold(age_minutes=5, url="https://e.com/fresh")
         self.client.force_authenticate(user=self.staff)
 
         resp = self.client.get(self.URL)
@@ -221,11 +210,10 @@ class TestScrapeQueueHealthEndpoint(TestCase):
         self.assertEqual(data["hold_unclaimed_total"], 2)
         self.assertEqual(data["hold_unclaimed_stale"], 1)
         self.assertGreaterEqual(data["oldest_hold_age_seconds"], 85 * 60)
-        self.assertEqual(data["attended_breakdown"]["false"]["stale"], 1)
-        self.assertEqual(data["attended_breakdown"]["true"]["total"], 0)
+        self.assertNotIn("attended_breakdown", data)
 
     def test_stale_minutes_query_override(self):
-        _make_hold(age_minutes=90, attended=False)
+        _make_hold(age_minutes=90)
         self.client.force_authenticate(user=self.staff)
 
         resp = self.client.get(self.URL, {"stale_minutes": 120})
