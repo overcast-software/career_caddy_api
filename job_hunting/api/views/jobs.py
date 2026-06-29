@@ -192,6 +192,7 @@ class JobPostViewSet(BaseViewSet):
             | Q(scores__user_id=request.user.id)
             | Q(scrapes__created_by_id=request.user.id)
             | Q(discoveries__user_id=request.user.id)
+            | Q(user_memberships__user_id=request.user.id)
         ).distinct()
 
     def pre_save_payload(self, request, attrs, creating):
@@ -273,7 +274,8 @@ class JobPostViewSet(BaseViewSet):
                 Q(applications__user_id=request.user.id) |
                 Q(scores__user_id=request.user.id) |
                 Q(scrapes__created_by_id=request.user.id) |
-                Q(discoveries__user_id=request.user.id)
+                Q(discoveries__user_id=request.user.id) |
+                Q(user_memberships__user_id=request.user.id)
             ).distinct()
 
         # filter[publishable]=true — the C2 curation queue (CC-61). Surface
@@ -536,7 +538,8 @@ class JobPostViewSet(BaseViewSet):
             obj.applications.filter(user_id=request.user.id).exists() or
             obj.scores.filter(user_id=request.user.id).exists() or
             obj.scrapes.filter(created_by_id=request.user.id).exists() or
-            obj.discoveries.filter(user_id=request.user.id).exists()
+            obj.discoveries.filter(user_id=request.user.id).exists() or
+            obj.user_memberships.filter(user_id=request.user.id).exists()
         )
         if not has_access:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
@@ -654,6 +657,62 @@ class JobPostViewSet(BaseViewSet):
                     }]},
                     status=400,
                 )
+
+        # BACK-105 owner attribution (AUTO-18 multi-user forward@). Optional
+        # `owner_user_id` records the OWNER of the post via a UserJobPost
+        # join — the recipient-resolved user when cc_auto ingests mail
+        # forwarded to <username>@careercaddy.online. SEPARATE from
+        # created_by (which stays the principal — never touched here) and
+        # from discover_for_user_id (which drives the visibility-signal
+        # discovery row above). Both fields coexist; cc_auto sends both.
+        #
+        # Same routing-field handling: pulled from the raw payload (not a
+        # JobPost column, so parse_payload drops it), accepting the
+        # dasherized `owner-user-id` too. Same staff-on-behalf RBAC +
+        # resolve as discover_for_user_id: 403 unless the caller is staff
+        # or targets themselves; 400 on a non-int or stale id. When absent,
+        # no UserJobPost row is written.
+        owner_user_id_raw = (
+            raw_attrs.get("owner_user_id")
+            or raw_attrs.get("owner-user-id")
+        )
+        owner_user = None
+        if owner_user_id_raw is not None:
+            try:
+                owner_user_id = int(owner_user_id_raw)
+            except (TypeError, ValueError):
+                return Response(
+                    {"errors": [{
+                        "status": "400",
+                        "detail": "owner_user_id must be an integer",
+                    }]},
+                    status=400,
+                )
+            if owner_user_id != request.user.id and not request.user.is_staff:
+                return Response(
+                    {"errors": [{
+                        "status": "403",
+                        "detail": (
+                            "Only staff may attribute ownership to another user"
+                        ),
+                    }]},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if owner_user_id == request.user.id:
+                owner_user = request.user
+            else:
+                owner_user = UserModel.objects.filter(id=owner_user_id).first()
+                if owner_user is None:
+                    return Response(
+                        {"errors": [{
+                            "status": "400",
+                            "detail": (
+                                f"owner_user_id {owner_user_id} does not exist"
+                            ),
+                        }]},
+                        status=400,
+                    )
+
         src_for_validation = attrs.get("source") or "manual"
         if src_for_validation == "email-forward":
             if not forwarded_via_address:
@@ -740,7 +799,7 @@ class JobPostViewSet(BaseViewSet):
             if not (inbound is False and source_trust(src) <= SOURCE_TRUST["email"]):
                 attrs.pop("complete", None)
 
-        from job_hunting.models import JobPostDiscovery
+        from job_hunting.models import JobPostDiscovery, UserJobPost
 
         def _record_discovery(post):
             # `user` is the target (who gets the visibility signal);
@@ -758,6 +817,25 @@ class JobPostViewSet(BaseViewSet):
                     # column stays NULL.
                     "forwarded_via_address": forwarded_via_address,
                     "requested_by": request.user,
+                },
+            )
+
+        def _record_owner(post):
+            # BACK-105: upsert the owner↔post join when owner_user_id was
+            # supplied (and RBAC-cleared above). No-op otherwise. Idempotent
+            # via the (job_post, user) unique constraint — re-POSTing the
+            # same link with the same owner never duplicates. Runs on BOTH
+            # the fresh-insert post and every dedup/merge-return post so the
+            # owner is recorded even when the JobPost already existed (the
+            # cc_auto re-POST / shared-link case). NEVER touches created_by.
+            if owner_user is None:
+                return
+            UserJobPost.objects.get_or_create(
+                job_post=post,
+                user=owner_user,
+                defaults={
+                    "role": "owner",
+                    "source": attrs.get("source"),
                 },
             )
 
@@ -839,6 +917,7 @@ class JobPostViewSet(BaseViewSet):
                 # association).
                 merge_empty_fields_from_attrs(existing, attrs)
                 _record_discovery(existing)
+                _record_owner(existing)
                 return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         obj = JobPost(**attrs)
         # BACK-91: ingestion is private by default. Promote the new post to
@@ -864,12 +943,14 @@ class JobPostViewSet(BaseViewSet):
         if dupe:
             merge_empty_fields_from_attrs(dupe, attrs)
             _record_discovery(dupe)
+            _record_owner(dupe)
             return Response({"data": ser.to_resource(dupe)}, status=status.HTTP_200_OK)
         obj.save()
         if not obj.posted_date:
             obj.posted_date = obj.created_at.date()
             obj.save(update_fields=["posted_date"])
         _record_discovery(obj)
+        _record_owner(obj)
         return Response({"data": ser.to_resource(obj)}, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
