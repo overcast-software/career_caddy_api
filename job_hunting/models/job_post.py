@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.contrib.postgres.indexes import HashIndex
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 from django.utils import timezone
@@ -299,6 +300,26 @@ class JobPost(GetMixin, NanoIDModel):
             models.Index(
                 fields=["content_fingerprint", "-last_seen_at"],
                 name="jobpost_fp_lastseen_idx",
+            ),
+            # Equality index for the popup-open "is this URL already
+            # tracked?" lookup. JobPostViewSet.list's filter[link] branch
+            # ORs four equality legs — link, canonical_link, and apply_url
+            # (twice). link (unique) and canonical_link (db_index) are
+            # btree-indexed; apply_url was NOT, so Postgres could not form
+            # a BitmapOr and degraded the whole predicate to a full
+            # sequential scan of the platform-wide job_post table (the
+            # multi-second cost the extension saw). See BACK #87.
+            #
+            # HashIndex, not btree: the lookup only ever does `=`, and a
+            # hash index stores a 32-bit hash rather than the value, so it
+            # has none of btree's ~2704-byte index-tuple ceiling. apply_url
+            # is CharField(max_length=2000); a multibyte URL near that
+            # length would exceed the btree limit and ERROR on INSERT. The
+            # hash index sidesteps that entirely while still letting the
+            # planner BitmapOr the apply_url legs with the btree legs.
+            HashIndex(
+                fields=["apply_url"],
+                name="jobpost_apply_url_hash_idx",
             ),
         ]
 

@@ -98,6 +98,37 @@ class TestJobPostFilterLinkMatchesApplyUrl(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._ids(resp), set())
 
+    def test_long_multibyte_apply_url_inserts_and_matches(self):
+        """A near-max multibyte apply_url must insert AND be found.
+
+        Pins the index *choice* (BACK #87): apply_url is
+        CharField(max_length=2000), and ``filter[link]`` indexes it via a
+        Postgres HASH index, not a btree. A btree index entry must fit
+        btree's ~2704-byte per-tuple ceiling; ~1900 three-byte characters
+        is ~5700 bytes — it would ERROR on INSERT under a btree index.
+        A hash index stores a 32-bit hash, so the row inserts cleanly.
+
+        If anyone ever downgrades jobpost_apply_url_hash_idx to a plain
+        btree/db_index, the create() below raises
+        ``index row size ... exceeds btree maximum`` and this test fails.
+        The lookup matches via the exact-raw ``apply_url=link_filter`` OR
+        leg, so it holds regardless of how the value canonicalizes.
+        """
+        long_apply_url = "https://ats.example.com/apply/" + ("€" * 1900)
+        post = JobPost.objects.create(
+            title="Long Apply URL Job",
+            company=self.company,
+            link="https://www.allstate.jobs/jobs/r99999/long-apply",
+            apply_url=long_apply_url,
+            created_by=self.user,
+        )
+        resp = self.client.get(
+            "/api/v1/job-posts/",
+            {"filter[link]": long_apply_url},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {str(post.id)})
+
     def test_null_apply_url_does_not_match_empty_query(self):
         """Edge: a JP with apply_url=NULL must not match an empty filter.
 
