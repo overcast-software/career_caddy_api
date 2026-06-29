@@ -18,6 +18,7 @@ from .api_key import ApiKey as ApiKey
 from .question import Question as Question
 from .job_post import JobPost as JobPost
 from .job_post_discovery import JobPostDiscovery as JobPostDiscovery
+from .user_job_post import UserJobPost as UserJobPost
 from .experience import Experience as Experience
 from .project import Project as Project
 from .answer import Answer as Answer
