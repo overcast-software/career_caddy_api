@@ -1,6 +1,7 @@
 import logging
 import math
 import re
+from datetime import datetime
 
 from django.db.models import F, Q
 from django.conf import settings
@@ -558,7 +559,17 @@ class ScrapeViewSet(BaseViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-        source = attrs.get("source") or data.get("source") or "scrape"
+        # JobPost.source provenance. An extension-direct push carries the
+        # `extension` provenance: the user verified the page in their own
+        # browser before pushing it, so it sits at the top of the
+        # SOURCE_TRUST ranking and can flip a stale lower-trust post in
+        # place via the trust-aware overwrite in the Phase B consumer
+        # below. The extension does NOT send an explicit `source` on the
+        # direct-POST (only `source_mode`), so default it to "extension"
+        # here rather than letting it fall through to "scrape" (which
+        # would not outrank an existing paste/scrape post).
+        default_source = "extension" if is_extension_direct else "scrape"
+        source = attrs.get("source") or data.get("source") or default_source
         create_kwargs = dict(
             url=url,
             source_link=source_link,
@@ -576,36 +587,190 @@ class ScrapeViewSet(BaseViewSet):
         scrape = Scrape.objects.create(**create_kwargs)
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "hold")
-        # Bind to the JobPost: explicit relationship takes precedence,
-        # otherwise fall back to matching by URL. Inherit the job
-        # post's company when none supplied.
+        # Bind to the JobPost: an explicit relationship (jp.show "Run
+        # scrape") always takes precedence; for browser-mode writes,
+        # fall back to a same-URL match so the runner re-extracts the
+        # existing post rather than forking. Inherit the post's company
+        # when none supplied.
         #
-        # For extension-direct writes that just skipped the 409 dedupe
-        # gate, also try canonical_link — the runner needs the linkage
-        # so Phase B's fast-path can apply the captured_payload onto
-        # the existing JP (rather than minting a duplicate).
-        if not linked_jp:
+        # Extension-direct writes do NOT pre-bind by URL/canonical here.
+        # The synchronous Phase B consumer below runs the full dedupe
+        # pipeline (canonical_link -> fingerprint -> sticky-closed) via
+        # JobPostExtractor.process_evaluation, which resolves the existing
+        # post AND applies the trust-aware overwrite + JobPostOverwriteDecision
+        # audit row. Pre-binding would route process_evaluation into the
+        # force-merge branch instead (no source flip, no audit).
+        if not linked_jp and not is_extension_direct:
             linked_jp = JobPost.objects.filter(link=url).first()
-            if not linked_jp and is_extension_direct:
-                from job_hunting.models.job_post_dedupe import (
-                    canonicalize_link,
-                )
-                canonical = canonicalize_link(url)
-                if canonical:
-                    linked_jp = JobPost.objects.filter(
-                        canonical_link=canonical
-                    ).first()
         if linked_jp:
             scrape.job_post = linked_jp
             if not scrape.company_id and linked_jp.company_id:
                 scrape.company_id = linked_jp.company_id
             scrape.save()
-        logger.info("ScrapeViewSet.create: hold scrape id=%s url=%s", scrape.id, url)
+
+        # Phase B — Extension direct-POST. The captured_payload carries
+        # the title/company/description the user just saw rendered, so
+        # build-or-update the JobPost synchronously right here: no browser,
+        # no runner (that is the whole point of "direct"). process_evaluation
+        # either creates a fresh post or trust-aware-overwrites a stale
+        # lower-trust one in place, and links the scrape to it. The 201
+        # response then carries the job-post relationship so the extension
+        # can navigate to it and the Send-tab library lookup
+        # (GET /job-posts/?filter[link]=) finds it immediately.
+        if is_extension_direct and scrape.captured_payload:
+            self._consume_extension_direct_payload(
+                scrape, request.user, force=bool(scrape.job_post_id)
+            )
+            scrape.refresh_from_db()
+        else:
+            logger.info(
+                "ScrapeViewSet.create: hold scrape id=%s url=%s",
+                scrape.id, url,
+            )
         scr_ser = self.get_serializer()
         return Response(
-            {"data": scr_ser.to_resource(scrape)},
+            {
+                "data": scr_ser.to_resource(scrape),
+                "meta": {"job_post_id": scrape.job_post_id},
+            },
             status=status.HTTP_201_CREATED,
         )
+
+    def _parsed_job_data_from_payload(self, payload, *, link):
+        """Build a ``ParsedJobData`` from an extension-direct captured_payload.
+
+        Field-source precedence mirrors the cc_sender wire shape
+        (popup.js Send fast-path ~1881 and validator createFromProposed
+        ~2151): the CLEAN per-selector values live under
+        ``extraction_hints.structured_prefill``; the TOP-LEVEL
+        ``description`` is the raw full-page innerText (nav / footer /
+        "page has loaded" noise) and must NOT become the JobPost
+        description. So:
+
+        - description is sourced ONLY from ``structured_prefill.description``
+          — never the raw top-level field.
+        - title / company / location prefer ``structured_prefill`` and
+          fall back to the (clean) top-level ``title`` / ``company`` /
+          ``location``.
+        - salary is a freeform string in ``structured_prefill`` with no
+          safe numeric mapping to ``salary_min`` / ``salary_max`` — skipped
+          (mirrors ``JobPostExtractor._try_prefill_extraction``, which also
+          leaves salary None to avoid the per-unit-pay annualization class
+          of bug).
+
+        Returns None when title or company can't be resolved — the
+        validator already guarantees the top-level trio, so this is a
+        defensive guard rather than an expected path.
+        """
+        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
+
+        hints = payload.get("extraction_hints") or {}
+        structured = hints.get("structured_prefill") or {}
+
+        def pick(*candidates):
+            for value in candidates:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return None
+
+        title = pick(structured.get("title"), payload.get("title"))
+        company = pick(
+            structured.get("company_name"),
+            structured.get("company"),
+            payload.get("company"),
+        )
+        # Description: structured_prefill ONLY — the top-level value is
+        # raw full-page innerText and would pollute the post with chrome.
+        description = pick(structured.get("description"))
+        location = pick(structured.get("location"), payload.get("location"))
+
+        if not (title and company):
+            return None
+        try:
+            return ParsedJobData(
+                title=title,
+                company_name=company,
+                description=description,
+                location=location,
+                remote=None,
+                salary_min=None,
+                salary_max=None,
+                link=link,
+                extraction_date=datetime.now(),
+            )
+        except Exception:
+            logger.debug(
+                "extension-direct: ParsedJobData build failed payload=%r",
+                payload, exc_info=True,
+            )
+            return None
+
+    def _consume_extension_direct_payload(self, scrape, user, *, force=False):
+        """Phase B consumer — synchronously turn an extension-direct
+        ``captured_payload`` into a JobPost (create-or-update) with no
+        browser fetch and no runner.
+
+        Reuses the exact persistence + dedupe half the runner / from-text
+        path uses: ``JobPostExtractor.process_evaluation``. That walks the
+        full dedupe pipeline (canonical_link -> apply_url -> fingerprint),
+        resolves/mints the Company, applies the trust-aware overwrite when
+        the incoming ``extension`` source outranks a stale post, links the
+        scrape to the post, records the JobPostDiscovery edge, and bumps
+        the dedupe window.
+
+        ``force`` is True only when an explicit job-post relationship was
+        pre-bound (force-merge onto that named post); the normal extension
+        path leaves it False so process_evaluation resolves the post by
+        link/canonical and runs the trust-aware overwrite branch.
+
+        Terminal status: on success the scrape is flipped to ``completed``
+        so it is not left as a dangling ``hold`` a runner would claim;
+        ``scraped_at`` stays null because no browser fetch happened. On a
+        placeholder rejection process_evaluation already set
+        ``status='failed'`` + ``failure_reason``; we just log it.
+        """
+        from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
+        from job_hunting.lib.scraper import _log_scrape_status
+
+        parsed = self._parsed_job_data_from_payload(
+            scrape.captured_payload or {}, link=scrape.url
+        )
+        if parsed is None:
+            scrape.status = "failed"
+            scrape.failure_reason = (
+                "extension-direct: captured_payload missing usable "
+                "title/company"
+            )
+            scrape.save(update_fields=["status", "failure_reason"])
+            _log_scrape_status(scrape.id, "failed", note=scrape.failure_reason)
+            return
+
+        extractor = JobPostExtractor()
+        ok = extractor.process_evaluation(scrape, parsed, user=user, force=force)
+        scrape.refresh_from_db()
+        if ok:
+            if scrape.status != "completed":
+                scrape.status = "completed"
+                scrape.save(update_fields=["status"])
+            _log_scrape_status(
+                scrape.id, "completed",
+                note=f"extension-direct: {extractor.last_outcome}",
+            )
+            logger.info(
+                "ScrapeViewSet.create: extension-direct scrape id=%s -> "
+                "job_post_id=%s outcome=%s",
+                scrape.id, scrape.job_post_id, extractor.last_outcome,
+            )
+        else:
+            _log_scrape_status(
+                scrape.id, scrape.status,
+                note=scrape.failure_reason or "extension-direct extraction failed",
+            )
+            logger.info(
+                "ScrapeViewSet.create: extension-direct scrape id=%s failed "
+                "(reason=%r)",
+                scrape.id, scrape.failure_reason,
+            )
 
     @extend_schema(
         tags=["Scrapes"],

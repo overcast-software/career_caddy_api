@@ -55,6 +55,49 @@ def _well_formed_payload(**overrides):
     return payload
 
 
+def _curated_payload(
+    *,
+    title,
+    company_name,
+    description=None,
+    raw_description=None,
+    location=None,
+    apply_url=None,
+):
+    """Build an extension-direct captured_payload in the real cc_sender
+    wire shape (popup.js Send fast-path / validator createFromProposed):
+
+    - CLEAN per-selector values live under
+      ``extraction_hints.structured_prefill`` (title, company_name,
+      description, location).
+    - The TOP-LEVEL ``description`` is the raw full-page innerText
+      (``payload.text`` in the extension) — nav/footer/"page has loaded"
+      noise. ``raw_description`` populates it so tests can prove the JP
+      description never sources from it.
+
+    The validator requires non-empty top-level title/company/description,
+    so the top-level description always falls back to a non-empty value.
+    """
+    structured = {"title": title, "company_name": company_name}
+    if description is not None:
+        structured["description"] = description
+    if location is not None:
+        structured["location"] = location
+
+    top_description = raw_description or description or ("page text " * 20)
+    payload = {
+        "title": title,
+        "company": company_name,
+        "description": top_description,
+        "extraction_hints": {"structured_prefill": structured},
+    }
+    if location is not None:
+        payload["location"] = location
+    if apply_url is not None:
+        payload["apply_url"] = apply_url
+    return payload
+
+
 def _post_body(url, *, source_mode=None, captured_payload=None, **extra_attrs):
     """Build a JSON:API scrape-create payload.
 
@@ -284,8 +327,8 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self.company = Company.objects.create(name="Acme")
 
-    def test_extension_direct_bypasses_409_when_link_already_has_jp(self):
-        """Dedupe-first walk lands here:
+    def test_extension_direct_bypasses_409_and_overwrites_stale_jp(self):
+        """Dedupe-first walk + Phase B synchronous consume:
 
         The five-clause visibility / dedupe contract still holds —
         canonical_link / fingerprint / sticky-closed run as today —
@@ -293,11 +336,15 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         bookmarklet) deliberately does NOT fire for extension-direct.
         The captured_payload is fresher than the existing JP's stored
         contents (the user just saw their browser render it), so the
-        future Phase B fast-path needs the scrape row minted with the
-        payload attached to do its trust-overwrite work.
+        Phase B consumer builds-or-updates the JobPost synchronously
+        right here.
 
-        Asserts: 201 + scrape minted + JP linked (so the runner can
-        find it) + payload preserved.
+        Existing JP came from the email pipeline (source='email',
+        trust 20). The extension push (source='extension', trust 100)
+        outranks it, so the trust-aware overwrite flips the post in
+        place — title/company/source — and writes a
+        JobPostOverwriteDecision audit row. No duplicate JobPost is
+        minted; the scrape is linked and left completed (not hold).
         """
         link = "https://example.com/jobs/known-link"
         existing_jp = JobPost.objects.create(
@@ -314,7 +361,11 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
             _post_body(
                 link,
                 source_mode="extension-direct",
-                captured_payload=_well_formed_payload(),
+                captured_payload=_curated_payload(
+                    title="Senior Widget Engineer",
+                    company_name="Acme Co",
+                    description="Real curated description. " * 20,
+                ),
             ),
             format="json",
         )
@@ -326,18 +377,112 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         scrape = Scrape.objects.get(pk=scrape_id)
         self.assertEqual(scrape.source_mode, "extension-direct")
         self.assertIsNotNone(scrape.captured_payload)
-        self.assertEqual(
-            scrape.captured_payload["title"], "Senior Widget Engineer"
-        )
-        # JP binding — the runner reads job_post_id off the claimed
-        # scrape. Without this Phase B's fast-path forks a duplicate
-        # JP instead of upgrading the existing one in place.
+        # Linked to the existing JP — no duplicate minted.
         self.assertEqual(scrape.job_post_id, existing_jp.id)
-        # Existing JP is untouched at this stage — Phase B will apply
-        # the trust-aware overwrite via parse_scrape; this Phase A
-        # endpoint is metadata-only.
+        self.assertEqual(JobPost.objects.count(), 1)
+        # Not left dangling as a hold the runner would claim.
+        self.assertEqual(scrape.status, "completed")
+        # Response carries the job-post relationship so the extension can
+        # navigate to the post (body.data.relationships['job-post'].data.id).
+        rel = resp.json()["data"]["relationships"]["job-post"]["data"]
+        self.assertEqual(rel["id"], str(existing_jp.id))
+        # Trust-aware overwrite flipped the stale email post in place.
         existing_jp.refresh_from_db()
-        self.assertEqual(existing_jp.title, "Old Title")
+        self.assertEqual(existing_jp.title, "Senior Widget Engineer")
+        self.assertEqual(existing_jp.source, "extension")
+        decision = JobPostOverwriteDecision.objects.filter(
+            job_post=existing_jp, triggering_scrape=scrape
+        ).first()
+        self.assertIsNotNone(decision)
+        self.assertIn("title", decision.changed_fields)
+
+    def test_extension_direct_creates_jobpost_from_structured_prefill(self):
+        """No existing JP: the Phase B consumer creates one synchronously
+        from the CLEAN structured_prefill fields, links the scrape, leaves
+        it completed, and the JP is immediately findable by filter[link].
+
+        Critically: the JobPost description is the CLEAN
+        structured_prefill.description — NOT the raw full-page innerText
+        that the extension ships in the top-level captured_payload.description
+        (the validator's "Create job-post" path sets that to page text).
+        """
+        link = "https://example.com/jobs/brand-new-role"
+        raw_page_text = (
+            "Skip to main content. Cookie banner. Software Engineer | "
+            "BoardCo page has loaded. APPLY. Footer nav junk. " * 8
+        )
+        clean_description = (
+            "We are hiring a Software Engineer to build distributed "
+            "systems. Responsibilities include design and on-call. " * 6
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                link,
+                source_mode="extension-direct",
+                captured_payload=_curated_payload(
+                    title="Software Engineer",
+                    company_name="BoardCo",
+                    description=clean_description,
+                    # Raw innerText at top-level — must NOT leak into the JP.
+                    raw_description=raw_page_text,
+                    location="Austin, TX",
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.status, "completed")
+        self.assertIsNotNone(scrape.job_post_id)
+
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(jp.title, "Software Engineer")
+        self.assertEqual(jp.location, "Austin, TX")
+        self.assertEqual(jp.source, "extension")
+        # The CLEAN description landed; the raw page noise did NOT.
+        self.assertEqual(jp.description, clean_description.strip())
+        self.assertNotIn("page has loaded", jp.description or "")
+        self.assertNotIn("Cookie banner", jp.description or "")
+        # Response relationship + library lookup both resolve the JP.
+        rel = resp.json()["data"]["relationships"]["job-post"]["data"]
+        self.assertEqual(rel["id"], str(jp.id))
+
+        lookup = self.client.get(f"/api/v1/job-posts/?filter[link]={link}")
+        self.assertEqual(lookup.status_code, 200, lookup.content)
+        found_ids = {row["id"] for row in lookup.json()["data"]}
+        self.assertIn(str(jp.id), found_ids)
+
+    def test_extension_direct_does_not_use_raw_top_level_description(self):
+        """Defense-in-depth for the description-source rule: even when the
+        payload carries NO structured_prefill.description, the raw
+        top-level description (full-page innerText) must not become the
+        JobPost description. The post is created with title/company but an
+        empty description rather than page chrome."""
+        link = "https://example.com/jobs/no-clean-desc"
+        raw_page_text = "Nav. Footer. page has loaded. APPLY NOW. " * 20
+        payload = _curated_payload(
+            title="Data Engineer",
+            company_name="PipelineCo",
+            description=None,  # no structured_prefill.description
+            raw_description=raw_page_text,
+        )
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                link,
+                source_mode="extension-direct",
+                captured_payload=payload,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(jp.title, "Data Engineer")
+        self.assertFalse(jp.description)
+        self.assertNotIn("page has loaded", jp.description or "")
 
     def test_browser_mode_keeps_409_dedupe_gate(self):
         """Regression guard — the dedupe-bypass is narrowly scoped to
@@ -360,6 +505,23 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         )
         self.assertEqual(resp.status_code, 409, resp.content)
         self.assertFalse(Scrape.objects.filter(url=link).exists())
+
+    def test_browser_mode_create_still_produces_hold_scrape(self):
+        """Regression — a browser-mode create (no source_mode, no payload)
+        against an unknown URL still mints a `hold` scrape for the runner
+        to claim, with no JobPost created synchronously. The Phase B
+        synchronous consume is narrowly scoped to extension-direct and
+        must not touch the browser path."""
+        link = "https://example.com/jobs/browser-fresh"
+        resp = self.client.post(
+            "/api/v1/scrapes/", _post_body(link), format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.status, "hold")
+        self.assertIsNone(scrape.job_post_id)
+        self.assertEqual(scrape.source_mode, "browser")
+        self.assertEqual(JobPost.objects.count(), 0)
 
     def test_extension_direct_canonical_link_collision_binds_existing_jp(self):
         """Canonical-link match still binds — the JP linkage on the
