@@ -122,6 +122,7 @@ def _audit_row(activity: dict) -> FederationActivity:
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestExtensionCoercion(TestCase):
     def setUp(self):
         cache.clear()
@@ -189,6 +190,7 @@ class TestExtensionCoercion(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestCompanyResolution(TestCase):
     def setUp(self):
         cache.clear()
@@ -228,6 +230,7 @@ class TestCompanyResolution(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestSanitization(TestCase):
     def setUp(self):
         cache.clear()
@@ -267,6 +270,7 @@ class TestSanitization(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestSourceFederation(TestCase):
     def setUp(self):
         cache.clear()
@@ -283,7 +287,10 @@ class TestSourceFederation(TestCase):
 # ---------------------------------------------------------------------------
 
 
-@override_settings(ACTIVITYPUB_INGEST_INSTANCE_QUOTA_PER_HOUR=100)
+@override_settings(
+    ACTIVITYPUB_INGEST_INSTANCE_QUOTA_PER_HOUR=100,
+    FEDERATION_INBOUND_INGEST_ENABLED=True,
+)
 class TestRateCapDefault(TestCase):
     def setUp(self):
         cache.clear()
@@ -317,6 +324,7 @@ class TestRateCapDefault(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestInReplyToNoOp(TestCase):
     def setUp(self):
         cache.clear()
@@ -339,6 +347,7 @@ class TestInReplyToNoOp(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestInboundUpdate(TestCase):
     def setUp(self):
         cache.clear()
@@ -511,6 +520,7 @@ class TestInboundDeleteExtended(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestVisibilityFilterRegression(TestCase):
     """Federated rows from 6b ingest stay invisible to local users
     until a JobPostDiscovery exists. The 5e visibility tests pin the
@@ -541,8 +551,118 @@ class TestVisibilityFilterRegression(TestCase):
         self.assertIn(str(self.jp.id), ids)
 
 
+# ---------------------------------------------------------------------------
+# CC-68 — inbound Note→JobPost ingest DISABLED by default.
+#
+# No FEDERATION_INBOUND_INGEST_ENABLED override → production default
+# (False). A verified inbound Create(Note) must NOT mint a JobPost or a
+# JobPostDiscovery, with OR without a careercaddy:extension, while the
+# FederationActivity audit row is still written by the inbox handler.
+# ---------------------------------------------------------------------------
+
+
+@override_settings(INSTANCE_ORIGIN=TEST_ORIGIN)
+class TestInboundIngestDisabledByDefault(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(username="doughoff", password="pw")
+        Actor.objects.create(
+            preferred_username="doughoff", type="Person", user=self.user,
+        )
+        self.peer = FakeRemoteActor()
+        self.path = "/actors/doughoff/inbox"
+
+    # -- direct calls --------------------------------------------------
+
+    def test_default_off_skips_plain_note(self):
+        before = JobPost.objects.count()
+        activity = _activity()
+        result = ingest_create_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED)
+        self.assertEqual(result.reason, "inbound_ingest_disabled")
+        self.assertEqual(JobPost.objects.count(), before)
+        self.assertEqual(JobPostDiscovery.objects.count(), 0)
+
+    def test_default_off_skips_note_with_extension(self):
+        # The careercaddy:extension does NOT bypass the gate — no JP, and
+        # no federation Company minted from the extension's company name.
+        activity = _activity(
+            extension={
+                "company": "BrandNewCo",
+                "apply_url": "https://ats.example/apply/9",
+            },
+        )
+        result = ingest_create_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED)
+        self.assertEqual(result.reason, "inbound_ingest_disabled")
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
+        self.assertFalse(Company.objects.filter(name="BrandNewCo").exists())
+
+    def test_default_off_skips_company_actor_discovery_fanout(self):
+        # Build the exact shape that WOULD mint a JobPostDiscovery under
+        # ingest ON: a Note attributed to a local Company actor with a
+        # local-user follower. OFF → no JP, no discovery (the fan-out runs
+        # downstream of the gated create, so it never fires).
+        company = Company.objects.create(
+            name="Acme Discovery Co", slug="acme-discovery-co", source="manual",
+        )
+        follower_user = User.objects.create_user(
+            username="follower6boff", password="pw",
+        )
+        FederationFollower.objects.create(
+            company=company,
+            local_user=follower_user,
+            actor_uri="https://peer.example/users/acme",
+            inbox_uri="https://peer.example/users/acme/inbox",
+            instance_host="peer.example",
+        )
+        activity = _activity(
+            attributed_to=f"{TEST_ORIGIN}/companies/{company.slug}",
+        )
+        result = ingest_create_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
+        self.assertEqual(JobPostDiscovery.objects.count(), 0)
+
+    # -- inbox-wired path ---------------------------------------------
+
+    def _post(self, body: bytes):
+        from job_hunting.lib import federation_signing
+        headers = self.peer.sign_request("POST", self.path, body, "testserver")
+        with patch.object(
+            federation_signing, "fetch_actor_public_key",
+            return_value=self.peer.public_pem,
+        ):
+            return self.client.post(
+                self.path, data=body,
+                content_type="application/activity+json",
+                **{f"HTTP_{k.upper().replace('-', '_')}": v
+                   for k, v in headers.items() if k.lower() != "host"},
+                HTTP_HOST="testserver",
+            )
+
+    def test_inbox_create_default_off_logs_but_no_jobpost(self):
+        payload = _activity(
+            activity_id=f"{self.peer.actor_uri}/activities/off-create-1",
+            actor=self.peer.actor_uri,
+            object_id=f"{self.peer.actor_uri}/notes/1",
+            note_url="https://hire.example/jobs/off-1",
+        )
+        body = json.dumps(payload).encode("utf-8")
+        response = self._post(body)
+        self.assertEqual(response.status_code, 202)
+        # Audit row IS written (trace preserved) and stays accepted ...
+        row = FederationActivity.objects.get(
+            direction="inbound", activity_id=payload["id"],
+        )
+        self.assertEqual(row.activity_type, "Create")
+        self.assertEqual(row.delivery_status, "accepted")
+        # ... but no JobPost + no discovery were minted.
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
+        self.assertEqual(JobPostDiscovery.objects.count(), 0)
+
+
 # Silence unused-import lint trigger for the module name (used elsewhere
 # in handoff diagnostics + as a monkeypatch target).
 _ = federation_ingest
 _ = DuplicateAnnotation
-_ = FederationFollower

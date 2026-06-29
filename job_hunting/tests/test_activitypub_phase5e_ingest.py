@@ -32,6 +32,7 @@ from job_hunting.models import (
     DuplicateAnnotation,
     FederationActivity,
     JobPost,
+    JobPostDiscovery,
 )
 from job_hunting.models.job_post import AS2_PUBLIC
 
@@ -108,6 +109,7 @@ def _audit_row(activity: dict) -> FederationActivity:
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestIngestCreate(TestCase):
     def setUp(self):
         cache.clear()
@@ -171,6 +173,7 @@ class TestIngestCreate(TestCase):
         self.assertEqual(row.delivery_status, "accepted")
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestIngestMerge(TestCase):
     """Canonical-link duplicate → MERGE, audit annotation written."""
 
@@ -251,6 +254,7 @@ class TestIngestMerge(TestCase):
         )
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestIngestSkipped(TestCase):
     """Non-Note object types skip cleanly without writing JobPost."""
 
@@ -277,6 +281,7 @@ class TestIngestSkipped(TestCase):
 # ---------------------------------------------------------------------------
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestIngestRejections(TestCase):
     def setUp(self):
         cache.clear()
@@ -360,7 +365,10 @@ class TestIngestRejections(TestCase):
 # ---------------------------------------------------------------------------
 
 
-@override_settings(ACTIVITYPUB_INGEST_INSTANCE_QUOTA_PER_HOUR=2)
+@override_settings(
+    ACTIVITYPUB_INGEST_INSTANCE_QUOTA_PER_HOUR=2,
+    FEDERATION_INBOUND_INGEST_ENABLED=True,
+)
 class TestIngestQuota(TestCase):
     def setUp(self):
         cache.clear()
@@ -451,6 +459,7 @@ class TestIngestDisabled(TestCase):
         self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
 
 
+@override_settings(FEDERATION_INBOUND_INGEST_ENABLED=True)
 class TestReplayTool(TestCase):
     def setUp(self):
         cache.clear()
@@ -477,7 +486,10 @@ class TestReplayTool(TestCase):
 TEST_ORIGIN = "http://testserver"
 
 
-@override_settings(INSTANCE_ORIGIN=TEST_ORIGIN)
+@override_settings(
+    INSTANCE_ORIGIN=TEST_ORIGIN,
+    FEDERATION_INBOUND_INGEST_ENABLED=True,
+)
 class TestInboxCallsIngest(TestCase):
     """Wired path: POST signed Create(Note) to /actors/<u>/inbox →
     audit row written by 5c AND ingest_create_note called by 5e."""
@@ -572,6 +584,65 @@ class TestInboxCallsIngest(TestCase):
                 direction="inbound", activity_type="Create",
             ).exists()
         )
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
+
+
+# ---------------------------------------------------------------------------
+# CC-68 — inbound Note→JobPost ingest DISABLED by default.
+#
+# These run with NO override_settings, so they exercise the production
+# default (FEDERATION_INBOUND_INGEST_ENABLED unset → False). The create
+# path must short-circuit to SKIPPED before minting any JobPost or
+# JobPostDiscovery, while the FederationActivity audit row (written by the
+# inbox handler, mirrored here by ``_audit_row``) stays untouched.
+# ---------------------------------------------------------------------------
+
+
+class TestInboundIngestDisabledByDefault(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_default_off_skips_create_without_minting(self):
+        before = JobPost.objects.count()
+        activity = _activity()
+        row = _audit_row(activity)
+        result = ingest_create_note(activity, federation_activity=row)
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED)
+        self.assertEqual(result.reason, "inbound_ingest_disabled")
+        self.assertEqual(JobPost.objects.count(), before)
+        self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
+
+    def test_default_off_creates_no_discovery_rows(self):
+        activity = _activity()
+        ingest_create_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(JobPostDiscovery.objects.count(), 0)
+
+    def test_default_off_leaves_audit_row_accepted(self):
+        # The short-circuit must NOT demote the audit row — the activity
+        # verified + logged fine; we just decline to ingest it. (A future
+        # re-enable replays these accepted rows.)
+        activity = _activity()
+        row = _audit_row(activity)
+        ingest_create_note(activity, federation_activity=row)
+        row.refresh_from_db()
+        self.assertEqual(row.delivery_status, "accepted")
+
+    def test_default_off_skips_even_with_extension(self):
+        # The careercaddy:extension payload does NOT bypass the default-off
+        # gate — re-enable requires BOTH a positive marker AND an explicit
+        # subscription (see module docstring), neither of which this flag
+        # represents on its own.
+        activity = _activity(
+            extra_object={
+                "careercaddy:extension": {
+                    "company": "Acme",
+                    "apply_url": "https://greenhouse.io/acme/jobs/abc",
+                }
+            }
+        )
+        result = ingest_create_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED)
+        self.assertEqual(result.reason, "inbound_ingest_disabled")
         self.assertEqual(JobPost.objects.filter(source="federation").count(), 0)
 
 
