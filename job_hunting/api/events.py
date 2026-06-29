@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import select
 import time
 from collections.abc import Iterator
@@ -98,6 +99,21 @@ _TOKEN_SALT = "events.sse.token"
 # idle-timeout at 30s–60s; 15s gives comfortable margin. SSE comment
 # lines start with ':' and are ignored by EventSource clients.
 _KEEPALIVE_INTERVAL_S = 15
+
+# Wall-clock cap on a single SSE session, in seconds. gunicorn sync
+# workers SIGKILL after ``GUNICORN_TIMEOUT`` (currently 120s in prod —
+# see ``api/gunicorn.conf.py``) because the arbiter heartbeat does not
+# reset between streaming yields. The 2026-06-10 prod incident showed
+# this exact shape: ``events.stream.start`` → ``WORKER TIMEOUT`` →
+# ``events.stream.end duration_ms=120129 closed_by=unknown``. Capping
+# the session below the gunicorn timeout lets the generator exit
+# cleanly, log a structured ``closed_by=duration_cap`` line, and the
+# browser's EventSource reconnects on its own within ~3s. Configurable
+# via ``SSE_STREAM_MAX_DURATION_S`` so prod can tune without a code
+# redeploy; 90s default leaves 30s of headroom under the 120s gunicorn
+# timeout. Long-term fix is moving SSE off sync workers — see
+# ``Plans/SSE off sync gunicorn — A-B-C tradeoff`` in ``api/notes.org``.
+_STREAM_MAX_DURATION_S = int(os.getenv("SSE_STREAM_MAX_DURATION_S", "90"))
 
 
 def _sign_token(user_id: int) -> str:
@@ -195,8 +211,9 @@ def _event_stream(user_id: int) -> Iterator[bytes]:
 
     Lifecycle: emits one ``events.stream.start`` INFO line on entry and
     one ``events.stream.end`` INFO line on exit (with ``closed_by`` set
-    to ``client``, ``error``, or ``unknown``). The end-line carries the
-    session duration so logfire can surface long-lived SSE sessions.
+    to ``client``, ``error``, ``duration_cap``, or ``unknown``). The
+    end-line carries the session duration so logfire can surface
+    long-lived SSE sessions.
     """
     conn = _open_listen_connection()
     started_at = time.monotonic()
@@ -213,6 +230,21 @@ def _event_stream(user_id: int) -> Iterator[bytes]:
             raise _ClientDisconnected from exc
 
         while True:
+            # Wall-clock cap: gunicorn sync workers SIGKILL at
+            # ``GUNICORN_TIMEOUT``. Exit cleanly under that ceiling and
+            # let EventSource auto-reconnect (~3s spec'd default) rather
+            # than letting the arbiter SIGKILL the worker mid-stream.
+            if time.monotonic() - started_at >= _STREAM_MAX_DURATION_S:
+                try:
+                    yield (
+                        b'event: reconnect\n'
+                        b'data: {"reason": "stream-max-duration"}\n\n'
+                    )
+                except (BrokenPipeError, ConnectionResetError) as exc:
+                    raise _ClientDisconnected from exc
+                closed_by = "duration_cap"
+                break
+
             # select() blocks until the postgres connection has data
             # OR the keep-alive timer fires. The 3-tuple return is
             # (readable, writable, exceptional); empty readable means
