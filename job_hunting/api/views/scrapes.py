@@ -1294,7 +1294,7 @@ class ScrapeViewSet(BaseViewSet):
         scopes against the rest of the api, so this verb is no more
         privileged than existing CRUD.
         """
-        from django.db import transaction
+        from django.db import OperationalError, connection, transaction
         from django.utils import timezone
 
         data = request.data if isinstance(request.data, dict) else {}
@@ -1308,30 +1308,62 @@ class ScrapeViewSet(BaseViewSet):
         # holds the row lock until the UPDATE commits. SKIP LOCKED
         # lets concurrent runners see the next row instead of
         # blocking on the locked one.
-        with transaction.atomic():
-            claimable = (
-                Scrape.objects.select_for_update(skip_locked=True)
-                .filter(
-                    status="hold",
-                    claimed_at__isnull=True,
+        #
+        # CC-96: bound the transaction so a single claim can NEVER pin a
+        # gunicorn worker for the full request timeout. Without this, any
+        # lock/scan stall runs to gunicorn `timeout=120` → the worker is
+        # SIGKILLed mid-transaction → its Postgres backend lingers as
+        # `idle in transaction` holding the SELECT FOR UPDATE row lock →
+        # later claims pile up behind it (the prod wedge). SKIP LOCKED
+        # already keeps the SELECT from waiting on a locked row;
+        # `lock_timeout` additionally caps the `.save()` UPDATE (and any
+        # non-SKIP-LOCKED wait), and `statement_timeout` caps total
+        # runtime as a backstop. SET LOCAL is scoped to this transaction
+        # and resets on commit/rollback. A timeout/contention error is
+        # caught below and surfaced as a fast 204 — the runner just
+        # retries on its next poll — and the aborted txn releases its
+        # locks cleanly, so no stuck `idle in transaction` backend forms.
+        try:
+            with transaction.atomic():
+                with connection.cursor() as cur:
+                    cur.execute("SET LOCAL lock_timeout = '3s'")
+                    cur.execute("SET LOCAL statement_timeout = '5s'")
+                claimable = (
+                    Scrape.objects.select_for_update(skip_locked=True)
+                    .filter(
+                        status="hold",
+                        claimed_at__isnull=True,
+                    )
+                    # FIFO by creation time. The PK is a random NanoID
+                    # (CC-77) so it can no longer stand in as the arrival-
+                    # order key; order by created_at instead. Pre-CC-77
+                    # rows carry a NULL created_at and sort first as the
+                    # oldest holds; id is a stable tiebreak for exact-
+                    # timestamp ties. Served index-only by
+                    # scrape_claim_queue_idx (CC-96).
+                    .order_by(F("created_at").asc(nulls_first=True), "id")
+                    .first()
                 )
-                # FIFO by creation time. The PK is a random NanoID (CC-77)
-                # so it can no longer stand in as the arrival-order key;
-                # order by created_at instead. Pre-CC-77 rows carry a NULL
-                # created_at and sort first as the oldest holds; id is a
-                # stable tiebreak for exact-timestamp ties.
-                .order_by(F("created_at").asc(nulls_first=True), "id")
-                .first()
-            )
-            if claimable is None:
-                return Response(status=status.HTTP_204_NO_CONTENT)
+                if claimable is None:
+                    return Response(status=status.HTTP_204_NO_CONTENT)
 
-            claimable.claimed_at = timezone.now()
-            claimable.claimed_by = runner_name
-            claimable.status = "running"
-            claimable.save(
-                update_fields=["claimed_at", "claimed_by", "status"]
+                claimable.claimed_at = timezone.now()
+                claimable.claimed_by = runner_name
+                claimable.status = "running"
+                claimable.save(
+                    update_fields=["claimed_at", "claimed_by", "status"]
+                )
+        except OperationalError as exc:
+            # lock_timeout (55P03) / statement_timeout (57014) tripped, or
+            # transient DB contention. Treat as "nothing claimable right
+            # now": 204 → the runner sleeps and retries. This converts a
+            # would-be 120s wedge into a sub-10s no-op.
+            logger.warning(
+                "claim-next contended; returning 204 (runner=%s): %s",
+                runner_name,
+                exc,
             )
+            return Response(status=status.HTTP_204_NO_CONTENT)
 
         ser = self.get_serializer()
         return Response({"data": ser.to_resource(claimable)}, status=200)
