@@ -1092,24 +1092,24 @@ class ScrapeViewSet(BaseViewSet):
         from job_hunting.lib.scraper import _log_scrape_status
         _log_scrape_status(scrape.id, "pending", note=f"{source} ingest")
 
-        from job_hunting.lib.parsers.job_post_extractor import parse_scrape
-        parse_scrape(scrape.id, user_id=request.user.id, sync=True)
-
-        scrape.refresh_from_db()
-        # The extension is the authoritative writer for JobPost.apply_url
-        # (camoufox-based ResolveApplyUrl is being phased out). Stamp it on
-        # the JP whenever the extension supplied a value; later writers
-        # may no-op if it's already set.
-        if apply_url and scrape.job_post_id:
-            JobPost.objects.filter(pk=scrape.job_post_id).update(
-                apply_url=apply_url, apply_url_status="resolved"
-            )
-        if scrape.job_post_id and auto_score:
-            try:
-                from job_hunting.api.views.scores import _auto_score_job_post
-                _auto_score_job_post(scrape.job_post_id, request.user.id)
-            except Exception:
-                logger.exception("from_text: auto-score failed for scrape %s", scrape.id)
+        # Offload the LLM parse to the qcluster worker instead of running
+        # it inline in the request. The synchronous in-request parse was
+        # the CC-122 OOM root cause: the LLM allocation tipped the api
+        # cgroup over its mem_limit and the worker got SIGKILLed mid-parse,
+        # silently orphaning the scrape at status='pending'. The worker
+        # (job_hunting.lib.tasks.parse_scrape_job) re-enters parse_scrape
+        # with sync=True off the django_q_ormq queue, then replicates the
+        # post-parse apply_url stamp + auto-score that used to live here —
+        # both depend on the JobPost existing, which is only true after the
+        # parse runs. Both clients already poll the scrape to terminal, so
+        # the JobPost simply materializes on a later poll.
+        async_task(
+            "job_hunting.lib.tasks.parse_scrape_job",
+            scrape.id,
+            user_id=request.user.id,
+            apply_url=apply_url,
+            auto_score=auto_score,
+        )
 
         # Cross-platform dedup: look up an existing JP at the apply_url
         # (read-only — no stub creation; the relationship is fully captured
@@ -1130,6 +1130,10 @@ class ScrapeViewSet(BaseViewSet):
             referrer_url, "referrer_stub", request.user
         ) if referrer_url else None
 
+        # submitted_jp_id is None now that the parse is async — the JobPost
+        # doesn't exist yet at 202 time, so meta.canonical_redirect resolves
+        # to null on the submit side. It's only a navigation hint; the
+        # apply-leg match above still resolves against existing posts.
         canonical_redirect = self._compute_canonical_redirect(
             submitted_jp_id=scrape.job_post_id,
             submitted_link=link,

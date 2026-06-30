@@ -1,4 +1,23 @@
-"""Tests for POST /api/v1/scrapes/from-text/ — the paste-to-JobPost endpoint."""
+"""Tests for POST /api/v1/scrapes/from-text/ — the paste-to-JobPost endpoint.
+
+from_text used to run the LLM parse synchronously inside the HTTP request
+(``parse_scrape(..., sync=True)``). That in-request allocation was the
+CC-122 OOM root cause: it tipped the api cgroup over its 768m mem_limit
+and the gunicorn worker got SIGKILLed mid-parse, silently orphaning the
+scrape at status='pending'. The durable fix offloads the parse to the
+django-q2 qcluster worker — the endpoint now *enqueues*
+``job_hunting.lib.tasks.parse_scrape_job`` and returns 202 immediately;
+both clients (the MV3 extension + the Ember app) already poll the scrape
+to terminal, so the JobPost materializes on a later poll.
+
+Test strategy: ``Q_CLUSTER['sync']`` is NOT on globally under TESTING, so a
+real ``async_task`` enqueues an OrmQ row that nothing drains. Endpoint
+tests mock ``job_hunting.api.views.scrapes.async_task`` and assert the
+enqueue (target + args) + the 202 shape, with the scrape left ``pending``
+(no synchronous parse). Tests that need the post-parse effects
+(apply_url stamp, auto-score, failure_reason) call ``_run_enqueued_task``
+to run the worker leg in-band, exactly as the qcluster worker would.
+"""
 
 from unittest.mock import patch
 
@@ -12,6 +31,24 @@ from job_hunting.models.job_post_dedupe import _profile_url_rewrites_for_host
 
 User = get_user_model()
 
+PARSE_TASK = "job_hunting.lib.tasks.parse_scrape_job"
+
+
+def _run_enqueued_task(mock_async):
+    """Run the parse task the view enqueued, exactly as the qcluster worker
+    would. The view dispatches the parse via
+    ``async_task("job_hunting.lib.tasks.parse_scrape_job", scrape_id, **kw)``;
+    endpoint tests mock ``async_task`` to keep the request fast +
+    deterministic, then call this to execute the worker leg in-band and
+    assert post-parse effects.
+    """
+    from job_hunting.lib.tasks import parse_scrape_job
+
+    mock_async.assert_called_once()
+    args, kwargs = mock_async.call_args
+    assert args[0] == PARSE_TASK, f"expected enqueue of {PARSE_TASK}, got {args[0]!r}"
+    return parse_scrape_job(*args[1:], **kwargs)
+
 
 # Existing tests predate the Phase 0 length floor; relax it so they keep
 # focusing on what they were written to test. Length bounds get their own
@@ -23,8 +60,8 @@ class TestScrapeFromText(TestCase):
         self.user = User.objects.create_user(username="paster", password="pw")
         self.client.force_authenticate(user=self.user)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_happy_path_returns_202_with_scrape(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_happy_path_enqueues_parse_returns_202(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Senior Engineer at Acme. Remote. $180k-$220k."},
@@ -36,19 +73,23 @@ class TestScrapeFromText(TestCase):
         self.assertEqual(body["data"]["type"], "scrape")
 
         scrape = Scrape.objects.get(pk=body["data"]["id"])
-        self.assertEqual(scrape.status, "pending")
         self.assertEqual(scrape.url, None)
         self.assertIn("Senior Engineer", scrape.job_content)
         self.assertEqual(scrape.created_by, self.user)
 
-        mock_parse.assert_called_once()
-        args, kwargs = mock_parse.call_args
-        self.assertEqual(args[0], scrape.id)
-        self.assertEqual(kwargs.get("user_id"), self.user.id)
-        self.assertTrue(kwargs.get("sync"), "from_text must call parse_scrape with sync=True")
+        # The parse is offloaded to the qcluster worker — it does NOT run
+        # inline. The scrape stays pending until the worker drains it.
+        self.assertEqual(scrape.status, "pending")
+        self.assertIsNone(scrape.job_post_id)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_optional_link_stored(self, mock_parse):
+        mock_async.assert_called_once()
+        args, kwargs = mock_async.call_args
+        self.assertEqual(args[0], PARSE_TASK)
+        self.assertEqual(args[1], scrape.id)
+        self.assertEqual(kwargs.get("user_id"), self.user.id)
+
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_optional_link_stored(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
@@ -60,10 +101,10 @@ class TestScrapeFromText(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.url, "https://example.com/jobs/1")
-        mock_parse.assert_called_once()
+        mock_async.assert_called_once()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_empty_text_rejected(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_empty_text_rejected(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "   "},
@@ -71,19 +112,20 @@ class TestScrapeFromText(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Scrape.objects.count(), 0)
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_missing_text_rejected(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_missing_text_rejected(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    def test_auth_required(self):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_auth_required(self, mock_async):
         self.client.force_authenticate(user=None)
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
@@ -91,6 +133,7 @@ class TestScrapeFromText(TestCase):
             format="json",
         )
         self.assertIn(resp.status_code, (401, 403))
+        mock_async.assert_not_called()
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
@@ -99,15 +142,12 @@ class TestScrapeFromTextResponseShape(TestCase):
 
     The cc_sender browser extension popup reads ``body.data.id`` (the
     scrape id) and ``body.data.relationships['job-post'].data.id``
-    immediately after a 202. Both must be present even on the
-    no-hints / no-existing-JP path Doug hit on 2026-06-10 — the popup
-    surfaces the misleading "Sent, but no scrape id returned." error
-    when either is missing, with no actionable detail in the log.
-    Regression guard: every 2xx envelope must carry ``data.id`` (a
-    non-empty digit string), ``data.type == 'scrape'``, and a
-    ``data.relationships['job-post']`` linkage block (even when the
-    linkage data is ``None``, the key + ``links`` MUST be present so
-    the popup's optional-chaining lookup doesn't fall off the cliff).
+    immediately after a 202. data.id must always be present. With the
+    parse now deferred to the worker, the job-post linkage is ALWAYS the
+    empty form (data=None) at 202 time — the JP doesn't exist yet — so the
+    popup falls through to its existing background poll. The linkage block
+    (data=None + links) must still be present so the popup's optional
+    chaining returns null instead of throwing on a missing key path.
     """
 
     def setUp(self):
@@ -167,8 +207,8 @@ class TestScrapeFromTextResponseShape(TestCase):
                 "meta.scrape_id must equal data.id",
             )
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_envelope_has_data_id_on_minimal_paste(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_envelope_has_data_id_on_minimal_paste(self, _mock_async):
         """No link, no hints — Doug's failure shape. body.data.id required."""
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
@@ -178,8 +218,8 @@ class TestScrapeFromTextResponseShape(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         self._assert_envelope(resp.json())
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_envelope_matches_cc_sender_popup_submission(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_envelope_matches_cc_sender_popup_submission(self, _mock_async):
         """Exact wire shape the cc_sender popup posts on the from-text
         fall-through path (useDirectPost=false): link present, source=
         'extension', auto_score=true, all hint fields explicitly null
@@ -204,17 +244,15 @@ class TestScrapeFromTextResponseShape(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         self._assert_envelope(resp.json())
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_envelope_intact_when_parse_creates_no_job_post(self, _mock_parse):
-        """When parse_scrape no-ops (mock leaves job_post_id None), the
-        scrape envelope must still carry data.id. The bug scenario:
-        parse fails silently to create a JP, but the wire response must
-        still pin the scrape so the popup can show 'Added' and the user
-        can navigate to the in-flight scrape.
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_envelope_intact_when_no_job_post_yet(self, _mock_async):
+        """With the parse deferred, the scrape envelope carries data.id but
+        no JP linkage. The popup must still pin the scrape so it can show
+        'Added' and poll the in-flight scrape to completion.
         """
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
-            data={"text": "Some content the extractor can't parse."},
+            data={"text": "Some content the extractor will parse later."},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
@@ -224,22 +262,16 @@ class TestScrapeFromTextResponseShape(TestCase):
         # missing the relationships block entirely.
         self.assertIsNone(
             body["data"]["relationships"]["job-post"]["data"],
-            "job-post linkage data should be None when no JP linked",
+            "job-post linkage data should be None when no JP linked yet",
         )
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_envelope_includes_jp_linkage_after_successful_parse(self, mock_analyze):
-        """End-to-end through real parse_scrape with mocked LLM: confirm
-        the JP linkage data carries the new JobPost id so the popup can
-        route the user via body.data.relationships['job-post'].data.id.
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_envelope_jp_linkage_null_because_parse_deferred(self, mock_async):
+        """The behavior change CC-122 introduces: even when the parse will
+        succeed, the 202 carries job-post linkage data=None because the
+        parse hasn't run yet. The JP materializes only after the worker
+        drains the queue; the client picks it up on a subsequent poll.
         """
-        from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
-
-        mock_analyze.return_value = ParsedJobData(
-            title="Staff Engineer",
-            company_name="ShapeCorp",
-            description="Build reliable distributed systems. " * 5,
-        )
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Staff Engineer at ShapeCorp. " * 20, "source": "extension"},
@@ -248,15 +280,18 @@ class TestScrapeFromTextResponseShape(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         body = resp.json()
         self._assert_envelope(body)
-        scrape_id = body["data"]["id"]
-        scrape = Scrape.objects.get(pk=scrape_id)
-        jp_linkage = body["data"]["relationships"]["job-post"]["data"]
-        self.assertIsNotNone(jp_linkage, "JP linkage data must be populated after successful parse")
-        self.assertEqual(jp_linkage["type"], "job-post")
-        self.assertEqual(jp_linkage["id"], str(scrape.job_post_id))
+        self.assertIsNone(
+            body["data"]["relationships"]["job-post"]["data"],
+            "JP linkage must be None at 202 time — parse is async now",
+        )
+        scrape = Scrape.objects.get(pk=body["data"]["id"])
+        self.assertEqual(scrape.status, "pending")
+        self.assertIsNone(scrape.job_post_id)
+        # The enqueue is what carries the work forward.
+        mock_async.assert_called_once()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_envelope_id_matches_db_row(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_envelope_id_matches_db_row(self, _mock_async):
         """body.data.id must be the actual Scrape pk, not some serializer
         artifact. Pins the contract that the popup can round-trip the id
         back through GET /scrapes/:id/ without translation.
@@ -294,8 +329,8 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         self.client.force_authenticate(user=self.user)
         self.company = Company.objects.create(name="Toptal")
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_non_stub_duplicate_returns_409_without_creating_scrape(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_non_stub_duplicate_returns_409_without_creating_scrape(self, mock_async):
         # Trust-aware short-circuit: 409 only fires when the new push is
         # SAME-or-lower-trust than the existing post. The from-text
         # endpoint defaults source="paste"; set existing.source="paste"
@@ -321,12 +356,12 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         self.assertEqual(err["meta"]["link"], self.DUPLICATE_LINK)
         self.assertEqual(err["meta"]["title"], "Senior Engineer")
         self.assertEqual(err["meta"]["company_name"], "Toptal")
-        # No Scrape created, no agent call.
+        # No Scrape created, no agent call enqueued.
         self.assertEqual(Scrape.objects.count(), 0)
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_incomplete_duplicate_passes_through_for_upgrade(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_incomplete_duplicate_passes_through_for_upgrade(self, mock_async):
         """JP flagged complete=False bypasses the 409 — same trust rank
         and a long description don't matter, only the explicit flag.
         Replaces the old word-count-based stub bypass."""
@@ -346,10 +381,10 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(Scrape.objects.count(), 1)
-        mock_parse.assert_called_once()
+        mock_async.assert_called_once()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_force_true_overrides_dedup(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_force_true_overrides_dedup(self, mock_async):
         """User explicitly opts in to re-parse over an existing post."""
         JobPost.objects.create(
             title="Senior Engineer",
@@ -369,10 +404,10 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(Scrape.objects.count(), 1)
-        mock_parse.assert_called_once()
+        mock_async.assert_called_once()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_no_link_skips_dedup_check(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_no_link_skips_dedup_check(self, mock_async):
         """Paste without a URL — never had a chance to match anything."""
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
@@ -380,10 +415,10 @@ class TestScrapeFromTextDuplicateLink(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        mock_parse.assert_called_once()
+        mock_async.assert_called_once()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_409_fires_when_complete_and_stub_share_canonical_link(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_409_fires_when_complete_and_stub_share_canonical_link(self, mock_async):
         """Regression: link is unique, canonical_link is not. If a stub
         /comm/ row and a complete /jobs/view/ row both canonicalize to
         the same URL, an unordered .first() can pick the stub (whose
@@ -434,12 +469,12 @@ class TestScrapeFromTextDuplicateLink(TestCase):
             self.assertEqual(err["meta"]["job_post_id"], complete_post.id)
             self.assertNotEqual(err["meta"]["job_post_id"], stub.id)
             self.assertEqual(Scrape.objects.count(), 0)
-            mock_parse.assert_not_called()
+            mock_async.assert_not_called()
         finally:
             _profile_url_rewrites_for_host.cache_clear()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_409_fires_when_existing_is_extension_complete_and_closed(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_409_fires_when_existing_is_extension_complete_and_closed(self, mock_async):
         """Regression: scrape 414 / JP 1532 (linkedin GitHub Software
         Engineer II, Security, link
         https://www.linkedin.com/jobs/view/4386478229/) on 2026-05-13.
@@ -473,10 +508,10 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         self.assertEqual(err["code"], "duplicate_job_post")
         self.assertEqual(err["meta"]["job_post_id"], existing.id)
         self.assertEqual(Scrape.objects.count(), 0)
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_extension_push_bypasses_409_on_email_post(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_extension_push_bypasses_409_on_email_post(self, mock_async):
         """The whole point of the extension-as-source-of-truth feature:
         when the extension push has a higher source trust than the
         existing post, /scrapes/from-text/ does NOT 409. Instead it
@@ -504,7 +539,7 @@ class TestScrapeFromTextDuplicateLink(TestCase):
         self.assertEqual(Scrape.objects.count(), 1)
         scrape = Scrape.objects.first()
         self.assertEqual(scrape.source, "extension")
-        mock_parse.assert_called_once()
+        mock_async.assert_called_once()
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
@@ -545,8 +580,8 @@ class TestScrapeFromTextZipRecruiterDedupe(TestCase):
     def tearDown(self):
         _profile_url_rewrites_for_host.cache_clear()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_clean_variant_409s_against_tokenized_existing(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_clean_variant_409s_against_tokenized_existing(self, mock_async):
         existing = JobPost.objects.create(
             title="Software Developer C++",
             company=self.company,
@@ -565,7 +600,7 @@ class TestScrapeFromTextZipRecruiterDedupe(TestCase):
         self.assertEqual(err["code"], "duplicate_job_post")
         self.assertEqual(err["meta"]["job_post_id"], existing.id)
         self.assertEqual(Scrape.objects.count(), 0)
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
@@ -580,8 +615,8 @@ class TestScrapeFromTextSourceHint(TestCase):
         self.user = User.objects.create_user(username="srcuser", password="pw")
         self.client.force_authenticate(user=self.user)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_default_source_is_paste(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_default_source_is_paste(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Some content"},
@@ -591,8 +626,8 @@ class TestScrapeFromTextSourceHint(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "paste")
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_extension_source_persists(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_extension_source_persists(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Content", "source": "extension"},
@@ -602,8 +637,8 @@ class TestScrapeFromTextSourceHint(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "extension")
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_email_source_persists(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_email_source_persists(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Content", "source": "email"},
@@ -613,8 +648,8 @@ class TestScrapeFromTextSourceHint(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "email")
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_source_normalized_to_lowercase(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_source_normalized_to_lowercase(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Content", "source": "Extension"},
@@ -624,8 +659,8 @@ class TestScrapeFromTextSourceHint(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.source, "extension")
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_invalid_source_falls_back_to_paste(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_invalid_source_falls_back_to_paste(self, _mock_async):
         # Whitespace / special chars / overlong values must not crash —
         # provenance attribution should never block ingestion.
         for bad in [
@@ -646,8 +681,8 @@ class TestScrapeFromTextSourceHint(TestCase):
                 self.assertEqual(scrape.source, "paste")
                 Scrape.objects.all().delete()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_blank_source_falls_back_to_paste(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_blank_source_falls_back_to_paste(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "c", "source": "   "},
@@ -672,8 +707,8 @@ class TestScrapeFromTextPolicy(TestCase):
         self.user = User.objects.create_user(username="policy", password="pw")
         self.client.force_authenticate(user=self.user)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_rejects_self_host_link(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_rejects_self_host_link(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
@@ -687,10 +722,10 @@ class TestScrapeFromTextPolicy(TestCase):
             resp.json()["errors"][0]["code"], "blocked_self"
         )
         self.assertEqual(Scrape.objects.count(), 0)
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_rejects_javascript_scheme_link(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_rejects_javascript_scheme_link(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": self.LONG_TEXT, "link": "javascript:alert(1)"},
@@ -698,10 +733,10 @@ class TestScrapeFromTextPolicy(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
         self.assertEqual(resp.json()["errors"][0]["code"], "blocked_scheme")
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_rejects_localhost_link(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_rejects_localhost_link(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": self.LONG_TEXT, "link": "http://localhost:4200/x"},
@@ -709,10 +744,10 @@ class TestScrapeFromTextPolicy(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
         self.assertEqual(resp.json()["errors"][0]["code"], "blocked_private")
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_short_text_rejected(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_short_text_rejected(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "too short for a real posting"},
@@ -720,10 +755,10 @@ class TestScrapeFromTextPolicy(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(resp.json()["errors"][0]["code"], "text_too_short")
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_oversize_text_rejected(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_oversize_text_rejected(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "x" * 600_000},
@@ -731,50 +766,62 @@ class TestScrapeFromTextPolicy(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
         self.assertEqual(resp.json()["errors"][0]["code"], "text_too_long")
-        mock_parse.assert_not_called()
+        mock_async.assert_not_called()
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_happy_path_with_public_link_passes(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_happy_path_with_public_link_passes(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": self.LONG_TEXT, "link": "https://jobs.lever.co/acme/1"},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        mock_parse.assert_called_once()
+        mock_async.assert_called_once()
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
-class TestScrapeFromTextSyncExtraction(TestCase):
-    """from_text must call parse_scrape with sync=True so the scrape reaches
-    a terminal status before the HTTP response is returned. Without this,
-    extension-submitted scrapes could get stuck in extracting if the daemon
-    thread dies (scrape 273 incident, 2026-05-02)."""
+class TestScrapeFromTextAsyncDispatch(TestCase):
+    """CC-122 durable fix: from_text offloads the LLM parse to the qcluster
+    worker instead of running it inline in the request. The in-request
+    parse was the OOM root cause — the LLM allocation tipped the api cgroup
+    over its 768m mem_limit and the gunicorn worker was SIGKILLed mid-parse,
+    silently orphaning the scrape at status='pending'. The endpoint now
+    enqueues job_hunting.lib.tasks.parse_scrape_job and returns 202; the
+    worker drives the scrape to terminal off the django_q_ormq queue.
+    """
 
     def setUp(self):
         self.client = APIClient()
-        self.user = User.objects.create_user(username="syncuser", password="pw")
+        self.user = User.objects.create_user(username="asyncuser", password="pw")
         self.client.force_authenticate(user=self.user)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_parse_scrape_called_with_sync_true(self, mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_enqueues_parse_scrape_job_without_inline_parse(self, mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Real job content here", "source": "extension"},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        _, kwargs = mock_parse.call_args
-        self.assertTrue(
-            kwargs.get("sync"),
-            "from_text must invoke parse_scrape(..., sync=True) to prevent stuck-extracting scrapes",
-        )
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        # No synchronous parse: scrape stays pending, no JobPost yet.
+        self.assertEqual(scrape.status, "pending")
+        self.assertIsNone(scrape.job_post_id)
+        # The parse was handed to the worker queue, not run in-band.
+        mock_async.assert_called_once()
+        args, kwargs = mock_async.call_args
+        self.assertEqual(args[0], PARSE_TASK)
+        self.assertEqual(args[1], scrape.id)
+        self.assertEqual(kwargs.get("user_id"), self.user.id)
+        self.assertIn("apply_url", kwargs)
+        self.assertIn("auto_score", kwargs)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_scrape_is_terminal_when_response_returns(self, mock_analyze):
-        """With sync=True, parse_scrape runs inline. The scrape must be in
-        a terminal status (completed or failed) before the 202 is returned,
-        so the extension's first poll always sees a result."""
+    def test_worker_drives_scrape_to_terminal(self, mock_analyze, mock_async):
+        """Running the enqueued task (as the worker would) carries the
+        scrape from pending → terminal and links the JobPost. This is the
+        leg the extension/web poll observes."""
         from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
 
         mock_analyze.return_value = ParsedJobData(
@@ -789,28 +836,40 @@ class TestScrapeFromTextSyncExtraction(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         scrape_id = resp.json()["data"]["id"]
+
+        # Drain the queue: run the worker leg in-band.
+        _run_enqueued_task(mock_async)
+
         scrape = Scrape.objects.get(pk=scrape_id)
         self.assertIn(
             scrape.status,
             ("completed", "failed"),
-            f"Scrape {scrape_id} must be terminal after sync=True parse, got {scrape.status!r}",
+            f"Scrape {scrape_id} must be terminal after the worker runs, got {scrape.status!r}",
+        )
+        self.assertIsNotNone(
+            scrape.job_post_id,
+            "the worker leg must link a JobPost on a successful parse",
         )
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
 class TestScrapeFromTextAutoScore(TestCase):
-    """from_text fires auto-scoring after a successful sync parse."""
+    """from_text fires auto-scoring after a successful parse. With the parse
+    deferred to the worker, the auto-score now runs inside parse_scrape_job
+    (post-parse), not in the request — these tests drive the worker leg."""
 
     def setUp(self):
         self.client = APIClient()
         self.user = User.objects.create_user(username="autoscorer", password="pw")
         self.client.force_authenticate(user=self.user)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.api.views.scores._auto_score_job_post")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_auto_score_fired_after_successful_parse(self, mock_analyze, mock_auto_score):
+    def test_auto_score_fired_after_successful_parse(
+        self, mock_analyze, mock_auto_score, mock_async
+    ):
         from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
-        from job_hunting.models import Company
 
         Company.objects.create(name="AutoCorp")
         mock_analyze.return_value = ParsedJobData(
@@ -824,44 +883,177 @@ class TestScrapeFromTextAutoScore(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        # auto_score defaults to True on the enqueue.
+        _, kwargs = mock_async.call_args
+        self.assertTrue(kwargs.get("auto_score"))
+
+        _run_enqueued_task(mock_async)
+
         mock_auto_score.assert_called_once()
-        _, call_kwargs = mock_auto_score.call_args
-        # user_id is the second positional arg
+        # _auto_score_job_post(job_post_id, user_id) — user_id is 2nd positional.
         self.assertEqual(mock_auto_score.call_args[0][1], self.user.id)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.api.views.scores._auto_score_job_post")
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_auto_score_not_fired_when_parse_creates_no_job_post(self, mock_parse, mock_auto_score):
-        """parse_scrape no-op → scrape has no job_post_id → no Score attempt."""
+    def test_auto_score_not_fired_when_parse_creates_no_job_post(
+        self, mock_parse, mock_auto_score, mock_async
+    ):
+        """parse no-op → scrape has no job_post_id → no Score attempt."""
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "content"},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        _run_enqueued_task(mock_async)
+        mock_auto_score.assert_not_called()
+
+
+class TestParseScrapeJobPostParse(TestCase):
+    """Unit coverage for the post-parse work parse_scrape_job replicates,
+    now that it lives in the worker rather than the from_text view: stamp
+    the extension-supplied apply_url onto the JobPost, fire auto-scoring,
+    and never let an auto-score error escape the task.
+    """
+
+    ATS = "https://ats.rippling.com/rippling/jobs/ebc7a777-aa35-4333-ac95-ebc98e375f75"
+    LONG_DESC = " ".join(["word"] * 50)
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="worker", password="pw")
+        self.company = Company.objects.create(name="Acme")
+
+    def _attach_jp_side_effect(self, jp):
+        """parse_scrape mock side effect — wire the scrape to a pre-created
+        JP and flip it complete, mirroring what the real extractor does on
+        a link match."""
+        def _se(scrape_id, *args, **kwargs):
+            Scrape.objects.filter(pk=scrape_id).update(
+                job_post=jp, status="completed"
+            )
+        return _se
+
+    def _make_scrape(self):
+        return Scrape.objects.create(
+            job_content="Senior Engineer at Acme",
+            status="pending",
+            created_by=self.user,
+            source="extension",
+        )
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_apply_url_stamped_on_job_post_after_parse(self, mock_parse):
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            description=self.LONG_DESC,
+            source="extension",
+            created_by=self.user,
+            complete=False,
+        )
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
+        scrape = self._make_scrape()
+
+        parse_scrape_job(scrape.id, user_id=self.user.id, apply_url=self.ATS)
+
+        jp.refresh_from_db()
+        self.assertEqual(jp.apply_url, self.ATS)
+        self.assertEqual(jp.apply_url_status, "resolved")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_apply_url_not_stamped_without_job_post(self, mock_parse):
+        """parse no-op (no JP linked) → nothing to stamp, no crash."""
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        scrape = self._make_scrape()
+        result = parse_scrape_job(scrape.id, user_id=self.user.id, apply_url=self.ATS)
+        self.assertEqual(result["status"], "completed")
+        scrape.refresh_from_db()
+        self.assertIsNone(scrape.job_post_id)
+
+    @patch("job_hunting.api.views.scores._auto_score_job_post")
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_auto_score_fired_post_parse(self, mock_parse, mock_auto_score):
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            description=self.LONG_DESC,
+            source="extension",
+            created_by=self.user,
+        )
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
+        scrape = self._make_scrape()
+
+        parse_scrape_job(scrape.id, user_id=self.user.id, auto_score=True)
+
+        mock_auto_score.assert_called_once_with(jp.id, self.user.id)
+
+    @patch("job_hunting.api.views.scores._auto_score_job_post")
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_auto_score_not_fired_when_disabled(self, mock_parse, mock_auto_score):
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            description=self.LONG_DESC,
+            source="extension",
+            created_by=self.user,
+        )
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
+        scrape = self._make_scrape()
+
+        parse_scrape_job(scrape.id, user_id=self.user.id, auto_score=False)
         mock_auto_score.assert_not_called()
 
     @patch("job_hunting.api.views.scores._auto_score_job_post")
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_auto_score_error_does_not_break_response(self, mock_parse, mock_auto_score):
-        """A scoring error must never surface to the from-text caller."""
-        mock_auto_score.side_effect = Exception("boom")
-        resp = self.client.post(
-            "/api/v1/scrapes/from-text/",
-            data={"text": "content"},
-            format="json",
+    def test_auto_score_error_swallowed(self, mock_parse, mock_auto_score):
+        """An auto-score failure inside the worker must not propagate — the
+        scrape already parsed; scoring is best-effort."""
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            description=self.LONG_DESC,
+            source="extension",
+            created_by=self.user,
         )
-        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
+        mock_auto_score.side_effect = Exception("boom")
+        scrape = self._make_scrape()
+
+        # Must not raise.
+        result = parse_scrape_job(scrape.id, user_id=self.user.id, auto_score=True)
+        self.assertEqual(result["status"], "completed")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_bare_parse_when_no_post_parse_kwargs(self, mock_parse):
+        """Default call (no apply_url / auto_score) re-enters parse_scrape
+        with sync=True and skips the post-parse work."""
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        scrape = self._make_scrape()
+        parse_scrape_job(scrape.id, user_id=self.user.id)
+        mock_parse.assert_called_once()
+        _, kwargs = mock_parse.call_args
+        self.assertTrue(kwargs.get("sync"))
 
 
 @patch("job_hunting.api.views.scrapes.FROM_TEXT_MIN_LEN", 1)
 class TestScrapeFromTextExtensionHints(TestCase):
     """Cross-platform dedup signals captured by the browser extension at
     submit time. apply_url is the canonical cross-platform link — written
-    directly to JobPost.apply_url. referrer_url is a per-submit signal
-    persisted on the Scrape (referrer leg keeps stub creation).
-    canonical_redirect picks the ATS JP over the jobboard JP when both
-    sides of the pair exist.
+    to JobPost.apply_url by the worker after the parse. referrer_url is a
+    per-submit signal persisted on the Scrape (referrer leg keeps stub
+    creation, computed in the request). canonical_redirect picks the ATS JP
+    over the jobboard JP when both sides of the pair exist.
     """
 
     LINKEDIN = "https://www.linkedin.com/jobs/view/4400000000/"
@@ -876,16 +1068,17 @@ class TestScrapeFromTextExtensionHints(TestCase):
     def _attach_jp_side_effect(self, jp):
         """Side effect for parse_scrape mock — wires the scrape to a
         pre-created JP, mirroring what the real extractor does on a link
-        match.  Lets tests assert on JobPost.apply_url after the
-        view writes it post-parse."""
+        match.  Lets tests assert on JobPost.apply_url after the worker
+        writes it post-parse."""
         def _se(scrape_id, *args, **kwargs):
             Scrape.objects.filter(pk=scrape_id).update(
                 job_post=jp, status="completed"
             )
         return _se
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_apply_url_written_to_jobpost(self, mock_parse):
+    def test_apply_url_written_to_jobpost(self, mock_parse, mock_async):
         company = Company.objects.create(name="Acme")
         jp = JobPost.objects.create(
             title="Senior Engineer",
@@ -909,14 +1102,17 @@ class TestScrapeFromTextExtensionHints(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        # referrer_url is persisted on the Scrape in the request.
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.referrer_url, "https://www.linkedin.com/jobs/search/")
+        # apply_url lands on the JobPost only after the worker runs.
+        _run_enqueued_task(mock_async)
         jp.refresh_from_db()
         self.assertEqual(jp.apply_url, self.ATS)
         self.assertEqual(jp.apply_url_status, "resolved")
-        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
-        self.assertEqual(scrape.referrer_url, "https://www.linkedin.com/jobs/search/")
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_canonical_link_hint_replaces_submitted_link(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_canonical_link_hint_replaces_submitted_link(self, _mock_async):
         """LinkedIn's <meta og:url> is preferred over location.href so
         the persisted Scrape.url and downstream JobPost.link land on the
         clean canonical address, not a tracker-laden one."""
@@ -934,12 +1130,13 @@ class TestScrapeFromTextExtensionHints(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.url, self.LINKEDIN)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_apply_url_matches_existing_jp(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_apply_url_matches_existing_jp(self, _mock_async):
         """When a JobPost already exists at the apply-button destination,
         the response surfaces its id so the frontend can render the
         relationship immediately. ATS host → canonical_redirect routes
-        there over the submitted LinkedIn JP."""
+        there over the submitted LinkedIn JP. This meta is computed in the
+        request from existing posts, independent of the deferred parse."""
         company = Company.objects.create(name="Rippling")
         existing = JobPost.objects.create(
             title="Senior Engineer",
@@ -964,8 +1161,8 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertEqual(meta.get("apply_match"), existing.id)
         self.assertEqual(meta.get("canonical_redirect"), existing.id)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_apply_url_does_not_create_stub(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_apply_url_does_not_create_stub(self, _mock_async):
         """One-channel collapse: when no JP exists at the apply URL the
         api does NOT create a stub. The relationship is fully captured by
         JobPost.apply_url; the second-side JP only materializes when
@@ -989,12 +1186,12 @@ class TestScrapeFromTextExtensionHints(TestCase):
         # No proliferation of phantom JPs either.
         self.assertEqual(JobPost.objects.count(), before)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_referrer_creates_stub_with_referrer_source(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_referrer_creates_stub_with_referrer_source(self, _mock_async):
         """Symmetric case: ccsend FROM an ATS page after clicking through
         LinkedIn forwards document.referrer. No LinkedIn JP yet → stub
-        with source='referrer_stub'. (Referrer leg still creates stubs;
-        only the apply leg was collapsed.)"""
+        with source='referrer_stub'. (Referrer leg still creates stubs in
+        the request; only the apply leg was collapsed.)"""
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
@@ -1014,12 +1211,11 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertEqual(stub.source, "referrer_stub")
         self.assertFalse(stub.complete)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_canonical_redirect_falls_back_to_submitted_when_no_apply_match(self, _mock_parse):
-        """Without an apply URL or when the apply match isn't an ATS
-        host, canonical_redirect points at whatever JP the submit
-        produced (which may be None when parse_scrape doesn't attach
-        one, but the field is still set explicitly)."""
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_canonical_redirect_null_when_no_apply_match(self, _mock_async):
+        """Without an apply URL match, canonical_redirect resolves to null:
+        the submitted JP doesn't exist yet (async parse), and there is no
+        apply-leg match to route to. The key is still present in meta."""
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
@@ -1032,11 +1228,14 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         meta = resp.json().get("meta") or {}
         self.assertIn("canonical_redirect", meta)
+        self.assertIsNone(meta.get("canonical_redirect"))
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_private_apply_url_silently_dropped(self, mock_parse):
+    def test_private_apply_url_silently_dropped(self, mock_parse, mock_async):
         """Adversarial private/localhost URLs must not block ingestion
-        nor end up persisted as the JP apply_url."""
+        nor end up persisted as the JP apply_url — even after the worker
+        runs with a JobPost linked."""
         company = Company.objects.create(name="Acme")
         jp = JobPost.objects.create(
             title="Senior Engineer",
@@ -1060,16 +1259,18 @@ class TestScrapeFromTextExtensionHints(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        jp.refresh_from_db()
-        self.assertIsNone(jp.apply_url)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertIsNone(scrape.referrer_url)
         meta = resp.json().get("meta") or {}
         self.assertIsNone(meta.get("apply_match"))
         self.assertIsNone(meta.get("referrer_match"))
+        # Even with the JobPost linked, the dropped apply_url is not stamped.
+        _run_enqueued_task(mock_async)
+        jp.refresh_from_db()
+        self.assertIsNone(jp.apply_url)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_no_hints_behaves_as_before(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_no_hints_behaves_as_before(self, _mock_async):
         """Absence of all three hint fields is the existing-behavior
         baseline — endpoint stays backward-compatible."""
         resp = self.client.post(
@@ -1084,8 +1285,8 @@ class TestScrapeFromTextExtensionHints(TestCase):
         self.assertIsNone(meta.get("apply_match"))
         self.assertIsNone(meta.get("referrer_match"))
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_apply_hint_match_via_canonical_link(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_apply_hint_match_via_canonical_link(self, _mock_async):
         """An existing JP whose canonical_link matches the hint URL (via
         the host's url_rewrites) still resolves — not just exact link
         equality. Mirrors the LinkedIn /comm/ → /jobs/view/ rewrite."""
@@ -1138,8 +1339,8 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
         self.user = User.objects.create_user(username="prefiller", password="pw")
         self.client.force_authenticate(user=self.user)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_structured_prefill_persisted_on_scrape(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_structured_prefill_persisted_on_scrape(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={
@@ -1164,8 +1365,8 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             },
         )
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_prefill_non_string_values_dropped(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_prefill_non_string_values_dropped(self, _mock_async):
         """Extension bugs / type drift mustn't poison the prefill
         column — non-strings get filtered before the JSONField write."""
         resp = self.client.post(
@@ -1187,8 +1388,8 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
             {"title": "Senior Engineer", "company_name": "Acme"},
         )
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_prefill_blank_values_dropped(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_prefill_blank_values_dropped(self, _mock_async):
         """Whitespace / empty selector misses end up as empty strings;
         strip them so the extractor's title+company_name gate sees
         truthful coverage."""
@@ -1206,8 +1407,8 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.extension_prefill, {"title": "Senior Engineer"})
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_prefill_missing_yields_null(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_prefill_missing_yields_null(self, _mock_async):
         resp = self.client.post(
             "/api/v1/scrapes/from-text/",
             data={"text": "Senior Engineer at Acme"},
@@ -1216,8 +1417,8 @@ class TestScrapeFromTextStructuredPrefill(TestCase):
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertIsNone(scrape.extension_prefill)
 
-    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
-    def test_prefill_non_dict_silently_ignored(self, _mock_parse):
+    @patch("job_hunting.api.views.scrapes.async_task")
+    def test_prefill_non_dict_silently_ignored(self, _mock_async):
         """A malformed payload (list instead of dict) shouldn't 4xx the
         whole submit — drop the bad signal, persist nothing."""
         resp = self.client.post(
@@ -1244,6 +1445,9 @@ class TestScrapeFromTextFailureReason(TestCase):
     write site (placeholder rejection in process_evaluation, parser
     exception path in parse_scrape, the safety-net die-before-terminal
     branch). Serializer exposes it read-only.
+
+    The parse now runs in the worker, so these drive the worker leg via
+    _run_enqueued_task and then read the terminal Scrape state.
     """
 
     def setUp(self):
@@ -1251,8 +1455,9 @@ class TestScrapeFromTextFailureReason(TestCase):
         self.user = User.objects.create_user(username="diaguser", password="pw")
         self.client.force_authenticate(user=self.user)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_placeholder_title_writes_failure_reason(self, mock_analyze):
+    def test_placeholder_title_writes_failure_reason(self, mock_analyze, mock_async):
         """Stubbed extractor returns a placeholder title — process_evaluation
         sets failure_reason on the row before flipping status=failed."""
         from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
@@ -1268,14 +1473,16 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        _run_enqueued_task(mock_async)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "failed")
         self.assertIsNotNone(scrape.failure_reason)
         self.assertIn("placeholder title", scrape.failure_reason)
         self.assertIn("N/A", scrape.failure_reason)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_placeholder_company_writes_failure_reason(self, mock_analyze):
+    def test_placeholder_company_writes_failure_reason(self, mock_analyze, mock_async):
         """Placeholder company branch — symmetric to the title branch."""
         from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
 
@@ -1290,14 +1497,16 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        _run_enqueued_task(mock_async)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "failed")
         self.assertIsNotNone(scrape.failure_reason)
         self.assertIn("placeholder company", scrape.failure_reason)
         self.assertIn("unknown", scrape.failure_reason)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_extractor_exception_writes_failure_reason(self, mock_analyze):
+    def test_extractor_exception_writes_failure_reason(self, mock_analyze, mock_async):
         """When parser.parse raises, the caught exception is threaded
         into _log_scrape_status as failure_reason so the operator sees
         the exception repr without reading container logs."""
@@ -1308,20 +1517,23 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        _run_enqueued_task(mock_async)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "failed")
         self.assertIsNotNone(scrape.failure_reason)
         self.assertIn("parse_scrape exception", scrape.failure_reason)
         self.assertIn("LLM provider exploded", scrape.failure_reason)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.completeness_reviewer.maybe_review_and_persist")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_success_path_leaves_failure_reason_null(self, mock_analyze, mock_review):
+    def test_success_path_leaves_failure_reason_null(
+        self, mock_analyze, mock_review, mock_async
+    ):
         """The happy path doesn't touch failure_reason — column stays NULL.
         CompletenessReviewer is mocked out so the test stays focused on the
         failure_reason write semantics, not LLM scoring."""
         from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
-        from job_hunting.models import Company
 
         Company.objects.create(name="AutoCorp")
         mock_analyze.return_value = ParsedJobData(
@@ -1344,12 +1556,14 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        _run_enqueued_task(mock_async)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(scrape.status, "completed")
         self.assertIsNone(scrape.failure_reason)
 
+    @patch("job_hunting.api.views.scrapes.async_task")
     @patch("job_hunting.lib.parsers.job_post_extractor.JobPostExtractor.analyze_with_ai")
-    def test_serializer_exposes_failure_reason(self, mock_analyze):
+    def test_serializer_exposes_failure_reason(self, mock_analyze, mock_async):
         """GET /scrapes/:id/ returns failure_reason as a JSON:API attribute."""
         mock_analyze.side_effect = RuntimeError("downstream timeout")
         post = self.client.post(
@@ -1358,6 +1572,7 @@ class TestScrapeFromTextFailureReason(TestCase):
             format="json",
         )
         scrape_id = post.json()["data"]["id"]
+        _run_enqueued_task(mock_async)
 
         resp = self.client.get(f"/api/v1/scrapes/{scrape_id}/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
