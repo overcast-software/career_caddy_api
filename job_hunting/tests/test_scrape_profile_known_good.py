@@ -13,6 +13,8 @@ frontend/, the scrape graph in agents/):
   profile to known-good; sustained tier-0 misses demote it back.
 """
 
+from unittest.mock import patch
+
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
@@ -22,6 +24,7 @@ from job_hunting.models import ScrapeProfile, Scrape
 from job_hunting.models.scrape_profile import (
     KNOWN_GOOD_MIN_SCRAPE_COUNT,
     KNOWN_GOOD_MIN_SUCCESS_RATE,
+    KNOWN_GOOD_MIN_TIER0_ATTEMPTS,
 )
 from job_hunting.lib.parsers.job_post_extractor import _update_scrape_profile
 
@@ -122,16 +125,18 @@ class TestIsKnownGoodTruthTable(TestCase):
         self.assertTrue(prof.is_known_good)
 
     def test_high_miss_ratio_blocks(self):
-        # 3 misses / 5 scrapes = 0.6 >= 0.5
-        prof = make_profile(scrape_count=5, tier0_miss_count=3)
+        # Ratio is now denominated by Tier-0 ATTEMPTS (hits + misses), not
+        # scrape_count (BACK-111). 1 hit + 3 misses = 4 attempts, 3/4 = 0.75.
+        prof = make_profile(scrape_count=5, tier0_hit_count=1, tier0_miss_count=3)
         self.assertFalse(prof.is_known_good)
         self.assertTrue(
             any("tier0_miss_ratio" in r for r in prof.readiness()["reasons"])
         )
 
     def test_miss_ratio_exactly_threshold_blocks(self):
-        # 2 / 4 = 0.5 → NOT strictly below threshold → blocked
-        prof = make_profile(scrape_count=4, tier0_miss_count=2)
+        # 2 hits + 2 misses = 4 attempts, 2/4 = 0.5 → NOT strictly below
+        # threshold → blocked.
+        prof = make_profile(scrape_count=4, tier0_hit_count=2, tier0_miss_count=2)
         self.assertFalse(prof.is_known_good)
 
     def test_wrong_tier_blocks(self):
@@ -330,3 +335,172 @@ class TestPromotionViaOutcomes(TestCase):
         prof.refresh_from_db()
         self.assertEqual(prof.preferred_tier, "1")  # demoted
         self.assertFalse(prof.is_known_good)  # demotion wins
+
+
+class TestTier0AttemptsKnownGood(TestCase):
+    """BACK-111 — Tier-0 CSS trust is measured over Tier-0 ATTEMPTS
+    (hits + misses), not total scrapes, and over FORWARD evidence.
+
+    Closes the false-known-good hole: a host whose Tier-0 selectors never
+    match a live DOM (placeholder ``.job-*`` on talent.toptal.com) used to
+    read as known-good because HTML-less scrapes (extension-direct / paste /
+    email) inflated ``scrape_count`` and diluted the miss ratio.
+    """
+
+    def test_toptal_repro_dead_css_is_not_known_good(self):
+        # Mirrors prod profile f0QTlkzcVm: required selectors present (the
+        # placeholders are non-empty strings), success_rate=1.0 (all LLM-tier
+        # successes), preferred_tier=auto, 33 scrapes — but every Tier-0 pass
+        # that ran missed (0 hits / 6 misses). MUST NOT be known-good.
+        prof = make_profile(
+            hostname="talent.toptal.com",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=33,
+            tier0_hit_count=0,
+            tier0_miss_count=6,
+        )
+        self.assertFalse(prof.is_known_good)
+        self.assertTrue(
+            any("tier0 never matched" in r for r in prof.readiness()["reasons"])
+        )
+
+    def test_legit_host_with_hits_stays_known_good(self):
+        # Real Tier-0 hits + a low miss ratio → still known-good (a
+        # greenhouse-style host; fake hostname to avoid the seeded profile).
+        prof = make_profile(
+            hostname="legit-greenhouse-like.example",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=50,
+            tier0_hit_count=40,
+            tier0_miss_count=2,  # 2/42 ≈ 0.048 < 0.5
+        )
+        self.assertTrue(prof.is_known_good)
+        self.assertEqual(prof.readiness()["reasons"], [])
+
+    def test_linkedin_high_absolute_miss_count_but_real_hits_stays_known_good(self):
+        # linkedin prod: tier0_miss_count=91 (high absolute) but plenty of
+        # real hits → ratio stays below threshold → NOT demoted by BACK-111.
+        # Fake hostname to avoid the seeded linkedin.com profile.
+        prof = make_profile(
+            hostname="linkedin-like.example",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=300,
+            tier0_hit_count=200,
+            tier0_miss_count=91,  # 91/291 ≈ 0.313 < 0.5
+        )
+        self.assertTrue(prof.is_known_good)
+
+    def test_relearn_window_zero_attempts_does_not_demote_on_deploy(self):
+        # Day-1 after the migration reset: 0 hits / 0 misses = 0 attempts,
+        # below the floor → CSS-trust clause stays silent → a host that is
+        # otherwise healthy is NOT flipped out of known-good (no fleet-wide
+        # outage). This is the invariant the forward-measure backfill protects.
+        prof = make_profile(
+            hostname="freshly-reset.com",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=33,  # plenty of (mostly HTML-less) scrapes
+            tier0_hit_count=0,
+            tier0_miss_count=0,
+        )
+        self.assertTrue(prof.is_known_good)
+        self.assertEqual(prof.readiness()["reasons"], [])
+
+    def test_relearn_window_just_below_floor_stays_silent(self):
+        # MIN-1 misses, 0 hits → attempts < floor → clause does NOT fire even
+        # though every attempt so far missed.
+        prof = make_profile(
+            hostname="relearning.com",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=10,
+            tier0_hit_count=0,
+            tier0_miss_count=KNOWN_GOOD_MIN_TIER0_ATTEMPTS - 1,
+        )
+        self.assertTrue(prof.is_known_good)
+
+    def test_crossing_attempt_floor_with_zero_hits_demotes(self):
+        # The same host once it has accrued >= floor Tier-0 attempts with
+        # still-zero hits → converges to not-known-good.
+        prof = make_profile(
+            hostname="converged.com",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=10,
+            tier0_hit_count=0,
+            tier0_miss_count=KNOWN_GOOD_MIN_TIER0_ATTEMPTS,
+        )
+        self.assertFalse(prof.is_known_good)
+        self.assertTrue(
+            any("tier0 never matched" in r for r in prof.readiness()["reasons"])
+        )
+
+    def test_old_scrape_count_dilution_no_longer_rescues_dead_css(self):
+        # The exact prod dilution: 6 misses / 33 scrapes = 0.18 < 0.5 would
+        # have passed the OLD scrape_count-denominated clause. Under the
+        # attempts denominator (0 hits → never-matched) it is blocked.
+        prof = make_profile(
+            hostname="dilution.example",
+            success_rate=1.0,
+            preferred_tier="auto",
+            scrape_count=33,
+            tier0_hit_count=0,
+            tier0_miss_count=6,
+        )
+        old_style_ratio = prof.tier0_miss_count / prof.scrape_count
+        self.assertLess(old_style_ratio, 0.5)  # the dilution that hid the bug
+        self.assertFalse(prof.is_known_good)
+
+
+class TestTier0HitCountIncrement(TestCase):
+    """BACK-111 — _update_scrape_profile bumps tier0_hit_count on a Tier-0 hit
+    in BOTH the created (defaults) and updated branches."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="hitcount", password="pw")
+        self.scrape = Scrape.objects.create(
+            url="https://hitcount.example/job/1",
+            status="completed",
+            job_content="x" * 100,
+            created_by=self.user,
+        )
+        # _update_scrape_profile fires _generate_profile_hints (an LLM call) on
+        # a fresh profile; stub it so these counter assertions don't pay a
+        # network round-trip / timeout. Counter logic is orthogonal to hints.
+        patcher = patch(
+            "job_hunting.lib.parsers.job_post_extractor._generate_profile_hints"
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def test_created_branch_records_hit(self):
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=True)
+        prof = ScrapeProfile.objects.get(hostname="hitcount.example")
+        self.assertEqual(prof.tier0_hit_count, 1)
+        self.assertEqual(prof.tier0_miss_count, 0)
+
+    def test_created_branch_miss_leaves_hit_zero(self):
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
+        prof = ScrapeProfile.objects.get(hostname="hitcount.example")
+        self.assertEqual(prof.tier0_hit_count, 0)
+        self.assertEqual(prof.tier0_miss_count, 1)
+
+    def test_updated_branch_accumulates_hits(self):
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=True)
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=True)
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=False)
+        prof = ScrapeProfile.objects.get(hostname="hitcount.example")
+        self.assertEqual(prof.tier0_hit_count, 2)
+        self.assertEqual(prof.tier0_miss_count, 1)
+
+    def test_none_tier0_hit_bumps_neither(self):
+        # Extension-direct / paste / email path: no HTML → Tier 0 never ran.
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=None)
+        _update_scrape_profile(self.scrape, self.user, success=True, tier0_hit=None)
+        prof = ScrapeProfile.objects.get(hostname="hitcount.example")
+        self.assertEqual(prof.tier0_hit_count, 0)
+        self.assertEqual(prof.tier0_miss_count, 0)
+        self.assertEqual(prof.scrape_count, 2)

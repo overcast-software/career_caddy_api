@@ -1937,7 +1937,8 @@ class ScrapeProfileSerializer(BaseSerializer):
         "css_selectors", "url_rewrites", "apply_resolver_config",
         "extension_selectors",
         "extraction_hints", "page_structure",
-        "last_success_at", "scrape_count", "failure_count", "tier0_miss_count",
+        "last_success_at", "scrape_count", "failure_count",
+        "tier0_miss_count", "tier0_hit_count",
         "preferred_tier", "enabled", "is_known_good", "created_at", "updated_at",
     ]
     # `is_known_good` is a computed @property with no setter; flag it read-only

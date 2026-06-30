@@ -1599,6 +1599,7 @@ def _update_scrape_profile(scrape, user=None, success: bool = True, tier0_hit: O
             "scrape_count": 1,
             "failure_count": 0 if success else 1,
             "tier0_miss_count": 1 if tier0_hit is False else 0,
+            "tier0_hit_count": 1 if tier0_hit is True else 0,
             "last_success_at": timezone.now() if success else None,
             "created_by": user,
         },
@@ -1613,6 +1614,8 @@ def _update_scrape_profile(scrape, user=None, success: bool = True, tier0_hit: O
             profile.failure_count = (profile.failure_count or 0) + 1
         if tier0_hit is False:
             profile.tier0_miss_count = (profile.tier0_miss_count or 0) + 1
+        if tier0_hit is True:
+            profile.tier0_hit_count = (profile.tier0_hit_count or 0) + 1
 
         if profile.avg_content_length:
             profile.avg_content_length = int(
@@ -1633,29 +1636,36 @@ def _update_scrape_profile(scrape, user=None, success: bool = True, tier0_hit: O
         # This also (intentionally) flips ScrapeProfile.is_known_good False —
         # a demoted host runs at tier "1", which is outside the known-good
         # allowed tiers. Demotion on sustained tier-0 misses wins over
-        # promotion; the counters this method maintains (scrape_count /
-        # success_rate / tier0_miss_count) are exactly what is_known_good reads,
-        # so a recovered host flips back to known-good with no extra write path.
+        # promotion; the counters this method maintains (tier0_hit_count /
+        # tier0_miss_count) are exactly what is_known_good reads, so a recovered
+        # host flips back to known-good with no extra write path. The miss
+        # ratio is denominated by Tier-0 *attempts* (hits + misses), mirroring
+        # ScrapeProfile.readiness (BACK-111): HTML-less scrapes never run a
+        # Tier-0 pass, so scrape_count over-counted the denominator.
+        tier0_attempts = (profile.tier0_hit_count or 0) + (profile.tier0_miss_count or 0)
         if (
             profile.preferred_tier == "auto"
             and profile.tier0_miss_count >= _TIER0_DEMOTE_MIN_MISSES
-            and profile.tier0_miss_count / profile.scrape_count >= _TIER0_DEMOTE_MISS_RATIO
+            and tier0_attempts
+            and profile.tier0_miss_count / tier0_attempts >= _TIER0_DEMOTE_MISS_RATIO
         ):
             logger.warning(
                 "Auto-demoting %s from tier=auto → tier=1 "
-                "(tier0_miss_count=%d/%d)",
-                hostname, profile.tier0_miss_count, profile.scrape_count,
+                "(tier0_miss_count=%d/%d attempts)",
+                hostname, profile.tier0_miss_count, tier0_attempts,
             )
             profile.preferred_tier = "1"
 
         profile.save()
 
     logger.info(
-        "Scrape profile %s for %s (count=%d, fail=%d, miss=%d, rate=%.0f%%, tier=%s)",
+        "Scrape profile %s for %s "
+        "(count=%d, fail=%d, t0_hit=%d, t0_miss=%d, rate=%.0f%%, tier=%s)",
         "created" if created else "updated",
         hostname,
         profile.scrape_count,
         profile.failure_count or 0,
+        profile.tier0_hit_count or 0,
         profile.tier0_miss_count or 0,
         profile.success_rate * 100,
         profile.preferred_tier,
