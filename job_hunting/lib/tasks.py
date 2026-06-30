@@ -623,6 +623,8 @@ def parse_scrape_job(
     *,
     user_id: int | None = None,
     force: bool = False,
+    apply_url: str | None = None,
+    auto_score: bool = False,
 ) -> dict:
     """Run parse_scrape inside the qcluster worker.
 
@@ -630,10 +632,47 @@ def parse_scrape_job(
     pipeline can re-attempt CompletenessReviewer + ScrapeProfile
     update on top of that. Worker timeout is Q_CLUSTER.timeout=300
     (5 min) — long-running parses get the full ceiling.
+
+    ``apply_url`` and ``auto_score`` carry the post-parse work that
+    POST /scrapes/from-text/ used to do inline before the parse was
+    moved off the request thread (CC-122). Both depend on the JobPost
+    existing, so they only run here, after parse_scrape has created it:
+    stamp the extension-supplied apply_url onto the new JobPost, and
+    kick off auto-scoring. Other callers (parse_scrape's own sync=False
+    dispatch) leave both at their defaults and get the bare parse.
     """
     from job_hunting.lib.parsers.job_post_extractor import parse_scrape
 
     parse_scrape(scrape_id, user_id=user_id, sync=True, force=force)
+
+    # Replicate the view's old post-parse behavior, now that the JobPost
+    # exists. Re-fetch the scrape to pick up the job_post_id parse linked.
+    from job_hunting.models.scrape import Scrape
+
+    scrape = Scrape.objects.filter(pk=scrape_id).first()
+    job_post_id = scrape.job_post_id if scrape else None
+
+    if job_post_id and apply_url:
+        # The extension is the authoritative writer for JobPost.apply_url
+        # (camoufox-based ResolveApplyUrl is being phased out). Stamp it
+        # whenever the extension supplied a value; later writers no-op if
+        # it's already set.
+        from job_hunting.models import JobPost
+
+        JobPost.objects.filter(pk=job_post_id).update(
+            apply_url=apply_url, apply_url_status="resolved"
+        )
+
+    if job_post_id and auto_score:
+        try:
+            from job_hunting.api.views.scores import _auto_score_job_post
+
+            _auto_score_job_post(job_post_id, user_id)
+        except Exception:
+            logger.exception(
+                "parse_scrape_job: auto-score failed for scrape %s", scrape_id
+            )
+
     return {"scrape_id": scrape_id, "status": "completed"}
 
 
