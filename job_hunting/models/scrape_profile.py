@@ -32,6 +32,15 @@ KNOWN_GOOD_MIN_SUCCESS_RATE = 0.8
 KNOWN_GOOD_MIN_SCRAPE_COUNT = 3
 # Tier-0 miss ratio must stay strictly below this for the domain to qualify.
 KNOWN_GOOD_MAX_TIER0_MISS_RATIO = 0.5
+# Minimum number of *Tier-0 attempts* (hits + misses) before the CSS-trust
+# clause is allowed to fire (BACK-111). Tier-0 trust must be measured over
+# attempts that actually ran a deterministic CSS pass — extension-direct /
+# paste / email scrapes carry no HTML and never run Tier 0, so they must not
+# dilute the signal. Below this floor a host is in its relearn window: not
+# enough Tier-0 evidence has accrued, so the CSS-trust clause stays silent and
+# readiness falls back to the other clauses (this is what keeps the day-1
+# counter reset from causing a fleet-wide known-good outage).
+KNOWN_GOOD_MIN_TIER0_ATTEMPTS = 3
 
 
 class ScrapeProfile(GetMixin, NanoIDModel):
@@ -77,7 +86,15 @@ class ScrapeProfile(GetMixin, NanoIDModel):
     last_success_at = models.DateTimeField(null=True, blank=True)
     scrape_count = models.IntegerField(default=0)
     failure_count = models.IntegerField(default=0)
+    # Number of Tier-0 passes that RAN and MISSED the required fields.
     tier0_miss_count = models.IntegerField(default=0)
+    # Number of Tier-0 passes that RAN and HIT (matched the required fields).
+    # Paired with tier0_miss_count, this gives a "Tier-0 attempts" denominator
+    # (hits + misses) that excludes HTML-less scrapes (extension-direct / paste
+    # / email), which never run a Tier-0 pass. Forward-measured: the BACK-111
+    # migration resets tier0_miss_count to 0 alongside this field's 0 default so
+    # every host re-accrues real Tier-0 evidence from deploy.
+    tier0_hit_count = models.IntegerField(default=0)
     preferred_tier = models.CharField(
         max_length=10, choices=TIER_CHOICES, default="auto"
     )
@@ -154,12 +171,31 @@ class ScrapeProfile(GetMixin, NanoIDModel):
                 f"scrape_count={scrape_count} < {KNOWN_GOOD_MIN_SCRAPE_COUNT}"
             )
 
-        miss_ratio = (self.tier0_miss_count or 0) / max(scrape_count, 1)
-        if miss_ratio >= KNOWN_GOOD_MAX_TIER0_MISS_RATIO:
-            reasons.append(
-                f"tier0_miss_ratio={miss_ratio:.3f} >= "
-                f"{KNOWN_GOOD_MAX_TIER0_MISS_RATIO}"
-            )
+        # Tier-0 CSS trust is denominated by Tier-0 *attempts* (hits + misses),
+        # NOT scrape_count (BACK-111). HTML-less scrapes (extension-direct /
+        # paste / email) bump scrape_count without ever running a Tier-0 pass,
+        # so dividing by scrape_count diluted the miss ratio and let a host
+        # whose CSS NEVER matches (toptal: 6 misses / 0 hits, but 33 scrapes →
+        # 0.18) read as known-good. The clause only fires once enough real
+        # Tier-0 evidence has accrued; below the floor the host is relearning
+        # and the clause defers to the other readiness signals.
+        tier0_hit_count = self.tier0_hit_count or 0
+        tier0_miss_count = self.tier0_miss_count or 0
+        tier0_attempts = tier0_hit_count + tier0_miss_count
+        if tier0_attempts >= KNOWN_GOOD_MIN_TIER0_ATTEMPTS:
+            if tier0_hit_count == 0:
+                # Tier-0 ran enough times and NEVER once matched — dead CSS.
+                reasons.append(
+                    f"tier0 never matched: 0 hits / {tier0_attempts} attempts"
+                )
+            else:
+                miss_ratio = tier0_miss_count / tier0_attempts
+                if miss_ratio >= KNOWN_GOOD_MAX_TIER0_MISS_RATIO:
+                    reasons.append(
+                        f"tier0_miss_ratio={miss_ratio:.3f} >= "
+                        f"{KNOWN_GOOD_MAX_TIER0_MISS_RATIO} "
+                        f"({tier0_miss_count}/{tier0_attempts} attempts)"
+                    )
 
         return {
             "known_good": not reasons,
