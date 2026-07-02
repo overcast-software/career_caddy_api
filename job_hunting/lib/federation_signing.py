@@ -196,44 +196,86 @@ def fetch_actor_public_key(actor_uri: str) -> str:
     ``SignatureVerificationError`` on any failure so the inbox handler
     can map verdict → 401 uniformly.
 
-    Network safety: 10s timeout, response size capped at 256KB so a
-    hostile peer can't blow up the api worker with a multi-MB blob.
+    Network safety (CC-127): a split connect/read timeout
+    (``ACTIVITYPUB_PEER_KEY_FETCH_CONNECT_TIMEOUT`` 3s /
+    ``ACTIVITYPUB_PEER_KEY_FETCH_READ_TIMEOUT`` 10s) fails a DEAD host
+    fast in the connect phase while still letting a slow-but-ALIVE legit
+    peer respond, a low redirect cap
+    (``ACTIVITYPUB_PEER_KEY_FETCH_MAX_REDIRECTS``, default 3 — a bare
+    ``requests`` default of 30 lets a redirect-looping peer multiply the
+    timeout into the 40s range), and a 256KB response cap keep a slow /
+    hostile / redirect-looping peer from pinning the caller. The fetch
+    runs in the qcluster worker (not a web thread) so the read budget can
+    match Mastodon's 10s rather than the brutal 2-3s a web-thread verify
+    would need.
+
+    Failures are NEGATIVELY cached for
+    ``ACTIVITYPUB_PEER_KEY_NEG_CACHE_TTL`` seconds so an ActivityPub
+    redelivery storm from a dead / deleted actor doesn't re-pay the full
+    network cost on every retry. This is the dominant CC-127 401 source:
+    self-``Delete`` broadcasts from suspended fediverse accounts + dead
+    peers whose key can no longer be fetched — inherently unverifiable,
+    and previously re-fetched (uncached) on every backoff redelivery.
     """
     cache_key = f"ap:pubkey:{actor_uri}"
     cached = cache.get(cache_key)
     if cached:
         return cached
 
-    timeout = getattr(settings, "ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT", 10)
-    try:
-        response = requests.get(
-            actor_uri,
-            headers={"Accept": AS2_CONTENT_TYPE},
-            timeout=timeout,
-            stream=True,
-        )
-    except requests.RequestException as exc:
-        raise SignatureVerificationError("peer_unreachable", str(exc)) from exc
+    # Negative cache: a recent fetch failure short-circuits before any
+    # network I/O so the redelivery storm stays cheap.
+    neg_key = f"ap:pubkey_neg:{actor_uri}"
+    neg = cache.get(neg_key)
+    if neg:
+        raise SignatureVerificationError(neg, "negative-cached")
 
-    if response.status_code != 200:
-        raise SignatureVerificationError(
-            "peer_actor_fetch_failed", f"status {response.status_code}"
-        )
+    def _fail(verdict: str) -> SignatureVerificationError:
+        neg_ttl = getattr(settings, "ACTIVITYPUB_PEER_KEY_NEG_CACHE_TTL", 600)
+        cache.set(neg_key, verdict, neg_ttl)
+        return SignatureVerificationError(verdict)
 
-    # Cap response read at 256KB — public Mastodon actor JSON is ~3KB.
+    connect_timeout = getattr(
+        settings, "ACTIVITYPUB_PEER_KEY_FETCH_CONNECT_TIMEOUT", 3.0
+    )
+    read_timeout = getattr(
+        settings, "ACTIVITYPUB_PEER_KEY_FETCH_READ_TIMEOUT", 10.0
+    )
+    max_redirects = getattr(
+        settings, "ACTIVITYPUB_PEER_KEY_FETCH_MAX_REDIRECTS", 3
+    )
+    session = requests.Session()
+    session.max_redirects = max_redirects
     try:
-        body = response.raw.read(256 * 1024, decode_content=True)
-    except Exception as exc:  # pragma: no cover - defensive
-        raise SignatureVerificationError("peer_actor_read_failed", str(exc)) from exc
-    try:
-        data = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SignatureVerificationError("peer_actor_malformed", str(exc)) from exc
+        try:
+            response = session.get(
+                actor_uri,
+                headers={"Accept": AS2_CONTENT_TYPE},
+                timeout=(connect_timeout, read_timeout),
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            # Covers ConnectTimeout / ReadTimeout / TooManyRedirects / DNS.
+            raise _fail("peer_unreachable") from exc
 
-    public_key = (data or {}).get("publicKey") or {}
-    pem = public_key.get("publicKeyPem")
-    if not pem:
-        raise SignatureVerificationError("peer_no_public_key")
+        if response.status_code != 200:
+            raise _fail("peer_actor_fetch_failed")
+
+        # Cap response read at 256KB — public Mastodon actor JSON is ~3KB.
+        try:
+            body = response.raw.read(256 * 1024, decode_content=True)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise _fail("peer_actor_read_failed") from exc
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _fail("peer_actor_malformed") from exc
+
+        public_key = (data or {}).get("publicKey") or {}
+        pem = public_key.get("publicKeyPem")
+        if not pem:
+            raise _fail("peer_no_public_key")
+    finally:
+        session.close()
 
     ttl = getattr(settings, "ACTIVITYPUB_PEER_KEY_CACHE_TTL", 300)
     cache.set(cache_key, pem, ttl)
@@ -259,15 +301,22 @@ def _key_id_to_actor_uri(key_id: str) -> str:
     return key_id.split("#", 1)[0]
 
 
-def verify_inbound_signature(django_request, body: bytes) -> VerifiedSignature:
-    """Verify an inbound POST's HTTP signature + Digest + Date.
+def _precheck_inbound_signature(
+    django_request, body: bytes
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Run the cheap, NETWORK-FREE half of inbound verification.
 
-    Raises ``SignatureVerificationError`` (mapped to 401 by the caller)
-    on any failure. On success returns a ``VerifiedSignature`` carrying
-    the verified ``keyId`` / actor URI / signed-header list so the
-    caller can audit-log + dispatch by activity type.
+    Checks required signature params, the signed-header set, the Date
+    window, and the Digest — everything that can be validated from the
+    request + body alone, with no remote key fetch. Raises
+    ``SignatureVerificationError`` on any cheap failure. Returns
+    ``(normalised_headers, sig_params, signed_header_names)`` for the
+    caller to continue into the expensive fetch + RSA leg.
 
-    Order matters: cheap header checks first, expensive crypto last.
+    CC-127 split this out so the inbox *edge* can reject obviously-bad
+    requests (missing sig, stale Date, bad Digest) with 401 cheaply —
+    without spending a queue slot — while the expensive remote-key-fetch
+    + RSA verify is deferred to the async worker off the web thread.
     """
     headers = _normalised_headers(django_request)
 
@@ -298,6 +347,38 @@ def verify_inbound_signature(django_request, body: bytes) -> VerifiedSignature:
 
     digest_value = headers.get("digest", "")
     _verify_digest(digest_value, body)
+
+    return headers, params, signed_header_names
+
+
+def verify_inbound_signature_precheck(django_request, body: bytes) -> None:
+    """Public wrapper: run ONLY the cheap, network-free signature checks.
+
+    Used by the inbox edge (CC-127 accept-then-async) to 401 tampered /
+    replayed / unsigned requests before enqueuing the async verify. The
+    async worker re-runs the full :func:`verify_inbound_signature`
+    (cheap checks + remote key fetch + RSA) as the real trust gate.
+    """
+    _precheck_inbound_signature(django_request, body)
+
+
+def verify_inbound_signature(django_request, body: bytes) -> VerifiedSignature:
+    """Verify an inbound POST's HTTP signature + Digest + Date.
+
+    Raises ``SignatureVerificationError`` (mapped to 401 by the caller)
+    on any failure. On success returns a ``VerifiedSignature`` carrying
+    the verified ``keyId`` / actor URI / signed-header list so the
+    caller can audit-log + dispatch by activity type.
+
+    Order matters: cheap header checks first, expensive crypto last. The
+    cheap half lives in :func:`_precheck_inbound_signature`; the
+    remote key fetch (bounded + negatively cached, see
+    :func:`fetch_actor_public_key`) + RSA verify follow. CC-127 runs the
+    full function only in the qcluster worker — never on a web thread.
+    """
+    headers, params, signed_header_names = _precheck_inbound_signature(
+        django_request, body
+    )
 
     key_id = params["keyId"]
     actor_uri = _key_id_to_actor_uri(key_id)
@@ -334,7 +415,7 @@ def verify_inbound_signature(django_request, body: bytes) -> VerifiedSignature:
         key_id=key_id,
         actor_uri=actor_uri,
         signed_headers=signed_header_names,
-        signature_header=sig_value,
+        signature_header=headers.get("signature", ""),
     )
 
 

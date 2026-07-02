@@ -7,13 +7,21 @@ Pins the inbox handler contract:
 * Valid Undo(Follow) → 202 + unfollowed_at set
 * Create(Note) → 202 + audit log row + NO JobPost created (5e's job)
 * Unknown activity type → 202 + audit log Other
-* Bad signature / stale Date / missing Digest / digest mismatch → 401
+* CC-127 accept-then-async: cheap network-free failures (missing/stale
+  Date, missing/mismatched Digest, unsigned) still 401 at the edge; the
+  EXPENSIVE failures (wrong key / RSA mismatch) are deferred to the
+  worker, so the edge 202s and the worker drops them.
 * Body too large / malformed JSON → 400
-* Follow targeting wrong actor → 422
-* Undo with no matching follower → 404
+* Follow targeting wrong actor / Undo with no matching follower → the
+  edge 202s; the worker's handler rejects internally (no side effect).
 * Replay protection — duplicate activity_id → silent 202
 * Per-instance rate limit → 429
 * Followers collection: real rows, paginated AS2 shape
+
+The inbox verify+process runs in-band under TESTING
+(ACTIVITYPUB_INBOX_DISPATCH_SYNC defaults True) so these side-effect
+assertions hold synchronously; the async_task enqueue itself is covered
+in test_cc127_inbox_async.py.
 """
 from __future__ import annotations
 
@@ -234,7 +242,10 @@ class TestInboxFollow(TestCase):
                    for k, v in headers.items() if k.lower() != "host"},
                 HTTP_HOST="testserver",
             )
-        self.assertEqual(response.status_code, 422)
+        # CC-127 accept-then-async: the edge 202s and enqueues; the worker
+        # runs _handle_follow which rejects the target mismatch (no follower
+        # created). The 422 is no longer surfaced to the peer.
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(FederationFollower.objects.count(), 0)
 
 
@@ -289,8 +300,10 @@ class TestInboxUndo(TestCase):
             ).exists()
         )
 
-    def test_undo_with_no_matching_row_returns_404(self):
-        # Different peer, never followed
+    def test_undo_with_no_matching_row_is_accepted(self):
+        # Different peer, never followed. CC-127: the edge 202s; the worker
+        # runs _handle_undo, finds no matching row, and no-ops (the 404 is
+        # no longer surfaced to the peer under accept-then-async).
         other = FakeRemoteActor("https://peer.example/users/bob")
         body = _undo_body(other, self.target_uri)
         with _patch_peer_key(other):
@@ -302,7 +315,7 @@ class TestInboxUndo(TestCase):
                    for k, v in headers.items() if k.lower() != "host"},
                 HTTP_HOST="testserver",
             )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 202)
 
 
 @override_settings(INSTANCE_ORIGIN=TEST_ORIGIN)
@@ -373,7 +386,13 @@ class TestInboxForwardCompat(TestCase):
 
 @override_settings(INSTANCE_ORIGIN=TEST_ORIGIN)
 class TestInboxSignatureFailures(TestCase):
-    """Every pre-flight failure verdict → 401 (or 400 for parse errors)."""
+    """Cheap pre-check failures → 401 at the edge; expensive → 202 + drop.
+
+    CC-127 splits verification: the network-free pre-check (missing sig,
+    stale Date, bad Digest) still 401s at the edge without a queue slot;
+    the expensive remote-key-fetch + RSA leg (wrong key) is deferred to
+    the worker, so a wrong-key mismatch is accepted (202) then dropped.
+    """
 
     def setUp(self):
         cache.clear()
@@ -429,7 +448,12 @@ class TestInboxSignatureFailures(TestCase):
             )
         self.assertEqual(response.status_code, 401)
 
-    def test_wrong_key_returns_401(self):
+    def test_wrong_key_accepted_then_dropped(self):
+        # CC-127: a wrong-key RSA mismatch is an EXPENSIVE (post-fetch)
+        # failure, so it's deferred to the worker — the edge 202s and the
+        # worker drops it after verify (no follower, no audit row). This is
+        # the accept-then-async "unverifiable is cheap + off the web thread"
+        # path; the peer no longer gets a (retry-triggering) 401.
         body = _follow_body(self.peer, self.target_uri)
         headers = _sign_inbox(self.peer, self.path, body)
         other = FakeRemoteActor(self.peer.actor_uri)
@@ -444,7 +468,11 @@ class TestInboxSignatureFailures(TestCase):
                    for k, v in headers.items() if k.lower() != "host"},
                 HTTP_HOST="testserver",
             )
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(FederationFollower.objects.count(), 0)
+        self.assertFalse(
+            FederationActivity.objects.filter(direction="inbound").exists()
+        )
 
 
 @override_settings(INSTANCE_ORIGIN=TEST_ORIGIN, ACTIVITYPUB_BODY_MAX_BYTES=128)
