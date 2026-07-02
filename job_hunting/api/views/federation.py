@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from urllib.parse import unquote, urlparse
 
@@ -43,6 +44,7 @@ from job_hunting.lib.as_object import (
 )
 from job_hunting.lib import federation_signing
 from job_hunting.lib import federation_ingest
+from job_hunting.lib import federation_inbox
 from job_hunting.models import (
     Actor,
     Company,
@@ -1025,6 +1027,27 @@ def _inbox_error(verdict: str, status: int) -> JsonResponse:
     )
 
 
+_KEY_ID_RE = re.compile(r'keyId="([^"]+)"')
+
+
+def _claimed_signature_host(sig_header: str) -> str:
+    """Best-effort netloc of the ``keyId`` in a Signature header (UNVERIFIED).
+
+    CC-127: signature verification is now async, so the edge throttles on
+    the *claimed* keyId host rather than a verified one. Spoofable, but it
+    correctly buckets legit peers (claimed == verified host) and bounds a
+    single naive / misbehaving peer's queue pressure. Returns ``""`` when
+    unparseable → ``_rate_limit_check`` lets it through and the async
+    verify is the real gate.
+    """
+    if not sig_header:
+        return ""
+    m = _KEY_ID_RE.search(sig_header)
+    if not m:
+        return ""
+    return urlparse(m.group(1).split("#", 1)[0]).netloc.lower()
+
+
 def _rate_limit_check(host: str) -> bool:
     """Per-instance sliding-window rate limit using Django's cache backend.
 
@@ -1415,15 +1438,63 @@ def _log_inbound(activity: dict, actor: Actor,
         return None
 
 
+def dispatch_verified_person_activity(activity: dict, actor: Actor,
+                                      verified: federation_signing.VerifiedSignature) -> None:
+    """Route a VERIFIED inbound activity to its Person-actor handler.
+
+    CC-127: runs in the qcluster worker off the web thread. The
+    ``_handle_*`` return values (JsonResponse) are meaningful only to the
+    old synchronous edge; here we keep the side effects + audit rows and
+    discard the response. Replay dedupe is done here (post-verify) since
+    the edge no longer has a ``verified`` identity to key on.
+    """
+    activity_id = activity.get("id") or ""
+    if activity_id and FederationActivity.objects.filter(
+        direction=DIRECTION_INBOUND, activity_id=activity_id,
+    ).exists():
+        logger.info("ap.inbox.duplicate_activity_id activity_id=%s", activity_id)
+        return
+
+    activity_type = activity.get("type")
+    if activity_type == "Follow":
+        _handle_follow(activity, actor, verified)
+    elif activity_type == "Undo":
+        _handle_undo(activity, actor, verified)
+    elif activity_type == "Create":
+        _handle_create(activity, actor, verified)
+    elif activity_type == "Update":
+        _handle_update(activity, actor, verified)
+    elif activity_type == "Delete":
+        _handle_delete(activity, actor, verified)
+    else:
+        # Forward-compat: log unknown types as Other so we don't lose them.
+        _log_inbound(activity, actor, verified, ACTIVITY_TYPE_OTHER, None)
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def actor_inbox(request, username: str):
-    """Authenticated AP inbox — accept signed POSTs from federation peers."""
-    actor = Actor.objects.filter(preferred_username=username).first()
-    if actor is None:
+    """Authenticated AP inbox — accept-then-async (CC-127).
+
+    The edge does only cheap, network-free work and returns 202
+    immediately; the expensive HTTP-Signature verify (remote key fetch +
+    RSA) + activity processing run on the django-q worker via
+    ``federation_inbox.enqueue_inbound_activity``. This never blocks a web
+    worker on a slow / dead peer's key endpoint — the CC-127 defect.
+
+    Edge order (all network-free):
+      1. actor exists                          → 404
+      2. body size cap                         → 400
+      3. JSON parse gate                       → 400
+      4. unknown-actor self-Delete/Update drop → 202 (Mastodon
+         skip_unknown_actor_activity; no fetch, no enqueue)
+      5. cheap signature precheck              → 401 (tampered/unsigned/
+         stale/bad-digest — rejected without a queue slot)
+      6. per-host throttle (claimed keyId host)→ 429
+      7. enqueue verify+process                → 202
+    """
+    if not Actor.objects.filter(preferred_username=username).exists():
         return _inbox_error("actor_not_found", 404)
-    # Ensure the local actor has a keypair before any Accept dispatch.
-    actor = _ensure_keypair(actor)
 
     max_bytes = getattr(settings, "ACTIVITYPUB_BODY_MAX_BYTES", 1_048_576)
     body = request.body
@@ -1437,46 +1508,35 @@ def actor_inbox(request, username: str):
     if not isinstance(activity, dict):
         return _inbox_error("activity_not_object", 400)
 
-    # Signature verification before rate limit so we know the host bucket
-    # we're charging is genuinely the actor's host. Cheap pre-checks
-    # (Date / Digest / required headers) live inside
-    # ``verify_inbound_signature`` and short-circuit before the network
-    # fetch + RSA verify.
+    # Mastodon skip_unknown_actor_activity: self-Delete/Update from an
+    # actor we've never seen is inherently unverifiable (deleted account,
+    # key endpoint gone) — accept + drop before any fetch or enqueue.
+    if federation_inbox.is_droppable_unknown_actor_activity(activity):
+        return JsonResponse(
+            {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+        )
+
+    # Cheap, NETWORK-FREE signature precheck (required headers, Date
+    # window, Digest). Reject here without a queue slot; the expensive
+    # remote key fetch + RSA verify is deferred to the worker.
     try:
-        verified = federation_signing.verify_inbound_signature(request, body)
+        federation_signing.verify_inbound_signature_precheck(request, body)
     except federation_signing.SignatureVerificationError as exc:
         return _inbox_error(exc.verdict, 401)
 
-    # Per-instance rate limit, keyed by the verified actor's host.
-    host = urlparse(verified.actor_uri).netloc.lower()
-    if not _rate_limit_check(host):
+    # Coarse per-instance throttle on the CLAIMED keyId host.
+    claimed_host = _claimed_signature_host(request.headers.get("Signature", ""))
+    if not _rate_limit_check(claimed_host):
         return _inbox_error("rate_limited", 429)
 
-    # Replay dedupe via activity_id — silent 202 on duplicate.
-    activity_id = activity.get("id") or ""
-    if activity_id and FederationActivity.objects.filter(
-        direction=DIRECTION_INBOUND, activity_id=activity_id,
-    ).exists():
-        return JsonResponse(
-            {"status": "duplicate"},
-            status=202,
-            content_type=AS2_CONTENT_TYPE,
-        )
-
-    activity_type = activity.get("type")
-    if activity_type == "Follow":
-        return _handle_follow(activity, actor, verified)
-    if activity_type == "Undo":
-        return _handle_undo(activity, actor, verified)
-    if activity_type == "Create":
-        return _handle_create(activity, actor, verified)
-    if activity_type == "Update":
-        return _handle_update(activity, actor, verified)
-    if activity_type == "Delete":
-        return _handle_delete(activity, actor, verified)
-
-    # Forward-compat: log unknown types as Other so we don't lose them.
-    _log_inbound(activity, actor, verified, ACTIVITY_TYPE_OTHER, None)
+    federation_inbox.enqueue_inbound_activity(
+        actor_kind="person",
+        identifier=username,
+        method=request.method,
+        path=request.path,
+        headers=dict(request.headers),
+        body=body,
+    )
     return JsonResponse(
         {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
     )
@@ -1709,22 +1769,50 @@ def _handle_company_create(
     )
 
 
+def dispatch_verified_company_activity(activity: dict, company: Company, actor: Actor,
+                                       verified: federation_signing.VerifiedSignature) -> None:
+    """Route a VERIFIED inbound activity to its Company-actor handler.
+
+    CC-127 worker-side counterpart to :func:`dispatch_verified_person_activity`.
+    Update / Delete reuse the Person-actor handlers (they resolve targets by
+    canonical_link / source_instance, not by the inbox they arrived on); the
+    synthetic Company actor leaves ``local_user`` NULL on the audit row.
+    """
+    activity_id = activity.get("id") or ""
+    if activity_id and FederationActivity.objects.filter(
+        direction=DIRECTION_INBOUND, activity_id=activity_id,
+    ).exists():
+        logger.info("ap.company_inbox.duplicate_activity_id activity_id=%s", activity_id)
+        return
+
+    activity_type = activity.get("type")
+    if activity_type == "Follow":
+        _handle_company_follow(activity, company, actor, verified)
+    elif activity_type == "Undo":
+        _handle_company_undo(activity, company, actor, verified)
+    elif activity_type == "Create":
+        _handle_company_create(activity, company, actor, verified)
+    elif activity_type == "Update":
+        _handle_update(activity, actor, verified)
+    elif activity_type == "Delete":
+        _handle_delete(activity, actor, verified)
+    else:
+        _log_company_inbound(activity, company, verified, ACTIVITY_TYPE_OTHER, None)
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def company_actor_inbox(request, slug: str):
-    """Authenticated AP inbox for a Company actor.
+    """Authenticated AP inbox for a Company actor — accept-then-async (CC-127).
 
-    Pre-flight order mirrors the Phase 5c Person-actor inbox: body parse
-    → signature verify → rate limit (per-instance) → replay dedupe →
-    dispatch. The Company actor row is lazily created + keypair-minted
-    on first hit so a peer can Follow a Company that hasn't received any
-    AS2 traffic yet.
+    Same thin edge as :func:`actor_inbox`: cheap network-free checks +
+    202, with verify+process deferred to the qcluster worker. The Company
+    actor row is lazily created + keypair-minted in the WORKER on first
+    hit (moved off the edge) so a peer can Follow a Company that hasn't
+    received any AS2 traffic yet without blocking the web thread.
     """
-    company = Company.objects.filter(slug=slug).first()
-    if company is None:
+    if not Company.objects.filter(slug=slug).exists():
         return _inbox_error("company_not_found", 404)
-    actor = _ensure_company_actor(company)
-    actor = _ensure_keypair(actor)
 
     max_bytes = getattr(settings, "ACTIVITYPUB_BODY_MAX_BYTES", 1_048_576)
     body = request.body
@@ -1738,44 +1826,28 @@ def company_actor_inbox(request, slug: str):
     if not isinstance(activity, dict):
         return _inbox_error("activity_not_object", 400)
 
+    if federation_inbox.is_droppable_unknown_actor_activity(activity):
+        return JsonResponse(
+            {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
+        )
+
     try:
-        verified = federation_signing.verify_inbound_signature(request, body)
+        federation_signing.verify_inbound_signature_precheck(request, body)
     except federation_signing.SignatureVerificationError as exc:
         return _inbox_error(exc.verdict, 401)
 
-    host = urlparse(verified.actor_uri).netloc.lower()
-    if not _rate_limit_check(host):
+    claimed_host = _claimed_signature_host(request.headers.get("Signature", ""))
+    if not _rate_limit_check(claimed_host):
         return _inbox_error("rate_limited", 429)
 
-    activity_id = activity.get("id") or ""
-    if activity_id and FederationActivity.objects.filter(
-        direction=DIRECTION_INBOUND, activity_id=activity_id,
-    ).exists():
-        return JsonResponse(
-            {"status": "duplicate"},
-            status=202,
-            content_type=AS2_CONTENT_TYPE,
-        )
-
-    activity_type = activity.get("type")
-    if activity_type == "Follow":
-        return _handle_company_follow(activity, company, actor, verified)
-    if activity_type == "Undo":
-        return _handle_company_undo(activity, company, actor, verified)
-    if activity_type == "Create":
-        return _handle_company_create(activity, company, actor, verified)
-    # Update / Delete on a Company inbox reuse the Person-actor handlers:
-    # they resolve targets by canonical_link / source_instance, not by
-    # the inbox they arrived on, so the dispatch shape is identical. The
-    # ``actor`` arg is used for the audit row's ``local_user`` link only;
-    # passing the synthetic Company actor leaves local_user NULL because
-    # actor.user_id is None for Organization actors.
-    if activity_type == "Update":
-        return _handle_update(activity, actor, verified)
-    if activity_type == "Delete":
-        return _handle_delete(activity, actor, verified)
-
-    _log_company_inbound(activity, company, verified, ACTIVITY_TYPE_OTHER, None)
+    federation_inbox.enqueue_inbound_activity(
+        actor_kind="company",
+        identifier=slug,
+        method=request.method,
+        path=request.path,
+        headers=dict(request.headers),
+        body=body,
+    )
     return JsonResponse(
         {"status": "accepted"}, status=202, content_type=AS2_CONTENT_TYPE
     )

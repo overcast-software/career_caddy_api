@@ -242,7 +242,9 @@ class TestCompanyInboxFollow(TestCase):
                 HTTP_HOST="testserver",
                 **_meta(headers),
             )
-        self.assertEqual(response.status_code, 422)
+        # CC-127 accept-then-async: edge 202s + enqueues; worker's
+        # _handle_company_follow rejects the target mismatch (no follower).
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(FederationFollower.objects.count(), 0)
 
     def test_unknown_company_returns_404(self):
@@ -255,7 +257,10 @@ class TestCompanyInboxFollow(TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
-    def test_bad_signature_rejected(self):
+    def test_bad_signature_accepted_then_dropped(self):
+        # CC-127: a wrong-key RSA mismatch is post-fetch (expensive), so it
+        # is deferred to the worker — the edge 202s and the worker drops it
+        # after verify (no follower). The retry-triggering 401 is gone.
         body = _follow_body(self.peer, self.target_uri)
         headers = _sign(self.peer, self.path, body)
         # Verify against the wrong public key — same actor_uri, different key.
@@ -270,7 +275,7 @@ class TestCompanyInboxFollow(TestCase):
                 HTTP_HOST="testserver",
                 **_meta(headers),
             )
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 202)
         self.assertEqual(FederationFollower.objects.count(), 0)
 
 
@@ -311,7 +316,9 @@ class TestCompanyInboxUndo(TestCase):
         self.follower.refresh_from_db()
         self.assertIsNotNone(self.follower.unfollowed_at)
 
-    def test_undo_with_no_matching_row_returns_404(self):
+    def test_undo_with_no_matching_row_is_accepted(self):
+        # CC-127: edge 202s; worker's _handle_company_undo finds no row and
+        # no-ops (the 404 is no longer surfaced under accept-then-async).
         other = FakeRemoteActor("https://peer.example/users/bob")
         body = _undo_body(other, self.target_uri)
         headers = _sign(other, self.path, body)
@@ -322,7 +329,7 @@ class TestCompanyInboxUndo(TestCase):
                 HTTP_HOST="testserver",
                 **_meta(headers),
             )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 202)
 
 
 # ---------------------------------------------------------------------------

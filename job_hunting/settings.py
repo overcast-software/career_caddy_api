@@ -522,6 +522,64 @@ ACTIVITYPUB_BODY_MAX_BYTES = int(
 )
 
 # ---------------------------------------------------------------------------
+# CC-127 — inbox accept-then-async + bounded/negatively-cached key fetch.
+#
+# The inbound inbox verifies HTTP Signatures by fetching the remote
+# sender's public key over HTTP. That fetch used to run synchronously on
+# the web-worker thread with the 10s ACTIVITYPUB_OUTBOUND_DELIVERY_TIMEOUT
+# and the requests default of 30 redirects — a slow / dead / redirect-
+# looping peer could pin a worker for ~40s, and ~45% of deliveries (self-
+# Delete broadcasts from suspended accounts, dead peers, scanners) 401'd,
+# each 401 triggering an uncached-refetch redelivery storm.
+#
+# Fix: the inbox now returns 202 immediately and defers verify+process to
+# the django-q worker (ACTIVITYPUB_INBOX_DISPATCH_SYNC below). The key
+# fetch itself is bounded and negatively cached so even the worker can't
+# hang and the storm stops re-paying the network cost.
+#
+# - split connect/read timeout (3s connect / 10s read): a DEAD host hangs
+#   in the connect phase, so a tight 3s connect fails the storm sources
+#   fast; a 10s read (matches Mastodon's app/lib/request.rb read_timeout)
+#   still lets a slow-but-ALIVE legit peer respond. Since the fetch now
+#   runs in the qcluster worker (not the web thread) we don't need the
+#   brutal 2-3s total Doug floated — that would also drop live-but-slow
+#   peers, which accept-then-async can't recover (the peer got a 202 and
+#   won't redeliver). Both bounds are env-tunable.
+# - redirect cap 3 (matches Mastodon max_hops=3): bare requests allows 30,
+#   letting a redirect loop multiply the per-hop timeout into the observed
+#   ~40s hangs.
+# - negative-cache TTL 300s: a failed key fetch (unreachable / 404 deleted
+#   actor / no publicKey) is remembered so an ActivityPub redelivery storm
+#   short-circuits without network I/O. Mirrors Mastodon's Stoplight
+#   circuit-breaker on the key refresh. Kept to 300s (== positive-cache
+#   TTL) to bound how long a transiently-down-but-legit peer is dropped.
+ACTIVITYPUB_PEER_KEY_FETCH_CONNECT_TIMEOUT = float(
+    os.environ.get("ACTIVITYPUB_PEER_KEY_FETCH_CONNECT_TIMEOUT", "3")
+)
+ACTIVITYPUB_PEER_KEY_FETCH_READ_TIMEOUT = float(
+    os.environ.get("ACTIVITYPUB_PEER_KEY_FETCH_READ_TIMEOUT", "10")
+)
+ACTIVITYPUB_PEER_KEY_FETCH_MAX_REDIRECTS = int(
+    os.environ.get("ACTIVITYPUB_PEER_KEY_FETCH_MAX_REDIRECTS", "3")
+)
+ACTIVITYPUB_PEER_KEY_NEG_CACHE_TTL = int(
+    os.environ.get("ACTIVITYPUB_PEER_KEY_NEG_CACHE_TTL", "300")
+)
+
+# When False (prod default), the inbox edge enqueues verify+process to the
+# django-q worker (job_hunting.lib.federation_inbox.process_inbound_activity)
+# and returns 202 without touching the network on the web thread. When True
+# it runs verify+process in-band at the enqueue call site. Defaulted True
+# under TESTING (below) so the inbox test-suite observes side effects
+# synchronously; the dedicated async tests flip it False + assert the
+# async_task enqueue. Distinct from Q_CLUSTER['sync'] (which is NOT toggled
+# globally under TESTING — see the Q_CLUSTER note) so this cutover doesn't
+# force every other async_task call site in-band.
+ACTIVITYPUB_INBOX_DISPATCH_SYNC = os.environ.get(
+    "ACTIVITYPUB_INBOX_DISPATCH_SYNC", "False"
+).lower() in ("true", "1", "yes")
+
+# ---------------------------------------------------------------------------
 # ActivityPub Phase 5d — outbound dispatch worker.
 #
 # The django-q2 worker (already up — Phase 1 of the queue rollout) runs
@@ -617,6 +675,12 @@ AUTH_PASSWORD_VALIDATORS = [
 if TESTING:
     EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
     REGISTRATION_OPEN = True
+    # Inbox verify+process runs in-band under TESTING so the existing
+    # inbox suite observes side effects synchronously (the pre-CC-127
+    # contract was synchronous). Dedicated async tests override this to
+    # False and assert the async_task enqueue. Unlike Q_CLUSTER['sync'],
+    # this only affects the inbox path — no other async_task call site.
+    ACTIVITYPUB_INBOX_DISPATCH_SYNC = True
 
 # ---------------------------------------------------------------------------
 # Q_CLUSTER — django-q2 task queue configuration.
