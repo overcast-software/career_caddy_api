@@ -177,8 +177,11 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
     ],
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        # Exempt trusted `jh_` service API keys (ApiKeyAuthentication) from
+        # throttling; anon + JWT (frontend) traffic stays capped. See
+        # job_hunting/api/throttling.py.
+        "job_hunting.api.throttling.ApiKeyExemptAnonRateThrottle",
+        "job_hunting.api.throttling.ApiKeyExemptUserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("DRF_ANON_THROTTLE_RATE", "100/day"),
