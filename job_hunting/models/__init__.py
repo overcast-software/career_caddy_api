@@ -44,6 +44,7 @@ from .scrape_profile import ScrapeProfile as ScrapeProfile
 from .job_post_description_decision import JobPostDescriptionDecision as JobPostDescriptionDecision
 from .job_post_overwrite_decision import JobPostOverwriteDecision as JobPostOverwriteDecision
 from .duplicate_annotation import DuplicateAnnotation as DuplicateAnnotation
+from .match_request import MatchRequest as MatchRequest
 from .actor import Actor as Actor
 from .federation_follower import FederationFollower as FederationFollower
 from .federation_activity import FederationActivity as FederationActivity
