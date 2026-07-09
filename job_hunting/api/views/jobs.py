@@ -3,6 +3,7 @@ import math
 
 from datetime import timedelta
 
+from django_q.tasks import async_task
 from django.db import transaction
 from django.db.models import Q, OuterRef, Subquery
 from django.utils import timezone
@@ -2063,7 +2064,27 @@ class JobApplicationViewSet(BaseViewSet):
         payload["included"] = self._build_included([obj], include_rels, request)
         return Response(payload)
 
+    # Keys that identify a request as an agentic-match TRIGGER (CC-135). The
+    # applicant DID apply, so the JA is created up front and IS the poll target;
+    # a match_context carrying any of these inputs asks Career Caddy to find the
+    # JobPost this ATS page belongs to. An ordinary JA create carries no
+    # match_context and is completely unaffected.
+    _MATCH_INPUT_KEYS = ("referrer", "page_title", "text_excerpt")
+    MATCH_TASK = "job_hunting.lib.tasks.job_application_match_job"
+
     def create(self, request):
+        # Split the raw payload's attributes (flat or JSON:API envelope) so we
+        # can detect the match trigger before the base create machinery runs.
+        data = request.data if isinstance(request.data, dict) else {}
+        node = data.get("data") if isinstance(data.get("data"), dict) else None
+        attrs = (node.get("attributes") if node else None) or data
+        match_ctx_in = attrs.get("match_context")
+
+        if isinstance(match_ctx_in, dict) and any(
+            match_ctx_in.get(k) for k in self._MATCH_INPUT_KEYS
+        ):
+            return self._create_match_trigger(request, attrs, match_ctx_in)
+
         response = super().create(request)
         # Auto-create the initial JobApplicationStatus so every application
         # has at least one status entry from the moment it is created.
@@ -2084,6 +2105,103 @@ class JobApplicationViewSet(BaseViewSet):
                         logged_at=timezone.now(),
                     )
         return response
+
+    def _create_match_trigger(self, request, attrs, match_ctx_in):
+        """Staff-gated agentic-match JA create (CC-135).
+
+        The match trigger is entitlement-gated (currently is_staff, mirroring
+        the IsAdminUser semantics MatchRequest used): anonymous callers already
+        get 401 from the base IsAuthenticated permission; authenticated
+        non-staff get 403 here. Normal JA creation is never gated — only this
+        branch is.
+
+        The ATS page url lives in tracking_url (validated via
+        validate_submission_url); a bad referrer is dropped, not rejected; the
+        text_excerpt is truncated at write. match_context.status starts
+        'pending', and the async matcher (job_application_match_job) is
+        enqueued. Returns the JA resource with 202 so the extension polls it.
+        """
+        from job_hunting.lib.url_policy import UrlPolicyError, validate_submission_url
+        from job_hunting.models.job_application import (
+            MATCH_STATUS_PENDING,
+            MATCH_TEXT_EXCERPT_MAX_LEN,
+        )
+
+        if not request.user.is_staff:
+            return Response(
+                {"errors": [{"status": "403", "detail": "Staff only"}]},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # The application-page url rides in tracking_url. Required + validated.
+        tracking_url = (attrs.get("tracking_url") or "").strip()
+        if not tracking_url:
+            return Response(
+                {"errors": [{"detail": "tracking_url is required for a match request"}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            tracking_url = validate_submission_url(tracking_url)
+        except UrlPolicyError as e:
+            return Response(
+                {"errors": [{"status": "400", "code": e.code, "detail": str(e)}]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Referrer is a best-effort signal — validate but never 4xx on a bad
+        # one; drop it so a malformed referrer can't block the lookup.
+        referrer = (match_ctx_in.get("referrer") or "").strip()
+        if referrer:
+            try:
+                referrer = validate_submission_url(referrer)
+            except UrlPolicyError:
+                referrer = ""
+
+        page_title = (match_ctx_in.get("page_title") or "").strip()[:500]
+
+        # The row is the token-cost guardrail: truncate at write so the matcher
+        # never sees more than MATCH_TEXT_EXCERPT_MAX_LEN chars.
+        text_excerpt = match_ctx_in.get("text_excerpt") or ""
+        if not isinstance(text_excerpt, str):
+            text_excerpt = ""
+        text_excerpt = text_excerpt[:MATCH_TEXT_EXCERPT_MAX_LEN]
+
+        match_context = {
+            "referrer": referrer,
+            "page_title": page_title,
+            "text_excerpt": text_excerpt,
+            "status": MATCH_STATUS_PENDING,
+            "confidence": None,
+            "rationale": "",
+            "requested_at": timezone.now().isoformat(),
+            "finished_at": None,
+        }
+
+        ja = JobApplication.objects.create(
+            user_id=request.user.id,
+            tracking_url=tracking_url,
+            status=attrs.get("status") or None,
+            match_context=match_context,
+        )
+        # Seed the initial status row, same invariant as the normal create path.
+        if not JobApplicationStatus.objects.filter(application_id=ja.id).exists():
+            status_obj, _ = Status.objects.get_or_create(
+                status=ja.status or "Unvetted",
+                defaults={"status_type": "application"},
+            )
+            JobApplicationStatus.objects.create(
+                application=ja,
+                status=status_obj,
+                logged_at=timezone.now(),
+            )
+
+        async_task(self.MATCH_TASK, ja.id)
+
+        ser = self.get_serializer()
+        return Response(
+            {"data": ser.to_resource(ja)},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     def _upsert(self, request, pk, partial=False):
         obj = self._get_obj(pk)

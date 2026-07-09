@@ -683,21 +683,23 @@ def parse_scrape_job(
 
 
 # ---------------------------------------------------------------------------
-# CC-135 — agentic JobPost lookup (staff-gated MatchRequest)
+# CC-135 — agentic JobPost lookup (folded into JobApplication)
 # ---------------------------------------------------------------------------
-# The extension POSTs application-page context to /api/v1/match-requests/; the
-# view creates a MatchRequest row (status=pending) and enqueues this task. The
-# task pre-fetches candidate JobPosts via the existing search legs, restricted
-# to the requesting user's visible posts, and makes ONE LLM call that picks a
-# candidate id or null. The extension polls the row for the terminal state.
+# The extension POSTs a JobApplication with match_context inputs to
+# /api/v1/job-applications/; the create path stores the inputs on
+# match_context (status=pending) and enqueues this task. The task pre-fetches
+# candidate JobPosts via the existing search legs, restricted to the applying
+# user's visible posts, and makes ONE LLM call that picks a candidate id or
+# null. On a pick it backfills JobApplication.job_post directly and records the
+# outputs on match_context; the extension polls the JA for the terminal state.
 
 # Total candidates handed to the LLM. Cap keeps the prompt (and token cost)
 # bounded; ordered by recency so the most-likely-relevant posts survive the cap.
 _MATCH_MAX_CANDIDATES = 20
 
 
-def _match_request_visible_posts(user):
-    """The JobPost queryset a MatchRequest's creator may match against.
+def _match_visible_posts(user):
+    """The JobPost queryset a match request's applicant may match against.
 
     Mirrors JobPostViewSet.get_queryset visibility: staff see everything;
     everyone else sees only posts they have a per-user signal on (created,
@@ -719,10 +721,12 @@ def _match_request_visible_posts(user):
     ).distinct()
 
 
-def _match_request_candidates(match_request, user):
-    """Dedupe-merged candidate JobPosts for a MatchRequest, recency-capped.
+def _match_candidates(url, referrer, page_title, user):
+    """Dedupe-merged candidate JobPosts for a match request, recency-capped.
 
-    Two legs, both scoped to the user's visible posts:
+    ``url`` is the application-page URL (JobApplication.tracking_url); the rest
+    come from the JA's match_context inputs. Two legs, both scoped to the user's
+    visible posts:
       (a) hostname containment of the referrer host and the url host against
           link / canonical_link / apply_url (host icontains, as the popup's
           filter[hostname] leg does),
@@ -734,7 +738,7 @@ def _match_request_candidates(match_request, user):
 
     from django.db.models import Q
 
-    visible = _match_request_visible_posts(user)
+    visible = _match_visible_posts(user)
 
     clause = Q()
     have_signal = False
@@ -743,7 +747,7 @@ def _match_request_candidates(match_request, user):
     # against the stored URL fields. urlsplit(...).hostname lowercases + drops
     # userinfo/port; empty/garbage inputs yield None and are skipped.
     hosts = set()
-    for raw in (match_request.referrer, match_request.url):
+    for raw in (referrer, url):
         if not raw:
             continue
         try:
@@ -763,7 +767,7 @@ def _match_request_candidates(match_request, user):
     # Leg (b): page-title keyword search across the same fields filter[query]
     # covers. The full title is used as one icontains term — a cheap, index-free
     # containment that catches the reworded-but-recognizable case.
-    title = (match_request.page_title or "").strip()
+    title = (page_title or "").strip()
     if title:
         clause |= (
             Q(title__icontains=title)
@@ -783,51 +787,92 @@ def _match_request_candidates(match_request, user):
     )
 
 
-def match_request_job(match_request_id: str) -> dict:
-    """Resolve a MatchRequest to a JobPost (or null) via one LLM call.
+def _finish_match(ja, *, status, job_post_id, confidence, rationale):
+    """Write a terminal match outcome onto the JobApplication + match_context.
+
+    Merges the output keys into the existing match_context dict (preserving the
+    inputs), stamps finished_at, and — on a pick — backfills the job_post FK.
+    One save writes both the FK and the JSON so the poll sees a consistent row.
+    """
+    from django.utils import timezone
+
+    ctx = dict(ja.match_context or {})
+    ctx["status"] = status
+    ctx["confidence"] = confidence
+    ctx["rationale"] = rationale
+    ctx["finished_at"] = timezone.now().isoformat()
+    ja.match_context = ctx
+    update_fields = ["match_context"]
+    if job_post_id is not None:
+        ja.job_post_id = job_post_id
+        update_fields.append("job_post")
+    ja.save(update_fields=update_fields)
+
+
+def job_application_match_job(application_id: str) -> dict:
+    """Resolve a JobApplication's match_context to a JobPost (or null) via one LLM call.
 
     Unlike most tasks in this module, this one CATCHES its own exceptions and
-    records the outcome on the row instead of letting them bubble to
-    django_q.Failure. The MatchRequest row is both the audit surface and the
-    channel the extension polls for a terminal state; an uncaught exception
-    would strand it at status='pending' forever (the CC-122 orphan mode). So
-    the row always reaches 'done' or 'failed', and the failure rationale is a
-    safe summary carrying no secrets.
+    records the outcome on the JobApplication instead of letting them bubble to
+    django_q.Failure. The JA (its match_context) is both the audit surface and
+    the channel the extension polls for a terminal state; an uncaught exception
+    would strand it at match_context.status='pending' forever (the CC-122 orphan
+    mode). So the row always reaches 'done' or 'failed', and the failure
+    rationale is a safe summary carrying no secrets.
+
+    On a pick, JobApplication.job_post is backfilled directly — the match ANSWER
+    lands in the existing FK, a null pick leaves an honest unlinked JA.
 
     No LLM retry: text_excerpt is already truncated at write and one call per
     request is the cost guardrail.
     """
-    from job_hunting.models import MatchRequest
-    from job_hunting.models.match_request import STATUS_DONE, STATUS_FAILED
+    from job_hunting.models import JobApplication
+    from job_hunting.models.job_application import (
+        MATCH_STATUS_DONE,
+        MATCH_STATUS_FAILED,
+    )
 
-    match_request = MatchRequest.objects.filter(pk=match_request_id).first()
-    if match_request is None:
-        logger.warning("match_request_job: no MatchRequest %s", match_request_id)
-        return {"match_request_id": match_request_id, "status": "missing"}
+    ja = JobApplication.objects.filter(pk=application_id).first()
+    if ja is None:
+        logger.warning("job_application_match_job: no JobApplication %s", application_id)
+        return {"application_id": application_id, "status": "missing"}
+
+    ctx = ja.match_context or {}
+    if not ctx:
+        # Not a match-trigger JA (no inputs recorded) — nothing to resolve.
+        logger.warning(
+            "job_application_match_job: %s has no match_context", application_id
+        )
+        return {"application_id": application_id, "status": "missing"}
 
     # Idempotency: a requeue of an already-terminal row is a no-op.
-    if match_request.status in (STATUS_DONE, STATUS_FAILED):
-        return {"match_request_id": match_request_id, "status": match_request.status}
+    if ctx.get("status") in (MATCH_STATUS_DONE, MATCH_STATUS_FAILED):
+        return {"application_id": application_id, "status": ctx.get("status")}
 
-    user = match_request.created_by
+    url = ja.tracking_url or ""
+    referrer = ctx.get("referrer") or ""
+    page_title = ctx.get("page_title") or ""
+    text_excerpt = ctx.get("text_excerpt") or ""
+
+    # The applicant scopes candidate visibility (not the JA row's owner in some
+    # abstract sense — the JA.user IS the applicant). Staff see everything.
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    user = User.objects.filter(pk=ja.user_id).first() if ja.user_id else None
+
     try:
-        candidates = _match_request_candidates(match_request, user)
+        candidates = _match_candidates(url, referrer, page_title, user)
 
         if not candidates:
-            match_request.status = STATUS_DONE
-            match_request.result_job_post = None
-            match_request.confidence = None
-            match_request.rationale = "no candidates"
-            match_request.save(
-                update_fields=[
-                    "status",
-                    "result_job_post",
-                    "confidence",
-                    "rationale",
-                    "updated_at",
-                ]
+            _finish_match(
+                ja,
+                status=MATCH_STATUS_DONE,
+                job_post_id=None,
+                confidence=None,
+                rationale="no candidates",
             )
-            return {"match_request_id": match_request_id, "status": STATUS_DONE}
+            return {"application_id": application_id, "status": MATCH_STATUS_DONE}
 
         from job_hunting.lib.parsers.job_matcher import CandidatePost, JobMatcher
 
@@ -844,10 +889,10 @@ def match_request_job(match_request_id: str) -> dict:
         ]
 
         decision = JobMatcher().match(
-            url=match_request.url,
-            referrer=match_request.referrer,
-            page_title=match_request.page_title,
-            text_excerpt=match_request.text_excerpt,
+            url=url,
+            referrer=referrer,
+            page_title=page_title,
+            text_excerpt=text_excerpt,
             candidates=compact,
         )
 
@@ -858,8 +903,8 @@ def match_request_job(match_request_id: str) -> dict:
         # it was shown, never invent an id.
         if chosen_id is not None and chosen_id not in candidate_by_id:
             logger.warning(
-                "match_request_job: %s returned off-list id %r — treating as null",
-                match_request_id,
+                "job_application_match_job: %s returned off-list id %r — treating as null",
+                application_id,
                 chosen_id,
             )
             rationale = (
@@ -868,42 +913,30 @@ def match_request_job(match_request_id: str) -> dict:
             ).strip()
             chosen_id = None
 
-        match_request.status = STATUS_DONE
-        match_request.result_job_post_id = chosen_id
-        match_request.confidence = decision.confidence
-        match_request.rationale = rationale
-        match_request.save(
-            update_fields=[
-                "status",
-                "result_job_post",
-                "confidence",
-                "rationale",
-                "updated_at",
-            ]
+        _finish_match(
+            ja,
+            status=MATCH_STATUS_DONE,
+            job_post_id=chosen_id,
+            confidence=decision.confidence,
+            rationale=rationale,
         )
         return {
-            "match_request_id": match_request_id,
-            "status": STATUS_DONE,
-            "result_job_post_id": chosen_id,
+            "application_id": application_id,
+            "status": MATCH_STATUS_DONE,
+            "job_post_id": chosen_id,
         }
     except Exception as exc:
-        logger.exception("match_request_job: failed for %s", match_request_id)
+        logger.exception("job_application_match_job: failed for %s", application_id)
         # Safe summary only — the exception type + a short message, never the
         # full traceback or any credential-bearing detail.
-        match_request.status = STATUS_FAILED
-        match_request.result_job_post = None
-        match_request.confidence = None
-        match_request.rationale = f"matcher failed: {type(exc).__name__}"
-        match_request.save(
-            update_fields=[
-                "status",
-                "result_job_post",
-                "confidence",
-                "rationale",
-                "updated_at",
-            ]
+        _finish_match(
+            ja,
+            status=MATCH_STATUS_FAILED,
+            job_post_id=None,
+            confidence=None,
+            rationale=f"matcher failed: {type(exc).__name__}",
         )
-        return {"match_request_id": match_request_id, "status": STATUS_FAILED}
+        return {"application_id": application_id, "status": MATCH_STATUS_FAILED}
 
 
 def _host_of(raw: str | None) -> str:

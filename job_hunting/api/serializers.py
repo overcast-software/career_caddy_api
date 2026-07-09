@@ -12,7 +12,7 @@ from job_hunting.models import (
     Answer, JobApplication, CoverLetter, Experience, Resume, Score, Scrape,
     ExperienceDescription, ResumeSkill, ResumeSummary, JobApplicationStatus,
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
-    AiUsage, Waitlist, Invitation, ScrapeProfile, MatchRequest,
+    AiUsage, Waitlist, Invitation, ScrapeProfile,
 )
 from job_hunting.models.job_post_dedupe import find_apply_url_matches
 
@@ -1503,7 +1503,13 @@ class CoverLetterSerializer(BaseSerializer):
 class JobApplicationSerializer(BaseSerializer):
     type = "job-application"
     model = JobApplication
-    attributes = ["applied_at", "status", "tracking_url", "notes"]
+    attributes = ["applied_at", "status", "tracking_url", "notes", "match_context"]
+    # match_context (CC-135) is exposed for the extension's poll (GET
+    # /job-applications/:id reads match_context.status until done|failed) but is
+    # NEVER client-writable through parse_payload: the match trigger inputs are
+    # taken + validated + truncated by JobApplicationViewSet.create, and the
+    # outputs are the async matcher's to write.
+    read_only_attributes = ["match_context"]
     user_fk = "user_id"
     relationships = {
         "user": {"attr": "user", "type": "user", "uselist": False},
@@ -1958,43 +1964,6 @@ class ScrapeProfileSerializer(BaseSerializer):
         return res
 
 
-class MatchRequestSerializer(BaseSerializer):
-    type = "match-request"
-    model = MatchRequest
-    attributes = [
-        "url",
-        "referrer",
-        "page_title",
-        "text_excerpt",
-        "status",
-        "confidence",
-        "rationale",
-        "created_at",
-        "updated_at",
-    ]
-    # Input arrives via the viewset's own create() (which truncates
-    # text_excerpt + validates url), not parse_payload. The result fields
-    # are matcher-task output and must never be client-writable.
-    read_only_attributes = [
-        "status",
-        "confidence",
-        "rationale",
-        "created_at",
-        "updated_at",
-    ]
-    user_fk = "created_by_id"
-    relationships = {
-        "result-job-post": {
-            "attr": "result_job_post",
-            "type": "job-post",
-            "uselist": False,
-        },
-    }
-    relationship_fks = {
-        "result-job-post": "result_job_post_id",
-    }
-
-
 TYPE_TO_SERIALIZER = {
     "user": DjangoUserSerializer,
     "api-key": ApiKeySerializer,
@@ -2024,5 +1993,4 @@ TYPE_TO_SERIALIZER = {
     "scrape-profile": ScrapeProfileSerializer,
     "job-post-duplicate-candidate": JobPostDuplicateCandidateSerializer,
     "job-post-discovery": JobPostDiscoverySerializer,
-    "match-request": MatchRequestSerializer,
 }
