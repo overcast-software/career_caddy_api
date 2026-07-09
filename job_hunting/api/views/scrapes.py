@@ -1558,7 +1558,14 @@ class ScrapeViewSet(BaseViewSet):
 
         job_post = scrape.job_post
         if job_post is not None:
-            job_post.apply_url = new_url
+            # Scrape.apply_url stays RAW above (provenance — the exact URL
+            # the resolver landed on). The JobPost write-through gets the
+            # canonical form so a per-session token / tracking param in the
+            # apply destination doesn't break the filter[link] popup lookup
+            # (CC-139: ripplehire's ?token=).
+            from job_hunting.models.job_post_dedupe import canonicalize_apply_url
+
+            job_post.apply_url = canonicalize_apply_url(new_url)
             job_post.apply_url_status = new_status
             if new_status in ("resolved", "internal"):
                 job_post.apply_url_resolved_at = timezone.now()

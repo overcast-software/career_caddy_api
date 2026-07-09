@@ -657,10 +657,16 @@ def parse_scrape_job(
         # (camoufox-based ResolveApplyUrl is being phased out). Stamp it
         # whenever the extension supplied a value; later writers no-op if
         # it's already set.
+        #
+        # Canonicalize at write (CC-139): this uses queryset.update(), which
+        # bypasses JobPost.save(), so the strip/rewrite has to happen here
+        # explicitly. Personal tokens + tracking params in the apply
+        # destination otherwise break the filter[link] exact-equality legs.
         from job_hunting.models import JobPost
+        from job_hunting.models.job_post_dedupe import canonicalize_apply_url
 
         JobPost.objects.filter(pk=job_post_id).update(
-            apply_url=apply_url, apply_url_status="resolved"
+            apply_url=canonicalize_apply_url(apply_url), apply_url_status="resolved"
         )
 
     if job_post_id and auto_score:

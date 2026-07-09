@@ -964,6 +964,47 @@ class TestParseScrapeJobPostParse(TestCase):
         self.assertEqual(jp.apply_url_status, "resolved")
 
     @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
+    def test_apply_url_canonicalized_at_write(self, mock_parse):
+        """CC-139: parse_scrape_job stamps apply_url via queryset.update(),
+        which bypasses JobPost.save(), so the canonicalization has to run in
+        the task. A token-polluted apply_url with a matching url_rewrites
+        rule must land canonical, not raw."""
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            hostname="ripplehire.com",
+            defaults={"url_rewrites": [{
+                "match": r"([?&])token=[^&]*",
+                "rewrite": r"\1token=",
+            }]},
+        )
+        self.addCleanup(_profile_url_rewrites_for_host.cache_clear)
+
+        jp = JobPost.objects.create(
+            title="Senior Engineer",
+            company=self.company,
+            description=self.LONG_DESC,
+            source="extension",
+            created_by=self.user,
+            complete=False,
+        )
+        mock_parse.side_effect = self._attach_jp_side_effect(jp)
+        scrape = self._make_scrape()
+
+        parse_scrape_job(
+            scrape.id,
+            user_id=self.user.id,
+            apply_url="https://apply.ripplehire.com/j/9?token=SESSION",
+        )
+
+        jp.refresh_from_db()
+        self.assertEqual(
+            jp.apply_url, "https://apply.ripplehire.com/j/9?token="
+        )
+        self.assertEqual(jp.apply_url_status, "resolved")
+
+    @patch("job_hunting.lib.parsers.job_post_extractor.parse_scrape")
     def test_apply_url_not_stamped_without_job_post(self, mock_parse):
         """parse no-op (no JP linked) → nothing to stamp, no crash."""
         from job_hunting.lib.tasks import parse_scrape_job
