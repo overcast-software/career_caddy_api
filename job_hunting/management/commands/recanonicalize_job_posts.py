@@ -41,8 +41,14 @@ class Command(BaseCommand):
         _profile_url_rewrites_for_host.cache_clear()
         seen = link_changed = apply_changed = 0
         pending = []
-        qs = JobPost.objects.only("id", "link", "canonical_link", "apply_url")
-        for jp in qs.iterator():
+        # Full instances, deliberately NOT .only(): the federation
+        # post_init snapshot (signals/federation.py snapshot_on_load)
+        # reads audience + every FEDERATION_UPDATEABLE_FIELDS entry, and
+        # on a deferred instance each read refresh_from_db()s — which
+        # instantiates another deferred JobPost, re-fires post_init, and
+        # recurses to a RecursionError. bulk_update below never fires
+        # post_save, so full rows are safe here.
+        for jp in JobPost.objects.all().iterator():
             seen += 1
             dirty_fields = set()
             if jp.link:

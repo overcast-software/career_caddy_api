@@ -210,7 +210,9 @@ class ScrapeApplyUrlCanonicalizeTests(TestCase):
         self.client.force_authenticate(user=self.user)
         _profile_url_rewrites_for_host.cache_clear()
         ScrapeProfile.objects.update_or_create(
-            hostname="ripplehire.com",
+            # Exact host of the apply URL below — profile lookup does not
+            # walk parent domains.
+            hostname="apply.ripplehire.com",
             defaults={"url_rewrites": [{
                 "match": r"([?&])token=[^&]*",
                 "rewrite": r"\1token=",

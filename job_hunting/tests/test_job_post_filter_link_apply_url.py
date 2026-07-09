@@ -144,7 +144,10 @@ class TestJobPostFilterLinkMatchesApplyUrl(TestCase):
         """
         _profile_url_rewrites_for_host.cache_clear()
         ScrapeProfile.objects.update_or_create(
-            hostname="ripplehire.com",
+            # Exact host of the apply URLs below — _rewrite_via_profile
+            # matches hostname exactly (www. stripped, no parent-domain
+            # suffix walk like the extension-selectors endpoint does).
+            hostname="apply.ripplehire.com",
             defaults={"url_rewrites": [{
                 "match": r"([?&])token=[^&]*",
                 "rewrite": r"\1token=",

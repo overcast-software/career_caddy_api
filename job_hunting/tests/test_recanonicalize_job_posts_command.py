@@ -26,7 +26,9 @@ class RecanonicalizeJobPostsCommandTests(TestCase):
         # apply_url pass has a host-specific rule to apply (imp_id is global
         # and needs no profile).
         ScrapeProfile.objects.update_or_create(
-            hostname="ripplehire.com",
+            # Exact host of the apply URLs below — profile lookup does not
+            # walk parent domains.
+            hostname="apply.ripplehire.com",
             defaults={"url_rewrites": [{
                 "match": r"([?&])token=[^&]*",
                 "rewrite": r"\1token=",
