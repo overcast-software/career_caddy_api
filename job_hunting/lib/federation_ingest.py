@@ -112,7 +112,11 @@ from job_hunting.models import (
     JobPostDiscovery,
 )
 from job_hunting.models.job_post import AS2_PUBLIC
-from job_hunting.models.job_post_dedupe import canonicalize_link, find_duplicate
+from job_hunting.models.job_post_dedupe import (
+    canonicalize_apply_url,
+    canonicalize_link,
+    find_duplicate,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -679,6 +683,10 @@ def ingest_create_note(
     ext_apply_url = extension.get("apply_url") if isinstance(extension, dict) else None
     if not isinstance(ext_apply_url, str) or not ext_apply_url.strip():
         ext_apply_url = None
+    else:
+        # Canonicalize at write (CC-139): a federated peer's apply_url can
+        # carry the same tracking-param / token slop as any other source.
+        ext_apply_url = canonicalize_apply_url(ext_apply_url)
     ext_posting_status = (
         extension.get("posting_status") if isinstance(extension, dict) else None
     )
@@ -821,6 +829,9 @@ def ingest_update_note(
     incoming_apply_url = extension.get("apply_url") if isinstance(extension, dict) else None
     if not isinstance(incoming_apply_url, str) or not incoming_apply_url.strip():
         incoming_apply_url = None
+    else:
+        # Canonicalize at write (CC-139), same as the create path above.
+        incoming_apply_url = canonicalize_apply_url(incoming_apply_url)
     incoming_posting_status = (
         extension.get("posting_status") if isinstance(extension, dict) else None
     )

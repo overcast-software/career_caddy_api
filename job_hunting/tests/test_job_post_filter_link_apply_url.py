@@ -27,7 +27,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from job_hunting.models import Company, JobPost
+from job_hunting.models import Company, JobPost, ScrapeProfile
+from job_hunting.models.job_post_dedupe import _profile_url_rewrites_for_host
 
 
 User = get_user_model()
@@ -125,6 +126,67 @@ class TestJobPostFilterLinkMatchesApplyUrl(TestCase):
         resp = self.client.get(
             "/api/v1/job-posts/",
             {"filter[link]": long_apply_url},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {str(post.id)})
+
+    def test_apply_url_written_with_token_found_by_url_with_other_token(self):
+        """CC-139: canonicalize-at-write on the PATCH path.
+
+        A ripplehire-shaped apply_url carries a per-session ``token=`` that
+        differs on every visit. Before CC-139 the resolver-captured
+        apply_url landed raw, so the user's later landing URL (same job,
+        different token) could never equal it and the filter[link] popup
+        lookup missed. With a ScrapeProfile url_rewrites rule stripping the
+        token for the host, the apply_url is canonicalized AT WRITE (PATCH
+        path), so both token variants collapse to the same stored value and
+        the lookup matches.
+        """
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            # Exact host of the apply URLs below — _rewrite_via_profile
+            # matches hostname exactly (www. stripped, no parent-domain
+            # suffix walk like the extension-selectors endpoint does).
+            hostname="apply.ripplehire.com",
+            defaults={"url_rewrites": [{
+                "match": r"([?&])token=[^&]*",
+                "rewrite": r"\1token=",
+            }]},
+        )
+        self.addCleanup(_profile_url_rewrites_for_host.cache_clear)
+
+        post = JobPost.objects.create(
+            title="Ripple Job",
+            company=self.company,
+            link="https://boards.example.com/jobs/ripple-1",
+            created_by=self.user,
+        )
+        # Extension-style PATCH stamping the apply destination with token A.
+        resp = self.client.patch(
+            f"/api/v1/job-posts/{post.id}/",
+            {
+                "data": {
+                    "type": "job-post",
+                    "id": str(post.id),
+                    "attributes": {
+                        "apply_url": "https://apply.ripplehire.com/j/42?token=AAA",
+                    },
+                }
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.json())
+
+        post.refresh_from_db()
+        # Written value is canonical (token stripped to empty) — NOT raw A.
+        self.assertEqual(
+            post.apply_url, "https://apply.ripplehire.com/j/42?token="
+        )
+
+        # Landing on the same apply URL with a DIFFERENT token must match.
+        resp = self.client.get(
+            "/api/v1/job-posts/",
+            {"filter[link]": "https://apply.ripplehire.com/j/42?token=BBB"},
         )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._ids(resp), {str(post.id)})

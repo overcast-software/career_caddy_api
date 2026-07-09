@@ -1014,6 +1014,15 @@ class JobPostViewSet(BaseViewSet):
         if "link" in attrs and attrs["link"] != obj.link:
             obj.canonical_link = None
             attrs.pop("canonical_link", None)
+        # Canonicalize apply_url at write (CC-139). Covers the extension's
+        # direct PATCHes of the apply destination — JobPost.save() strips
+        # trailing junk but does NOT canonicalize apply_url, so a token /
+        # tracking param would otherwise land raw and break the
+        # filter[link] popup lookup. None-safe (a PATCH clearing apply_url
+        # sends null → helper returns None → the field is nulled as sent).
+        if "apply_url" in attrs:
+            from job_hunting.models.job_post_dedupe import canonicalize_apply_url
+            attrs["apply_url"] = canonicalize_apply_url(attrs["apply_url"])
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(

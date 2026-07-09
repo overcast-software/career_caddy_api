@@ -140,6 +140,23 @@ class TestExtensionCoercion(TestCase):
             "https://greenhouse.io/acme/jobs/abc",
         )
 
+    def test_extension_apply_url_canonicalized_on_create(self):
+        # CC-139: a federated peer's apply_url gets canonicalized at write,
+        # same as any other source. imp_id is a global tracking param, so no
+        # ScrapeProfile is needed for it to strip.
+        activity = _activity(
+            note_url="https://hire.example/jobs/canon-apply",
+            extension={
+                "apply_url": "https://greenhouse.io/acme/jobs/abc?imp_id=xyz",
+            },
+        )
+        result = ingest_create_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(result.outcome, OUTCOME_CREATED)
+        self.assertEqual(
+            result.job_post.apply_url,
+            "https://greenhouse.io/acme/jobs/abc",
+        )
+
     def test_extension_posting_status_populated_on_create(self):
         activity = _activity(extension={"posting_status": "closed"})
         result = ingest_create_note(activity, federation_activity=_audit_row(activity))
@@ -389,6 +406,17 @@ class TestInboundUpdate(TestCase):
         self.assertIsNone(self.jp.apply_url)
         activity = self._update_activity(
             extension={"apply_url": "https://ats.example/apply/1"},
+        )
+        result = ingest_update_note(activity, federation_activity=_audit_row(activity))
+        self.assertEqual(result.outcome, OUTCOME_MERGED)
+        self.jp.refresh_from_db()
+        self.assertEqual(self.jp.apply_url, "https://ats.example/apply/1")
+
+    def test_update_canonicalizes_merged_apply_url(self):
+        # CC-139: the update merge-empty path canonicalizes apply_url too.
+        self.assertIsNone(self.jp.apply_url)
+        activity = self._update_activity(
+            extension={"apply_url": "https://ats.example/apply/1?imp_id=zzz"},
         )
         result = ingest_update_note(activity, federation_activity=_audit_row(activity))
         self.assertEqual(result.outcome, OUTCOME_MERGED)

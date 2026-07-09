@@ -2,7 +2,8 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
-from job_hunting.models import JobPost, Scrape
+from job_hunting.models import JobPost, Scrape, ScrapeProfile
+from job_hunting.models.job_post_dedupe import _profile_url_rewrites_for_host
 
 
 User = get_user_model()
@@ -196,6 +197,54 @@ class ScrapeApplyUrlEndpointTests(TestCase):
         sc.refresh_from_db()
         self.assertEqual(len(sc.apply_candidates), 1)
         self.assertEqual(sc.apply_url_status, "resolved")
+
+
+class ScrapeApplyUrlCanonicalizeTests(TestCase):
+    """CC-139: the apply-url action canonicalizes the JobPost write-through
+    while Scrape.apply_url stays RAW (provenance — the exact URL the
+    resolver landed on)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="u1", password="p")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        _profile_url_rewrites_for_host.cache_clear()
+        ScrapeProfile.objects.update_or_create(
+            # Exact host of the apply URL below — profile lookup does not
+            # walk parent domains.
+            hostname="apply.ripplehire.com",
+            defaults={"url_rewrites": [{
+                "match": r"([?&])token=[^&]*",
+                "rewrite": r"\1token=",
+            }]},
+        )
+        self.addCleanup(_profile_url_rewrites_for_host.cache_clear)
+
+    def test_job_post_apply_url_canonical_scrape_stays_raw(self):
+        jp = JobPost.objects.create(title="T", created_by=self.user)
+        sc = Scrape.objects.create(
+            url="https://example.com/job/1",
+            created_by=self.user,
+            job_post=jp,
+        )
+        raw = "https://apply.ripplehire.com/j/1?token=SESSION123"
+        resp = self.client.patch(
+            f"/api/v1/scrapes/{sc.id}/apply-url/",
+            {"data": {"attributes": {
+                "apply_url_status": "resolved",
+                "apply_url": raw,
+            }}},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        sc.refresh_from_db()
+        jp.refresh_from_db()
+        # Scrape keeps the raw resolver landing URL (provenance).
+        self.assertEqual(sc.apply_url, raw)
+        # JobPost gets the canonical form (token stripped).
+        self.assertEqual(
+            jp.apply_url, "https://apply.ripplehire.com/j/1?token="
+        )
 
 
 class ScrapeProfileApplyConfigTests(TestCase):

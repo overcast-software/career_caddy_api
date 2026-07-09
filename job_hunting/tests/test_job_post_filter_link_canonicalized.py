@@ -55,6 +55,47 @@ class TestJobPostFilterLinkCanonicalized(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._ids(resp), {str(self.post.id)})
 
+    def test_imp_id_variant_resolves_for_bare_url(self):
+        """CC-139: imp_id is now a global tracking param.
+
+        jobright bakes a per-visit ``imp_id`` into both link and
+        canonical_link (JP RPiGOkGd8c), so two visits to the same job never
+        exact-matched on canonical_link. With imp_id in _TRACKING_PARAMS a
+        JP created with ``?imp_id=X`` stores a canonical_link with the param
+        stripped, so the popup lookup on the bare URL matches.
+        """
+        post = JobPost.objects.create(
+            title="Jobright Role",
+            company=self.company,
+            link="https://jobright.ai/jobs/info/xyz?imp_id=abc123",
+            created_by=self.user,
+        )
+        post.refresh_from_db()
+        # canonical_link dropped the imp_id at save().
+        self.assertEqual(post.canonical_link, "https://jobright.ai/jobs/info/xyz")
+
+        resp = self.client.get(
+            "/api/v1/job-posts/",
+            {"filter[link]": "https://jobright.ai/jobs/info/xyz"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {str(post.id)})
+
+    def test_imp_id_variant_resolves_for_other_imp_id(self):
+        """Two visits with different imp_id values match the same JP."""
+        post = JobPost.objects.create(
+            title="Jobright Role 2",
+            company=self.company,
+            link="https://jobright.ai/jobs/info/pqr?imp_id=first",
+            created_by=self.user,
+        )
+        resp = self.client.get(
+            "/api/v1/job-posts/",
+            {"filter[link]": "https://jobright.ai/jobs/info/pqr?imp_id=second"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {str(post.id)})
+
     def test_unrelated_link_does_not_match(self):
         resp = self.client.get(
             "/api/v1/job-posts/",

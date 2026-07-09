@@ -120,6 +120,11 @@ _TRACKING_PARAMS = {
     "lever-source", "lever-origin",
     "trk", "refid", "trackingid",
     "lk", "lvk", "tsid",
+    # jobright bakes a per-visit impression id into both link and
+    # canonical_link (CC-139: JP RPiGOkGd8c), so two visits to the same
+    # job never exact-match on canonical_link. It carries no functional
+    # meaning for the destination — strip it like the other trackers.
+    "imp_id",
 }
 # Note: bare =source= and =src= were here previously but stripping them
 # overreaches — many job boards use =?source=...= as a *functional*
@@ -245,6 +250,25 @@ def canonicalize_link(url: str | None) -> str | None:
     # the path delimiter.
     path = u.path.rstrip("/") if u.path and u.path != "/" else u.path
     return urlunparse(u._replace(path=path, query=urlencode(kept), fragment=""))
+
+
+def canonicalize_apply_url(url: str | None) -> str | None:
+    """Canonicalize a JobPost.apply_url the same way as its link.
+
+    Thin wrapper over ``canonicalize_link``: strips tracking params
+    (incl. ``imp_id``) and applies the host's ScrapeProfile url_rewrites.
+    Personal tokens + tracking params baked into an apply destination
+    break the four exact-equality legs of the ``filter[link]`` popup
+    lookup — a resolver-captured ``apply_url`` (e.g. ripplehire's
+    per-session ``token=``) can never equal the user's landing URL when
+    it carries a stale token. Canonicalizing at every apply_url write
+    site collapses those variants (CC-139).
+
+    Behaviorally identical to ``canonicalize_link`` today; the separate
+    name exists so write sites read clearly and any future
+    apply-specific rules have one home. None/empty-safe.
+    """
+    return canonicalize_link(url)
 
 
 def fingerprint(post) -> str | None:
