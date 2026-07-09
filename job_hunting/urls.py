@@ -73,6 +73,7 @@ from job_hunting.api.views import (
     password_reset_confirm,
     InvitationViewSet,
     ScrapeProfileViewSet,
+    MatchRequestViewSet,
     accept_invite,
     test_email,
     profile,
@@ -135,6 +136,7 @@ router.register(r"ai-usages", AiUsageViewSet, basename="ai-usages")
 router.register(r"waitlists", WaitlistViewSet, basename="waitlists")
 router.register(r"invitations", InvitationViewSet, basename="invitations")
 router.register(r"scrape-profiles", ScrapeProfileViewSet, basename="scrape-profiles")
+router.register(r"match-requests", MatchRequestViewSet, basename="match-requests")
 
 urlpatterns = [
     path("admin/", admin.site.urls),
