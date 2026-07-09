@@ -66,7 +66,6 @@ from .public_profile import (
     public_user_federated_job_posts,
     public_user_profile,
 )
-from .match_requests import MatchRequestViewSet
 
 __all__ = [
     # ViewSets
@@ -93,7 +92,6 @@ __all__ = [
     "WaitlistViewSet",
     "InvitationViewSet",
     "ScrapeProfileViewSet",
-    "MatchRequestViewSet",
     # Function views
     "healthcheck",
     "guest_session",

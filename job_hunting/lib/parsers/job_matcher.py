@@ -1,13 +1,13 @@
 """JobMatcher — picks the JobPost that a live application page belongs to.
 
 Backs the CC-135 staff-gated agentic lookup. Given the application CONTEXT a
-``MatchRequest`` carries (url, referrer, page_title, text_excerpt) plus a
-pre-fetched list of candidate JobPosts, the matcher makes ONE structured LLM
-call that either picks exactly one candidate id or returns null. It is a
-CHOOSE-FROM-LIST decision: the model may only return an id present in the
-candidate list, and a returned id that isn't in the list is treated as null by
-the caller (``match_request_job``). It never invents an id and never scores a
-post that wasn't handed to it.
+``JobApplication.match_context`` carries (url, referrer, page_title,
+text_excerpt) plus a pre-fetched list of candidate JobPosts, the matcher makes
+ONE structured LLM call that either picks exactly one candidate id or returns
+null. It is a CHOOSE-FROM-LIST decision: the model may only return an id
+present in the candidate list, and a returned id that isn't in the list is
+treated as null by the caller (``job_application_match_job``). It never invents
+an id and never scores a post that wasn't handed to it.
 
 Mirrors ``DescriptionArbiter`` (same directory): a pydantic-ai ``Agent`` with a
 pydantic ``output_type`` for structured output, wrapped so ``_call_llm`` is a
@@ -83,7 +83,8 @@ class CandidatePost(BaseModel):
     """Compact candidate the matcher reasons over — NOT the full JobPost.
 
     Only the fields the model needs to judge sameness, keeping the prompt (and
-    token cost) small. Built by ``match_request_job`` from the visible posts.
+    token cost) small. Built by ``job_application_match_job`` from the visible
+    posts.
     """
 
     id: str
@@ -117,8 +118,8 @@ class JobMatcher:
         """Run one LLM call to pick a candidate id (or null).
 
         Callers must pre-filter to a non-empty candidate list — the
-        zero-candidate short-circuit lives in ``match_request_job`` so no LLM
-        call is spent when there is nothing to choose from.
+        zero-candidate short-circuit lives in ``job_application_match_job`` so
+        no LLM call is spent when there is nothing to choose from.
         """
         return self._call_llm(
             url=url,
