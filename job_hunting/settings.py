@@ -583,6 +583,45 @@ ACTIVITYPUB_INBOX_DISPATCH_SYNC = os.environ.get(
 ).lower() in ("true", "1", "yes")
 
 # ---------------------------------------------------------------------------
+# CC-169 — Google Cloud Tasks async dispatch (GCP Cloud Run migration).
+#
+# The django-q2 ``qcluster`` worker is a portless process — it can't run as
+# a Cloud Run *service*. For the latency-sensitive, IO-bound, no-browser
+# push paths (cover-letter first) we replace the django-q2 ``async_task``
+# enqueue with a Cloud Tasks HTTP task that POSTs to an authenticated
+# ``/tasks/*`` handler on a separate IAM-private Cloud Run service running
+# the SAME api image ("one image, two roles"). Cloud Tasks supplies the
+# event-driven dispatch, a queue-level rate cap (protects the shared OpenAI
+# quota + DB pool), and retry.
+#
+# CC_TASKS_ENABLED gates the whole thing. When False/unset (local, compose,
+# any non-GCP deploy) the producer falls straight back to django-q2
+# async_task, so nothing outside GCP is affected. The remaining vars form
+# the queue path + task target and MUST match the terraform (CC-169):
+#   GOOGLE_CLOUD_PROJECT / CC_TASKS_LOCATION / CC_TASKS_QUEUE_ID  -> queue path
+#   CC_TASKS_HANDLER_URL  -> base URL of the IAM-private tasks Cloud Run svc
+#   CC_TASKS_INVOKER_SA   -> service account minted into the OIDC token so the
+#                            handler's Cloud Run invoker IAM binding accepts it
+CC_TASKS_ENABLED = os.environ.get("CC_TASKS_ENABLED", "False").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+CC_TASKS_LOCATION = os.environ.get("CC_TASKS_LOCATION", "")
+CC_TASKS_QUEUE_ID = os.environ.get("CC_TASKS_QUEUE_ID", "")
+CC_TASKS_HANDLER_URL = os.environ.get("CC_TASKS_HANDLER_URL", "")
+CC_TASKS_INVOKER_SA = os.environ.get("CC_TASKS_INVOKER_SA", "")
+GOOGLE_CLOUD_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+# Defence-in-depth: the /tasks/* handlers require the X-CloudTasks-* headers
+# that Cloud Tasks stamps + Cloud Run strips from external callers. IAM at
+# the Cloud Run layer is the primary gate; set this False only to deliberately
+# accept non-Cloud-Tasks callers (e.g. a manual replay). Auto-skipped under
+# TESTING so the handler suite can drive the view directly.
+CC_TASKS_HANDLER_REQUIRE_HEADER = os.environ.get(
+    "CC_TASKS_HANDLER_REQUIRE_HEADER", "True"
+).lower() in ("true", "1", "yes")
+
+# ---------------------------------------------------------------------------
 # ActivityPub Phase 5d — outbound dispatch worker.
 #
 # The django-q2 worker (already up — Phase 1 of the queue rollout) runs

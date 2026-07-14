@@ -27,6 +27,7 @@ from rest_framework_simplejwt.views import (
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from job_hunting.api.chat import chat_proxy
 from job_hunting.api.events import events_stream, events_token
+from job_hunting.api.views.tasks_handlers import cover_letter_task_handler
 from job_hunting.api.views.federation import (
     actor_followers,
     actor_following,
@@ -331,6 +332,19 @@ urlpatterns = [
         r"^api/v1/admin/scrape-queue-health$",
         scrape_queue_health,
         name="scrape-queue-health-noslash",
+    ),
+    # CC-169 — Cloud Tasks HTTP handler (plain JSON, NOT JSON:API). Served by
+    # the IAM-private `tasks` Cloud Run service (same api image). The path
+    # MUST match the terraform + producer (job_hunting.lib.cloud_tasks).
+    path(
+        "tasks/cover-letter/",
+        cover_letter_task_handler,
+        name="tasks-cover-letter",
+    ),
+    re_path(
+        r"^tasks/cover-letter$",
+        cover_letter_task_handler,
+        name="tasks-cover-letter-noslash",
     ),
     path("api/v1/chat/", chat_proxy, name="chat"),
     # SSE — Phase 2 of Plans/Push status updates. Issue token, then stream.
