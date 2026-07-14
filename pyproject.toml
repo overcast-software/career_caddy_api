@@ -59,6 +59,12 @@ dependencies = [
     # URL-safe NanoID ids used as every model's primary key (see
     # job_hunting.models.nanoid_pk).
     "nanoid>=2.0.0",
+    # Cloud Tasks producer — CC-169 async dispatch on GCP Cloud Run. The
+    # django-q2 qcluster worker can't run as a portless Cloud Run service, so
+    # latency-sensitive push paths (cover-letter first) enqueue Cloud Tasks
+    # HTTP tasks to an authenticated /tasks/* handler. Only imported when
+    # CC_TASKS_ENABLED is on (job_hunting.lib.cloud_tasks).
+    "google-cloud-tasks>=2.16.0",
 ]
 
 [dependency-groups]

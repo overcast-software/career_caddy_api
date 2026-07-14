@@ -1,7 +1,6 @@
 import logging
 
 from django.http import HttpResponse
-from django_q.tasks import async_task
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -17,6 +16,7 @@ from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import CoverLetterSerializer
 from job_hunting.api.permissions import IsGuestReadOnly
 from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.cloud_tasks import enqueue_cover_letter
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import CareerData
 from job_hunting.models import (
@@ -339,11 +339,10 @@ class CoverLetterViewSet(BaseViewSet):
             status="pending",
         )
 
-        async_task(
-            "job_hunting.lib.tasks.cover_letter_job",
-            cover_letter.id,
-            injected_prompt=injected_prompt,
-        )
+        # CC-169: dispatch via Cloud Tasks when CC_TASKS_ENABLED (GCP Cloud
+        # Run), else fall back to the django-q2 async_task worker. Same task,
+        # same args, same durable CoverLetter row.
+        enqueue_cover_letter(cover_letter.id, injected_prompt=injected_prompt)
 
         return Response({"data": ser.to_resource(cover_letter)}, status=status.HTTP_202_ACCEPTED)
 
