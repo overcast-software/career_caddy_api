@@ -144,7 +144,7 @@ class TestVerifyInbound(TestCase):
     def setUp(self):
         self.peer = FakeRemoteActor()
         self.path = "/actors/dough/inbox"
-        self.host = "api.careercaddy.online"
+        self.host = "careercaddy.online"
         self.body = b'{"id":"https://peer.example/activities/1","type":"Follow"}'
 
     def test_valid_signature_passes(self):
