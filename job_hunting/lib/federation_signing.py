@@ -9,7 +9,7 @@ The signed string is constructed deterministically from the header
 list in the ``Signature`` header's ``headers="..."`` parameter:
 
     (request-target): post /actors/dough/inbox
-    host: api.careercaddy.online
+    host: careercaddy.online
     date: Sun, 01 Jun 2026 12:34:56 GMT
     digest: SHA-256=base64(sha256(body))
 
