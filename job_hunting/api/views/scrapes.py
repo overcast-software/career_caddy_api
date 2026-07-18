@@ -728,6 +728,19 @@ class ScrapeViewSet(BaseViewSet):
         ``scraped_at`` stays null because no browser fetch happened. On a
         placeholder rejection process_evaluation already set
         ``status='failed'`` + ``failure_reason``; we just log it.
+
+        CC-122 — description-only capture: when the payload carries the
+        captured innerText but no resolvable title/company (auth-walled
+        curated-miss: LinkedIn / Toptal, where the per-host selectors
+        miss so structured_prefill is empty), we do NOT fail and do NOT
+        enqueue a browser re-scrape (the page is behind a login the
+        server can't pass). Instead we seed ``scrape.job_content`` from
+        the captured text and enqueue the SAME async worker path
+        ``/scrapes/from-text/`` uses (``parse_scrape_job`` on the
+        django-q2 qcluster), so the LLM extracts title/company from the
+        text off the request thread and persists the JobPost. The scrape
+        is left ``pending`` (not ``failed``, not ``hold``); both clients
+        poll to terminal, so the JobPost materializes on a later poll.
         """
         from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
         from job_hunting.lib.scraper import _log_scrape_status
@@ -736,13 +749,7 @@ class ScrapeViewSet(BaseViewSet):
             scrape.captured_payload or {}, link=scrape.url
         )
         if parsed is None:
-            scrape.status = "failed"
-            scrape.failure_reason = (
-                "extension-direct: captured_payload missing usable "
-                "title/company"
-            )
-            scrape.save(update_fields=["status", "failure_reason"])
-            _log_scrape_status(scrape.id, "failed", note=scrape.failure_reason)
+            self._enqueue_extension_direct_llm_parse(scrape, user, force=force)
             return
 
         extractor = JobPostExtractor()
@@ -771,6 +778,93 @@ class ScrapeViewSet(BaseViewSet):
                 "(reason=%r)",
                 scrape.id, scrape.failure_reason,
             )
+
+    def _enqueue_extension_direct_llm_parse(self, scrape, user, *, force=False):
+        """CC-122 — description-only extension-direct: enqueue the async
+        LLM parse instead of failing.
+
+        Reached when ``_parsed_job_data_from_payload`` can't resolve a
+        title/company from the captured_payload (auth-walled curated-miss:
+        the per-host css_selectors missed so structured_prefill is empty,
+        but the extension DID capture the logged-in page's innerText). A
+        browser re-scrape is structurally impossible (login wall), so the
+        only publish path is to LLM-extract from the captured text.
+
+        Seeds ``scrape.job_content`` from the captured innerText and
+        enqueues ``parse_scrape_job`` — the exact same worker path
+        ``POST /scrapes/from-text/`` uses (django-q2 qcluster; the parse
+        runs off the request thread, so no inline-LLM OOM on the api
+        cgroup). The scrape is left ``pending``; both clients poll to
+        terminal and the JobPost materializes on a later poll once the
+        worker drains the queue.
+
+        Never flips the scrape to ``failed`` (that dropped the capture on
+        the floor) and never enqueues a ``browser`` re-scrape.
+        """
+        from job_hunting.lib.scraper import _log_scrape_status
+
+        payload = scrape.captured_payload or {}
+        hints = payload.get("extraction_hints") or {}
+        structured = hints.get("structured_prefill") or {}
+
+        # Prefer the fullest captured text for the LLM to chew on. The
+        # top-level ``description`` is the raw full-page innerText (the
+        # extension's ``payload.text``) — noisy but complete, which is
+        # exactly what the extractor wants (mirrors /scrapes/from-text/
+        # feeding raw ``text`` into ``job_content``). Fall back to the
+        # clean structured_prefill.description only if the raw text is
+        # absent.
+        def _pick(*candidates):
+            for value in candidates:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return None
+
+        captured_text = _pick(
+            payload.get("description"),
+            structured.get("description"),
+        )
+        if not captured_text:
+            # No usable text at all — the validator guarantees a non-empty
+            # description, so this is a defensive guard. Fail rather than
+            # enqueue a parse that would immediately no-op on empty
+            # job_content.
+            scrape.status = "failed"
+            scrape.failure_reason = (
+                "extension-direct: captured_payload carried no usable text"
+            )
+            scrape.save(update_fields=["status", "failure_reason"])
+            _log_scrape_status(scrape.id, "failed", note=scrape.failure_reason)
+            return
+
+        scrape.job_content = captured_text
+        scrape.status = "pending"
+        scrape.save(update_fields=["job_content", "status"])
+        _log_scrape_status(
+            scrape.id, "pending",
+            note="extension-direct: LLM parse enqueued (curated-miss)",
+        )
+
+        # Same worker path as /scrapes/from-text/ — parse_scrape_job
+        # re-enters parse_scrape(sync=True) on the qcluster, which
+        # LLM-extracts title/company from job_content, runs the full
+        # dedupe pipeline, and persists the JobPost. ``force`` mirrors the
+        # synchronous path: False for the normal (unbound) push so
+        # process_evaluation resolves the post by link/canonical and runs
+        # the trust-aware overwrite branch; True only when an explicit
+        # job-post relationship was pre-bound, so parse_scrape re-parses
+        # onto that named post instead of early-bailing on job_post_id.
+        async_task(
+            "job_hunting.lib.tasks.parse_scrape_job",
+            scrape.id,
+            user_id=user.id if user else None,
+            force=force,
+        )
+        logger.info(
+            "ScrapeViewSet.create: extension-direct scrape id=%s "
+            "description-only -> enqueued async LLM parse",
+            scrape.id,
+        )
 
     @extend_schema(
         tags=["Scrapes"],

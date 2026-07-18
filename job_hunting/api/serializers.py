@@ -1256,11 +1256,20 @@ class ScrapeSerializer(BaseSerializer):
 
     # Phase A — required fields on a `source_mode='extension-direct'`
     # capture payload. "Trust presence, iterate" is Doug's v1 rule (plan
-    # /Plans/PLAN Extension direct-POST when capture is complete): the
-    # gate is non-empty title + company + description. No confidence
-    # threshold, no LLM-side validator — we trust the user-rendered DOM
-    # and surface false-positives only if they show up in the wild.
-    _EXTENSION_DIRECT_REQUIRED_FIELDS = ("title", "company", "description")
+    # /Plans/PLAN Extension direct-POST when capture is complete). The
+    # ORIGINAL gate was non-empty title + company + description; CC-122
+    # relaxes it to `description` ONLY.
+    #
+    # Why the relax: for auth-walled pages (LinkedIn, Toptal) the
+    # per-host curated css_selectors miss, so the extension can capture
+    # the logged-in innerText but NOT resolve a clean title/company.
+    # The server can never re-scrape those pages (login wall), so the
+    # only viable publish path is to persist from the captured text —
+    # LLM-extracting title/company from it on the worker. Requiring
+    # title+company here would 400 exactly the case that most needs the
+    # extension-direct path. `description` (the captured innerText) stays
+    # required so an empty capture is still rejected as a useless shell.
+    _EXTENSION_DIRECT_REQUIRED_FIELDS = ("description",)
 
     def parse_payload(self, payload):
         """Validate the source_mode / captured_payload pair before persistence.
@@ -1272,8 +1281,10 @@ class ScrapeSerializer(BaseSerializer):
         field token without parsing prose:
 
         - ``source_mode='extension-direct'`` REQUIRES ``captured_payload``
-          to be a dict with non-empty string values for title, company,
-          description.
+          to be a dict with a non-empty string ``description`` (the
+          captured innerText). title/company are optional — when absent
+          the consumer LLM-extracts them from the captured text on the
+          worker (CC-122; auth-walled curated-miss case).
         - ``source_mode='browser'`` (the default) MUST NOT carry a
           ``captured_payload`` — surfaces an authorial confusion where a
           paste path leaks a stale field (same defensive shape the
