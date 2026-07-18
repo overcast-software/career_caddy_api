@@ -45,7 +45,10 @@ RUN useradd -m appuser && \
 # Copy configuration files
 COPY gunicorn.conf.py /app/gunicorn.conf.py
 COPY scripts/entrypoint.sh /app/scripts/entrypoint.sh
-RUN chmod +x /app/scripts/entrypoint.sh
+# Cloud Run qcluster health-port shim (CC-190/CC-199) — the worker service's
+# container command is /app/scripts/qcluster-web.sh (deploy worker.tf).
+COPY scripts/qcluster-web.sh scripts/qcluster_web.py /app/scripts/
+RUN chmod +x /app/scripts/entrypoint.sh /app/scripts/qcluster-web.sh
 
 USER appuser
 
