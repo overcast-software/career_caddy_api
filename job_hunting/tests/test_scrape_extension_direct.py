@@ -11,10 +11,13 @@ Three test classes:
 
 Why: the extension is the tangible piece for users logging applications.
 Phase B's scrape-graph fast path can't ship until this surface enforces
-the gate (non-empty title + company + description) the plan promises.
-The serializer contract is also the surface cc_auto's parallel Phase C
-content-script POSTs against — getting the rejection-message shape
-right here matters for the extension's UX.
+the gate the plan promises. CC-122 relaxed that gate from
+title+company+description to `description` ONLY — title/company are
+LLM-extracted from the captured innerText on the worker for auth-walled
+curated-miss pages (LinkedIn/Toptal). The serializer contract is also
+the surface cc_auto's parallel Phase C content-script POSTs against —
+getting the rejection-message shape right here matters for the
+extension's UX.
 """
 
 from unittest.mock import patch
@@ -194,69 +197,92 @@ class ScrapeSerializerExtensionDirectValidationTests(TestCase):
             ).exists()
         )
 
-    def test_extension_direct_missing_required_field_rejected(self):
-        # Each of title/company/description must be present. Loop them
-        # so the test is symmetric across the three required fields and
-        # surfaces the offending field in the error message.
-        for missing in ("title", "company", "description"):
+    def test_extension_direct_missing_description_rejected(self):
+        # CC-122 relaxed the gate to `description` ONLY (title/company are
+        # LLM-extracted from the captured text on the worker). A capture
+        # with NO description is still a useless shell — reject at 400 and
+        # confirm no row leaked.
+        payload = _well_formed_payload()
+        del payload["description"]
+        url = "https://example.com/jobs/extdirect-missing-description"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                url,
+                source_mode="extension-direct",
+                captured_payload=payload,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn(
+            "captured_payload.description",
+            resp.json()["errors"][0]["detail"],
+        )
+        self.assertFalse(
+            Scrape.objects.filter(url=url).exists(),
+            "row leaked despite missing description",
+        )
+
+    def test_extension_direct_missing_title_company_accepted(self):
+        # CC-122 — auth-walled curated-miss: title/company absent is NO
+        # LONGER a 400. The capture carries innerText (description) the
+        # server can't re-scrape (login wall), so the row is minted and
+        # the worker LLM-extracts title/company. Assert acceptance for
+        # both title-absent and company-absent shapes.
+        for missing in ("title", "company"):
             with self.subTest(missing=missing):
                 payload = _well_formed_payload()
                 del payload[missing]
-                url = (
-                    f"https://example.com/jobs/extdirect-missing-{missing}"
-                )
-                resp = self.client.post(
-                    "/api/v1/scrapes/",
-                    _post_body(
-                        url,
-                        source_mode="extension-direct",
-                        captured_payload=payload,
-                    ),
-                    format="json",
-                )
-                self.assertEqual(resp.status_code, 400, resp.content)
-                body = resp.json()
-                # Detail names the offending field — mirrors the email-
-                # forward pattern so the extension can branch on the
-                # token without parsing prose.
-                self.assertIn(
-                    f"captured_payload.{missing}",
-                    body["errors"][0]["detail"],
-                )
-                self.assertFalse(
-                    Scrape.objects.filter(url=url).exists(),
-                    f"row leaked despite {missing} rejection",
+                url = f"https://example.com/jobs/extdirect-nofield-{missing}"
+                with patch(
+                    "job_hunting.api.views.scrapes.async_task"
+                ) as mock_async:
+                    resp = self.client.post(
+                        "/api/v1/scrapes/",
+                        _post_body(
+                            url,
+                            source_mode="extension-direct",
+                            captured_payload=payload,
+                        ),
+                        format="json",
+                    )
+                self.assertEqual(resp.status_code, 201, resp.content)
+                scrape = Scrape.objects.get(url=url)
+                # No synchronous JobPost — the parse is enqueued.
+                self.assertIsNone(scrape.job_post_id)
+                self.assertEqual(scrape.status, "pending")
+                mock_async.assert_called_once()
+                # Enqueued the SAME worker path from-text uses.
+                self.assertEqual(
+                    mock_async.call_args.args[0],
+                    "job_hunting.lib.tasks.parse_scrape_job",
                 )
 
-    def test_extension_direct_empty_string_required_field_rejected(self):
-        # "Trust presence" is the plan's v1 rule — empty-string is NOT
-        # presence. An extension content-script that grabs the wrong
-        # selector and renders "" into a required field would otherwise
-        # silently produce a useless JP shell.
-        for empty_field in ("title", "company", "description"):
-            with self.subTest(empty_field=empty_field):
-                payload = _well_formed_payload(**{empty_field: "   "})
-                url = (
-                    f"https://example.com/jobs/extdirect-empty-{empty_field}"
-                )
-                resp = self.client.post(
-                    "/api/v1/scrapes/",
-                    _post_body(
-                        url,
-                        source_mode="extension-direct",
-                        captured_payload=payload,
-                    ),
-                    format="json",
-                )
-                self.assertEqual(resp.status_code, 400, resp.content)
-                self.assertIn(
-                    f"captured_payload.{empty_field}",
-                    resp.json()["errors"][0]["detail"],
-                )
-                self.assertFalse(
-                    Scrape.objects.filter(url=url).exists(),
-                    f"row leaked despite empty {empty_field}",
-                )
+    def test_extension_direct_empty_string_description_rejected(self):
+        # "Trust presence" — empty-string is NOT presence. An extension
+        # content-script that renders "" into the description would
+        # otherwise mint a shell the worker can't extract anything from.
+        payload = _well_formed_payload(description="   ")
+        url = "https://example.com/jobs/extdirect-empty-description"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                url,
+                source_mode="extension-direct",
+                captured_payload=payload,
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn(
+            "captured_payload.description",
+            resp.json()["errors"][0]["detail"],
+        )
+        self.assertFalse(
+            Scrape.objects.filter(url=url).exists(),
+            "row leaked despite empty description",
+        )
 
     def test_browser_mode_with_payload_rejected(self):
         # Browser-mode writes that carry a payload are almost certainly
@@ -483,6 +509,103 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         self.assertEqual(jp.title, "Data Engineer")
         self.assertFalse(jp.description)
         self.assertNotIn("page has loaded", jp.description or "")
+
+    def test_extension_direct_description_only_enqueues_async_parse(self):
+        """CC-122 — auth-walled curated-miss (LinkedIn/Toptal): the
+        payload carries only the captured innerText (top-level
+        description), no resolvable title/company. Instead of failing or
+        enqueuing an impossible browser re-scrape, the consumer seeds
+        job_content from the captured text and enqueues the SAME async
+        worker path /scrapes/from-text/ uses (parse_scrape_job), leaving
+        the scrape ``pending`` for the client to poll to terminal.
+        """
+        link = "https://www.linkedin.com/jobs/view/4437716572/"
+        captured_innertext = (
+            "Senior Software Engineer at BigCorp. We are hiring engineers "
+            "to build distributed systems. Apply now. " * 10
+        )
+        # No title/company, no structured_prefill — exactly the curated-
+        # miss shape the extension sends for an auth-walled page.
+        payload = {"description": captured_innertext}
+
+        with patch("job_hunting.api.views.scrapes.async_task") as mock_async:
+            resp = self.client.post(
+                "/api/v1/scrapes/",
+                _post_body(
+                    link,
+                    source_mode="extension-direct",
+                    captured_payload=payload,
+                ),
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        # Never failed, never a browser hold the runner would claim.
+        self.assertEqual(scrape.status, "pending")
+        self.assertEqual(scrape.source_mode, "extension-direct")
+        # job_content seeded from the captured innerText so the worker
+        # LLM-extractor has text to chew on.
+        self.assertIn("Senior Software Engineer", scrape.job_content)
+        # No synchronous JobPost — it materializes on the worker.
+        self.assertIsNone(scrape.job_post_id)
+        self.assertEqual(JobPost.objects.count(), 0)
+
+        # Enqueued the from-text worker path, not a browser re-scrape.
+        mock_async.assert_called_once()
+        self.assertEqual(
+            mock_async.call_args.args[0],
+            "job_hunting.lib.tasks.parse_scrape_job",
+        )
+        self.assertEqual(mock_async.call_args.args[1], scrape.id)
+
+    def test_extension_direct_description_only_worker_persists_jobpost(self):
+        """Integration: run the enqueued worker leg and prove it persists
+        a JobPost from the seeded job_content — the curated-miss capture
+        actually becomes a post (title/company LLM-extracted from text).
+        """
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        link = "https://talent.toptal.com/portal/job/VjEtSm9iLTUwMTMzOQ"
+        captured_innertext = (
+            "Staff Backend Engineer\nToptal\nRemote\n"
+            "Build the platform. " * 10
+        )
+        payload = {"description": captured_innertext}
+
+        with patch("job_hunting.api.views.scrapes.async_task"):
+            resp = self.client.post(
+                "/api/v1/scrapes/",
+                _post_body(
+                    link,
+                    source_mode="extension-direct",
+                    captured_payload=payload,
+                ),
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+
+        # Drive the worker leg with a mocked LLM extraction so the test
+        # is deterministic and offline. analyze_with_ai is the single LLM
+        # seam parse_scrape funnels through.
+        with patch.object(
+            JobPostExtractor, "analyze_with_ai",
+            return_value=ParsedJobData(
+                title="Staff Backend Engineer",
+                company_name="Toptal",
+                description="Build the platform. " * 10,
+                location="Remote",
+                link=link,
+            ),
+        ):
+            parse_scrape_job(scrape.id, user_id=self.user.id)
+
+        scrape.refresh_from_db()
+        self.assertIsNotNone(scrape.job_post_id)
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(jp.title, "Staff Backend Engineer")
+        self.assertEqual(jp.company.name, "Toptal")
 
     def test_browser_mode_keeps_409_dedupe_gate(self):
         """Regression guard — the dedupe-bypass is narrowly scoped to
