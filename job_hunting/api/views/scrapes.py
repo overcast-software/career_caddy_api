@@ -658,9 +658,13 @@ class ScrapeViewSet(BaseViewSet):
           leaves salary None to avoid the per-unit-pay annualization class
           of bug).
 
-        Returns None when title or company can't be resolved — the
-        validator already guarantees the top-level trio, so this is a
-        defensive guard rather than an expected path.
+        Returns None when title or company can't be resolved (a Tier 0
+        css miss). The CALLER treats that None as "Tier 0 failed —
+        escalate to the Tier 1 LLM parse", so it is an EXPECTED path, not
+        a defensive guard. (Pre-CC-122 the validator required the full
+        title/company/description trio, which made a None here defensive;
+        it now requires only ``description``, so a None is routine and is
+        the trigger for Tier 1.)
         """
         from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
 
@@ -729,18 +733,22 @@ class ScrapeViewSet(BaseViewSet):
         placeholder rejection process_evaluation already set
         ``status='failed'`` + ``failure_reason``; we just log it.
 
-        CC-122 — description-only capture: when the payload carries the
-        captured innerText but no resolvable title/company (auth-walled
-        curated-miss: LinkedIn / Toptal, where the per-host selectors
-        miss so structured_prefill is empty), we do NOT fail and do NOT
-        enqueue a browser re-scrape (the page is behind a login the
-        server can't pass). Instead we seed ``scrape.job_content`` from
-        the captured text and enqueue the SAME async worker path
-        ``/scrapes/from-text/`` uses (``parse_scrape_job`` on the
-        django-q2 qcluster), so the LLM extracts title/company from the
-        text off the request thread and persists the JobPost. The scrape
-        is left ``pending`` (not ``failed``, not ``hold``); both clients
-        poll to terminal, so the JobPost materializes on a later poll.
+        CC-122 — Tier 0 -> Tier 1 escalation: when the curated per-host
+        css_selectors miss so ``structured_prefill`` carries no clean
+        title/company, ``_parsed_job_data_from_payload`` returns None
+        (Tier 0 failed). We do NOT give up and do NOT enqueue a browser
+        re-scrape — instead we seed ``scrape.job_content`` from the
+        captured innerText (which DOES contain the title+company) and
+        enqueue the SAME async worker path ``/scrapes/from-text/`` uses
+        (``parse_scrape_job`` on the django-q2 qcluster), so the LLM
+        recovers title/company from the text off the request thread
+        (Tier 1 — "make lemonade"). If Tier 1 recovers them,
+        ``process_evaluation`` persists the JobPost; if it CANNOT,
+        ``process_evaluation`` flips the scrape to ``failed`` — a
+        description-only JobPost is never saved. The scrape is left
+        ``pending`` here (not ``failed``, not ``hold``); both clients poll
+        to terminal, so the JobPost (or the failure) surfaces on a later
+        poll.
         """
         from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
         from job_hunting.lib.scraper import _log_scrape_status
@@ -780,26 +788,33 @@ class ScrapeViewSet(BaseViewSet):
             )
 
     def _enqueue_extension_direct_llm_parse(self, scrape, user, *, force=False):
-        """CC-122 — description-only extension-direct: enqueue the async
-        LLM parse instead of failing.
+        """CC-122 — Tier 0 miss on an extension-direct capture: escalate
+        to the async Tier 1 LLM parse instead of giving up here.
 
         Reached when ``_parsed_job_data_from_payload`` can't resolve a
-        title/company from the captured_payload (auth-walled curated-miss:
-        the per-host css_selectors missed so structured_prefill is empty,
-        but the extension DID capture the logged-in page's innerText). A
-        browser re-scrape is structurally impossible (login wall), so the
-        only publish path is to LLM-extract from the captured text.
+        title/company from ``captured_payload`` (the per-host css_selectors
+        missed so ``structured_prefill`` is empty — Tier 0 failed), but the
+        extension DID capture the page's innerText, which contains the
+        title+company. A browser re-scrape is not the answer (auth-walled
+        pages can't be re-fetched, and the text is already in hand), so we
+        recover title/company by running the LLM over the captured text
+        (Tier 1 — "make lemonade").
 
         Seeds ``scrape.job_content`` from the captured innerText and
         enqueues ``parse_scrape_job`` — the exact same worker path
         ``POST /scrapes/from-text/`` uses (django-q2 qcluster; the parse
         runs off the request thread, so no inline-LLM OOM on the api
-        cgroup). The scrape is left ``pending``; both clients poll to
-        terminal and the JobPost materializes on a later poll once the
-        worker drains the queue.
+        cgroup). The scrape is left ``pending`` here; both clients poll to
+        terminal and the outcome surfaces on a later poll once the worker
+        drains the queue.
 
-        Never flips the scrape to ``failed`` (that dropped the capture on
-        the floor) and never enqueues a ``browser`` re-scrape.
+        This never enqueues a ``browser`` re-scrape and never drops the
+        capture on the floor. It does NOT itself decide success: the
+        worker's ``process_evaluation`` persists the JobPost only if Tier 1
+        recovers a non-empty title+company, and flips the scrape to
+        ``failed`` otherwise — a description-only JobPost is never saved.
+        (The empty-captured-text branch below is the one hard failure
+        raised here, since a parse over empty ``job_content`` would no-op.)
         """
         from job_hunting.lib.scraper import _log_scrape_status
 

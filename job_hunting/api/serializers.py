@@ -1254,21 +1254,34 @@ class ScrapeSerializer(BaseSerializer):
     }
     relationship_fks = {"job-post": "job_post_id", "company": "company_id"}
 
-    # Phase A — required fields on a `source_mode='extension-direct'`
-    # capture payload. "Trust presence, iterate" is Doug's v1 rule (plan
-    # /Plans/PLAN Extension direct-POST when capture is complete). The
-    # ORIGINAL gate was non-empty title + company + description; CC-122
-    # relaxes it to `description` ONLY.
+    # Ingest gate for a `source_mode='extension-direct'` capture payload.
+    # Only `description` (the captured innerText) is required here — NOT
+    # title/company. This is the INPUT contract for the Tier 0 -> Tier 1
+    # escalation; it is NOT permission to persist a description-only
+    # JobPost.
     #
-    # Why the relax: for auth-walled pages (LinkedIn, Toptal) the
-    # per-host curated css_selectors miss, so the extension can capture
-    # the logged-in innerText but NOT resolve a clean title/company.
-    # The server can never re-scrape those pages (login wall), so the
-    # only viable publish path is to persist from the captured text —
-    # LLM-extracting title/company from it on the worker. Requiring
-    # title+company here would 400 exactly the case that most needs the
-    # extension-direct path. `description` (the captured innerText) stays
-    # required so an empty capture is still rejected as a useless shell.
+    # Rationale (Doug, CC-122): the captured innerText already CONTAINS
+    # the title + company. When the curated per-host css_selectors miss
+    # (Tier 0 fails), the extension still captures the full innerText, and
+    # the worker LLM-extracts title/company FROM that text (Tier 1 — "take
+    # the data and make lemonade"). Requiring title+company at ingest
+    # would 400 the exact curated-miss case Tier 1 is meant to rescue, so
+    # we accept the description-only payload as the raw material for
+    # extraction. (The earlier "auth-walled pages only expose a
+    # description" framing was wrong: an auth-walled page exposes no
+    # description either, and the innerText carries title+company — the
+    # only genuinely-hidden field is Toptal's company, supplied
+    # out-of-band.)
+    #
+    # A description-only payload is the *input* to Tier 1, never a
+    # persistable *output*. JobPostExtractor.process_evaluation refuses to
+    # mint a JobPost whose title or company is empty/placeholder (it flips
+    # the scrape to `failed` instead), and ParsedJobData itself requires
+    # non-empty title + company_name. So there is no path from a
+    # description-only capture to a description-only JobPost: if Tier 1
+    # cannot recover title+company the scrape FAILS rather than saving a
+    # shell. `description` stays required so an empty capture is rejected
+    # up front as useless.
     _EXTENSION_DIRECT_REQUIRED_FIELDS = ("description",)
 
     def parse_payload(self, payload):
