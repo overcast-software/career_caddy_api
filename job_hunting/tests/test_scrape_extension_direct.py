@@ -607,6 +607,62 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         self.assertEqual(jp.title, "Staff Backend Engineer")
         self.assertEqual(jp.company.name, "Toptal")
 
+    def test_extension_direct_description_only_shell_is_never_persisted(self):
+        """CC-122 invariant (Doug, 2026-07-19): a description-only capture
+        is the INPUT to Tier 1, NEVER a persistable description-only
+        JobPost. If the Tier 1 LLM cannot recover a real title/company
+        from the captured text (it comes back with placeholders because
+        the text was chrome/noise), process_evaluation must FAIL the
+        scrape and create NO JobPost — "make lemonade" or fail, but never
+        save a title/company-less shell.
+
+        This locks the behavior against a future change that reads the
+        (now-corrected) description-only relaxation as license to persist
+        a bare description.
+        """
+        from job_hunting.lib.tasks import parse_scrape_job
+
+        link = "https://www.linkedin.com/jobs/view/4437716572/"
+        # Captured innerText that is UI chrome with no recoverable job
+        # identity — the pathological curated-miss case.
+        captured_innertext = "Apply now. Share. Save. Report this job. " * 20
+        payload = {"description": captured_innertext}
+
+        with patch("job_hunting.api.views.scrapes.async_task"):
+            resp = self.client.post(
+                "/api/v1/scrapes/",
+                _post_body(
+                    link,
+                    source_mode="extension-direct",
+                    captured_payload=payload,
+                ),
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+
+        # Tier 1 LLM returns placeholder title/company — ParsedJobData
+        # requires non-empty strings, so "no identity" surfaces as
+        # placeholders, which process_evaluation is charged with rejecting.
+        with patch.object(
+            JobPostExtractor, "analyze_with_ai",
+            return_value=ParsedJobData(
+                title="Unknown",
+                company_name="N/A",
+                description="Apply now. Share. Save. " * 5,
+                link=link,
+            ),
+        ):
+            parse_scrape_job(scrape.id, user_id=self.user.id)
+
+        scrape.refresh_from_db()
+        # The scrape FAILS; no description-only shell is ever created.
+        self.assertEqual(scrape.status, "failed")
+        self.assertIsNone(scrape.job_post_id)
+        self.assertEqual(JobPost.objects.count(), 0)
+        # The placeholder-rejection reason survives to the operator surface.
+        self.assertIn("placeholder", (scrape.failure_reason or "").lower())
+
     def test_browser_mode_keeps_409_dedupe_gate(self):
         """Regression guard — the dedupe-bypass is narrowly scoped to
         source_mode='extension-direct'. A vanilla browser-mode POST
