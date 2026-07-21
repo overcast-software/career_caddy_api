@@ -105,3 +105,67 @@ def cover_letter_task_handler(request):
 
     result = cover_letter_job(cover_letter_id, injected_prompt=injected_prompt)
     return JsonResponse(result or {"status": "completed"}, status=200)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def run_job_task_handler(request):
+    """Generic Cloud Tasks handler — run any registered job kind (CC-214).
+
+    Body: ``{"kind": "<kind>", "payload": {...}}``. Dispatches ``kind`` through
+    the shared registry (``job_hunting.lib.job_kinds``) to the matching
+    ``lib/tasks.py`` worker fn, calling it as ``fn(**payload)`` synchronously —
+    the SAME fn the self-host ``run_jobs`` runner calls, so the two transports
+    can't drift.
+
+    Non-2xx => Cloud Tasks retries, so this must be safe to run twice. The
+    worker fns already re-fetch by pk + ``.update()`` in place (idempotent by
+    row identity), the same property the cover-letter path relies on.
+
+    Response codes:
+      - 403 if the defence-in-depth Cloud Tasks header guard trips
+      - 400 for an unparseable body / missing kind (a malformed task never
+        becomes well-formed, so a retry is pointless)
+      - 200 for an UNKNOWN kind — terminal: an unregistered kind will never
+        become registered by retrying, so 200 avoids a retry storm (logged so
+        an operator notices the mismatch)
+      - 200 once the worker returns, INCLUDING its own terminal
+        ``{"status": "missing"|"failed"}`` verdicts (already-recorded
+        outcomes must NOT trigger a retry). Only an exception raised inside
+        the worker (e.g. a transient LLM fault) propagates → 500 → retry.
+    """
+    guard = _reject_if_not_from_cloud_tasks(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = json.loads(request.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    if not isinstance(body, dict):
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    kind = body.get("kind")
+    if not kind:
+        return JsonResponse({"error": "kind required"}, status=400)
+
+    payload = body.get("payload") or {}
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "payload must be an object"}, status=400)
+
+    from job_hunting.lib.job_kinds import UnknownKind, resolve_kind
+
+    try:
+        worker = resolve_kind(kind)
+    except UnknownKind:
+        # Terminal — an unregistered kind can't self-heal on retry. Log so a
+        # producer/registry mismatch is visible, but 200 to stop the retries.
+        logger.error("run-job handler: unknown kind %r (no retry)", kind)
+        return JsonResponse({"status": "unknown_kind", "kind": kind}, status=200)
+
+    # Worker owns its own error handling + durable row updates; it only
+    # re-raises on a retryable fault (which propagates to a 500 → Cloud Tasks
+    # retry). Terminal missing/failed verdicts return as 200 below.
+    result = worker(**payload)
+    return JsonResponse(result or {"status": "completed"}, status=200)

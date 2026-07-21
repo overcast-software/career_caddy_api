@@ -35,6 +35,12 @@ COVER_LETTER_TASK = "job_hunting.lib.tasks.cover_letter_job"
 # (CC-169) and the urls.py route exactly — do not rename.
 COVER_LETTER_HANDLER_PATH = "/tasks/cover-letter/"
 
+# CC-214 — the generic handler path. The unified producer ``enqueue(kind,
+# **payload)`` POSTs {kind, payload} here; the generic handler dispatches by
+# kind through the shared registry (job_hunting.lib.job_kinds). MUST match
+# the urls.py route + terraform exactly.
+RUN_JOB_HANDLER_PATH = "/tasks/run-job/"
+
 
 def cloud_tasks_enabled() -> bool:
     """True when Cloud Tasks dispatch is configured + switched on."""
@@ -54,13 +60,18 @@ def _queue_path(client) -> str:
     return client.queue_path(project, location, queue_id)
 
 
-def _build_http_task(handler_path: str, payload: dict) -> dict:
+def _build_http_task(handler_path: str, payload: dict, *, schedule_time=None) -> dict:
     """Build the Cloud Tasks ``Task`` dict for an authenticated HTTP POST.
 
     The task POSTs raw JSON to ``${CC_TASKS_HANDLER_URL}${handler_path}`` and
     carries an OIDC token minted for ``CC_TASKS_INVOKER_SA`` so the handler's
     Cloud Run ``run.invoker`` IAM binding accepts it. The audience is the
     handler base URL (Cloud Run expects the service URL as the OIDC audience).
+
+    ``schedule_time`` (a ``datetime``, optional) sets the Cloud Tasks
+    ``schedule_time`` so the task isn't delivered until then — the GCP
+    equivalent of the self-host ``Job.run_after`` gate (CC-214). Omitted
+    (None) → deliver immediately, preserving the cover-letter behaviour.
     """
     base = (getattr(settings, "CC_TASKS_HANDLER_URL", "") or "").rstrip("/")
     invoker_sa = getattr(settings, "CC_TASKS_INVOKER_SA", "") or ""
@@ -75,7 +86,7 @@ def _build_http_task(handler_path: str, payload: dict) -> dict:
             "CC_TASKS_ENABLED is true"
         )
     url = f"{base}{handler_path}"
-    return {
+    task: dict = {
         "http_request": {
             "http_method": "POST",
             "url": url,
@@ -87,9 +98,12 @@ def _build_http_task(handler_path: str, payload: dict) -> dict:
             },
         }
     }
+    if schedule_time is not None:
+        task["schedule_time"] = schedule_time
+    return task
 
 
-def _create_task(handler_path: str, payload: dict):
+def _create_task(handler_path: str, payload: dict, *, schedule_time=None):
     """Create a Cloud Tasks HTTP task on the configured queue.
 
     Imported lazily so ``google-cloud-tasks`` is only required in GCP
@@ -99,7 +113,7 @@ def _create_task(handler_path: str, payload: dict):
 
     client = tasks_v2.CloudTasksClient()
     parent = _queue_path(client)
-    task = _build_http_task(handler_path, payload)
+    task = _build_http_task(handler_path, payload, schedule_time=schedule_time)
     return client.create_task(request={"parent": parent, "task": task})
 
 
@@ -136,4 +150,51 @@ def enqueue_cover_letter(cover_letter_id, *, injected_prompt=None) -> None:
         COVER_LETTER_TASK,
         cover_letter_id,
         injected_prompt=injected_prompt,
+    )
+
+
+def enqueue(kind: str, *, run_after=None, max_attempts: int = 1, **payload) -> None:
+    """Unified async producer — the single ``enqueue(kind, **payload)`` API.
+
+    ``CC_TASKS_ENABLED`` selects the transport, one or the other per
+    deployment — never both, never a permanent GCP worker (CC-214):
+
+    - **ON (GCP)**: build a Cloud Task → generic ``/tasks/run-job/`` handler,
+      body ``{"kind": kind, "payload": payload}``. Scale-to-zero; Cloud Tasks'
+      own managed retry is the safety net — there is NO Postgres fallback
+      drainer on GCP (writing a Job row here would strand it, since GCP runs
+      no Job runner). If task creation raises, we re-raise so the caller sees
+      the failure rather than silently dropping the job.
+    - **OFF (self-host / local)**: write a ``Job`` row for the ``run_jobs``
+      pull runner to claim + dispatch by kind.
+
+    ``run_after`` (a datetime) delays the job: Cloud Tasks ``scheduleTime`` on
+    GCP, the ``Job.run_after`` gate on self-host. ``max_attempts`` is honored
+    by the self-host lease sweep (GCP retry is queue-configured).
+
+    ``payload`` must be PKs + small scalars only (never blobs) — same
+    convention as the django-q2 call sites this replaces.
+    """
+    # Validate the kind early so a bad call fails at the producer, not deep in
+    # a handler/runner. Imported here (not module top) to avoid a Django
+    # app-loading import cycle.
+    from job_hunting.lib.job_kinds import KIND_REGISTRY
+
+    if kind not in KIND_REGISTRY:
+        raise ValueError(f"enqueue: unknown job kind {kind!r}")
+
+    if cloud_tasks_enabled():
+        body = {"kind": kind, "payload": payload}
+        # No try/except fallback here: GCP has no Job runner, so a Job row
+        # would strand. Let a create_task fault surface to the caller.
+        _create_task(RUN_JOB_HANDLER_PATH, body, schedule_time=run_after)
+        return
+
+    from job_hunting.models import Job
+
+    Job.objects.create(
+        kind=kind,
+        payload=payload,
+        run_after=run_after,
+        max_attempts=max_attempts,
     )
