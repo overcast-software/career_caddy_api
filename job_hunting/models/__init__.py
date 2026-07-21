@@ -47,3 +47,4 @@ from .duplicate_annotation import DuplicateAnnotation as DuplicateAnnotation
 from .actor import Actor as Actor
 from .federation_follower import FederationFollower as FederationFollower
 from .federation_activity import FederationActivity as FederationActivity
+from .job import Job as Job

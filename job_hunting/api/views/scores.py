@@ -1,7 +1,6 @@
 import logging
 import math
 
-from django_q.tasks import async_task
 from rest_framework import status
 from rest_framework.response import Response
 from drf_spectacular.utils import (
@@ -14,6 +13,7 @@ from .base import BaseViewSet
 from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import ScoreSerializer
 from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.cloud_tasks import enqueue
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import CareerData
@@ -34,9 +34,11 @@ def _auto_score_job_post(job_post_id: int, user_id: int) -> bool:
     Never raises — callers wrap this in try/except anyway but this keeps the
     contract clean.
 
-    The actual scoring work runs in the qcluster worker via
-    job_hunting.lib.tasks.score_job. The view's job is row bookkeeping +
-    enqueue; the task re-fetches and runs the LLM.
+    The actual scoring work runs via the unified async dispatcher
+    (enqueue('score', ...) -> Cloud Tasks on GCP, or a Job row drained by
+    manage.py run_jobs on self-host) calling job_hunting.lib.tasks.score_job.
+    The view's job is row bookkeeping + enqueue; the task re-fetches and runs
+    the LLM.
     """
     client = get_client(required=False)
     if client is None:
@@ -68,11 +70,7 @@ def _auto_score_job_post(job_post_id: int, user_id: int) -> bool:
             status="pending",
         )
 
-    async_task(
-        "job_hunting.lib.tasks.score_job",
-        my_score.id,
-        trigger="auto_score",
-    )
+    enqueue("score", score_id=my_score.id, trigger="auto_score")
     return True
 
 
@@ -221,9 +219,9 @@ class ScoreViewSet(BaseViewSet):
                 status="pending",
             )
 
-        async_task(
-            "job_hunting.lib.tasks.score_job",
-            myScore.id,
+        enqueue(
+            "score",
+            score_id=myScore.id,
             injected_prompt=injected_prompt,
             trigger="score",
         )
