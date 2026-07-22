@@ -27,6 +27,8 @@ KIND_REGISTRY: dict[str, str] = {
     "score": "job_hunting.lib.tasks.score_job",
     # CC-202 — summary generation (summaries.py SummaryViewSet.create).
     "summary": "job_hunting.lib.tasks.summary_job",
+    # CC-203 — question/answer generation (questions.py answer-create path).
+    "answer": "job_hunting.lib.tasks.answer_job",
 }
 
 
