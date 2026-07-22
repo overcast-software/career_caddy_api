@@ -25,6 +25,15 @@ from importlib import import_module
 KIND_REGISTRY: dict[str, str] = {
     # CC-214 validation slice: the first migrated path.
     "score": "job_hunting.lib.tasks.score_job",
+    # CC-206 — ActivityPub outbound dispatch (fire-now + run_after delay). The
+    # retry state machine (FederationActivity.retry_count/next_attempt_at +
+    # sweep_pending_dispatches, migrated to the GCP clock by CC-213) is
+    # unchanged; this is only the enqueue seam.
+    "federation_dispatch": "job_hunting.lib.federation_dispatch.dispatch_one",
+    # CC-206 — ActivityPub inbound verify+process. The raw request body rides
+    # the JSON payload base64-encoded (AP bodies are small); the task wrapper
+    # base64-decodes before calling process_inbound_activity.
+    "federation_inbox": "job_hunting.lib.federation_inbox.run_inbound_activity_task",
 }
 
 
