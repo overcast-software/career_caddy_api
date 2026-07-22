@@ -99,7 +99,12 @@ class Command(BaseCommand):
 
     def _run_one(self, job) -> None:
         """Dispatch one claimed Job by kind and record the terminal status."""
-        from job_hunting.lib.job_kinds import UnknownKind, resolve_kind
+        from job_hunting.lib.job_kinds import (
+            NON_COMPLETED_VERDICTS,
+            UnknownKind,
+            job_ref as _job_ref,
+            resolve_kind,
+        )
         from job_hunting.models import Job
 
         try:
@@ -114,18 +119,56 @@ class Command(BaseCommand):
             return
 
         payload = job.payload if isinstance(job.payload, dict) else {}
+        job_ref = _job_ref(payload)
+
+        # Structured processing logs so the operator can SEE jobs being
+        # processed (parity with the Cloud Tasks /tasks/run-job/ handler).
+        logger.info("run_jobs: START job=%s kind=%s %s", job.id, job.kind, job_ref)
+        started = time.monotonic()
         try:
-            worker(**payload)
+            result = worker(**payload)
         except Exception:
+            elapsed_ms = (time.monotonic() - started) * 1000
             # The worker already recorded its own durable failure row (Score
             # status='failed', etc.); it re-raises only on a retryable fault.
             # Mark the Job failed + release the claim so the sweep can requeue
             # it if attempts remain.
-            logger.exception("run_jobs: job=%s kind=%s raised", job.id, job.kind)
+            logger.exception(
+                "run_jobs: FAILED job=%s kind=%s %s duration_ms=%.0f — worker raised",
+                job.id,
+                job.kind,
+                job_ref,
+                elapsed_ms,
+            )
             Job.objects.filter(pk=job.id).update(
                 status="failed", claimed_at=None, claimed_by=None
             )
             return
+
+        elapsed_ms = (time.monotonic() - started) * 1000
+        verdict = result.get("status") if isinstance(result, dict) else None
+        # A non-completed terminal verdict (missing/failed/…) is not a Job
+        # failure — the worker chose to no-op — but it means no result row was
+        # produced, so surface it at WARNING rather than leaving it silent.
+        if verdict in NON_COMPLETED_VERDICTS:
+            logger.warning(
+                "run_jobs: END job=%s kind=%s %s duration_ms=%.0f verdict=%s "
+                "(terminal — no result row produced)",
+                job.id,
+                job.kind,
+                job_ref,
+                elapsed_ms,
+                verdict,
+            )
+        else:
+            logger.info(
+                "run_jobs: END job=%s kind=%s %s duration_ms=%.0f verdict=%s",
+                job.id,
+                job.kind,
+                job_ref,
+                elapsed_ms,
+                verdict or "completed",
+            )
 
         Job.objects.filter(pk=job.id).update(
             status="completed",
