@@ -29,6 +29,8 @@ KIND_REGISTRY: dict[str, str] = {
     "summary": "job_hunting.lib.tasks.summary_job",
     # CC-203 — question/answer generation (questions.py answer-create path).
     "answer": "job_hunting.lib.tasks.answer_job",
+    # CC-205 — JobApplication match (jobs.py JA match-trigger create path).
+    "job_application_match": "job_hunting.lib.tasks.job_application_match_job",
 }
 
 

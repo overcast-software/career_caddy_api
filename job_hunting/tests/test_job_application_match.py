@@ -12,9 +12,9 @@ Two surfaces:
      candidate pre-fetch, one LLM call, choose-from-list guard, zero-candidate +
      failure paths, and job_post backfill on a pick.
 
-Enqueue idiom mirrors CC-122 (test_scrape_from_text): patch
-``jobs.async_task`` and assert the dotted target + args, since
-``Q_CLUSTER['sync']`` is NOT on globally under TESTING. The LLM seam is the
+Enqueue idiom (CC-205): patch ``jobs.enqueue`` and assert the unified
+producer seam — ``enqueue('job_application_match', application_id=<ja>)`` —
+instead of the retired ``async_task(dotted_path, ja.id)``. The LLM seam is the
 same as the DescriptionArbiter tests: patch ``JobMatcher`` and return a
 ``MatchDecision``.
 """
@@ -36,7 +36,10 @@ from job_hunting.lib.parsers.job_matcher import MatchDecision
 
 User = get_user_model()
 
-MATCH_TASK = "job_hunting.lib.tasks.job_application_match_job"
+# CC-205: the JA-match path now dispatches through the unified async producer
+# enqueue('job_application_match', application_id=<ja NanoID>) instead of
+# async_task(dotted_path, ja.id). Tests assert that seam.
+MATCH_KIND = "job_application_match"
 
 
 class TestMatchTriggerGate(TestCase):
@@ -71,7 +74,7 @@ class TestMatchTriggerGate(TestCase):
         resp = self._post()
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_staff_is_202(self, mock_async):
         self.client.force_authenticate(user=self.staff)
         resp = self._post()
@@ -87,7 +90,7 @@ class TestMatchTriggerCreate(TestCase):
         )
         self.client.force_authenticate(user=self.staff)
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_happy_path_enqueues_and_returns_pending(self, mock_async):
         resp = self.client.post(
             "/api/v1/job-applications/",
@@ -119,10 +122,12 @@ class TestMatchTriggerCreate(TestCase):
 
         mock_async.assert_called_once()
         args, kwargs = mock_async.call_args
-        self.assertEqual(args[0], MATCH_TASK)
-        self.assertEqual(args[1], ja.id)
+        # enqueue('job_application_match', application_id=<ja NanoID string>)
+        self.assertEqual(args[0], MATCH_KIND)
+        self.assertEqual(kwargs["application_id"], ja.id)
+        self.assertIsInstance(kwargs["application_id"], str)
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_jsonapi_envelope_accepted(self, mock_async):
         resp = self.client.post(
             "/api/v1/job-applications/",
@@ -140,7 +145,7 @@ class TestMatchTriggerCreate(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         mock_async.assert_called_once()
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_missing_tracking_url_is_400_no_enqueue(self, mock_async):
         resp = self.client.post(
             "/api/v1/job-applications/",
@@ -150,7 +155,7 @@ class TestMatchTriggerCreate(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         mock_async.assert_not_called()
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_invalid_tracking_url_is_400_no_enqueue(self, mock_async):
         resp = self.client.post(
             "/api/v1/job-applications/",
@@ -163,7 +168,7 @@ class TestMatchTriggerCreate(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         mock_async.assert_not_called()
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_text_excerpt_truncated_at_write(self, mock_async):
         long_text = "x" * (MATCH_TEXT_EXCERPT_MAX_LEN + 500)
         resp = self.client.post(
@@ -180,7 +185,7 @@ class TestMatchTriggerCreate(TestCase):
             len(ja.match_context["text_excerpt"]), MATCH_TEXT_EXCERPT_MAX_LEN
         )
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_bad_referrer_dropped_not_rejected(self, mock_async):
         resp = self.client.post(
             "/api/v1/job-applications/",
@@ -194,7 +199,7 @@ class TestMatchTriggerCreate(TestCase):
         ja = JobApplication.objects.get(pk=resp.json()["data"]["id"])
         self.assertEqual(ja.match_context["referrer"], "")
 
-    @patch("job_hunting.api.views.jobs.async_task")
+    @patch("job_hunting.api.views.jobs.enqueue")
     def test_normal_create_unaffected(self, mock_async):
         # A JA create with NO match_context is the ordinary path: 201, no
         # gating (staff not required), no enqueue, match_context stays null.
