@@ -30,6 +30,7 @@ from job_hunting.api.events import events_stream, events_token
 from job_hunting.api.views.tasks_handlers import (
     cover_letter_task_handler,
     run_job_task_handler,
+    run_scheduled_task_handler,
 )
 from job_hunting.api.views.federation import (
     actor_followers,
@@ -361,6 +362,18 @@ urlpatterns = [
         r"^tasks/run-job$",
         run_job_task_handler,
         name="tasks-run-job-noslash",
+    ),
+    # CC-213 — generic recurring-sweep handler; Cloud Scheduler POSTs
+    # {"name": "<sweep>"} here on cron. Path MUST match scheduler.tf exactly.
+    path(
+        "tasks/run-scheduled/",
+        run_scheduled_task_handler,
+        name="tasks-run-scheduled",
+    ),
+    re_path(
+        r"^tasks/run-scheduled$",
+        run_scheduled_task_handler,
+        name="tasks-run-scheduled-noslash",
     ),
     path("api/v1/chat/", chat_proxy, name="chat"),
     # SSE — Phase 2 of Plans/Push status updates. Issue token, then stream.
