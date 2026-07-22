@@ -25,6 +25,8 @@ from importlib import import_module
 KIND_REGISTRY: dict[str, str] = {
     # CC-214 validation slice: the first migrated path.
     "score": "job_hunting.lib.tasks.score_job",
+    # CC-202 — summary generation (summaries.py SummaryViewSet.create).
+    "summary": "job_hunting.lib.tasks.summary_job",
 }
 
 
