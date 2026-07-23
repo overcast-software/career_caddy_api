@@ -184,21 +184,79 @@ def run_job_task_handler(request):
     if not isinstance(payload, dict):
         return JsonResponse({"error": "payload must be an object"}, status=400)
 
-    from job_hunting.lib.job_kinds import UnknownKind, resolve_kind
+    from job_hunting.lib.job_kinds import (
+        NON_COMPLETED_VERDICTS,
+        UnknownKind,
+        job_ref,
+        resolve_kind,
+    )
+
+    ref = job_ref(payload)
 
     try:
         worker = resolve_kind(kind)
     except UnknownKind:
         # Terminal — an unregistered kind can't self-heal on retry. Log so a
         # producer/registry mismatch is visible, but 200 to stop the retries.
-        logger.error("run-job handler: unknown kind %r (no retry)", kind)
+        logger.error(
+            "run-job: UNKNOWN kind=%r %s — no worker registered (no retry)",
+            kind,
+            ref,
+        )
         return JsonResponse({"status": "unknown_kind", "kind": kind}, status=200)
+
+    # Structured processing logs (CC-214 follow-up): the generic handler was a
+    # total observability blackout — a job that terminated without doing its
+    # work returned a clean 200 with NO app-level log line, so a broken async
+    # path was invisible in Cloud Logging. We now log START (kind + job ids),
+    # END (verdict + duration), and the full traceback on an uncaught fault.
+    logger.info("run-job: START kind=%s %s", kind, ref)
+    started = time.monotonic()
 
     # Worker owns its own error handling + durable row updates; it only
     # re-raises on a retryable fault (which propagates to a 500 → Cloud Tasks
     # retry). Terminal missing/failed verdicts return as 200 below.
-    result = worker(**payload)
-    return JsonResponse(result or {"status": "completed"}, status=200)
+    try:
+        result = worker(**payload)
+    except Exception:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        # Full exception + traceback so a retryable fault is visible in Cloud
+        # Logging, then re-raise → 500 → Cloud Tasks retry (unchanged
+        # behaviour; we only add the log line).
+        logger.exception(
+            "run-job: FAILED kind=%s %s duration_ms=%.0f — worker raised",
+            kind,
+            ref,
+            elapsed_ms,
+        )
+        raise
+
+    result = result or {"status": "completed"}
+    elapsed_ms = (time.monotonic() - started) * 1000
+    verdict = result.get("status") if isinstance(result, dict) else None
+
+    # A non-completed terminal verdict (missing/failed/…) is a clean 200 but
+    # means the job did NOT produce its result row — surface it at WARNING so
+    # it isn't silent. A healthy completion logs at INFO.
+    if verdict in NON_COMPLETED_VERDICTS:
+        logger.warning(
+            "run-job: END kind=%s %s duration_ms=%.0f verdict=%s "
+            "(terminal — no result row produced)",
+            kind,
+            ref,
+            elapsed_ms,
+            verdict,
+        )
+    else:
+        logger.info(
+            "run-job: END kind=%s %s duration_ms=%.0f verdict=%s",
+            kind,
+            ref,
+            elapsed_ms,
+            verdict or "completed",
+        )
+
+    return JsonResponse(result, status=200)
 
 
 @csrf_exempt
@@ -226,9 +284,9 @@ def run_scheduled_task_handler(request):
       - 200 once the sweep returns. Only an exception raised inside the sweep
         propagates → 500 → Cloud Scheduler retry.
 
-    Structured processing logs (parity with the run-job observability): START
-    (name), END (duration + result summary), full traceback on an uncaught
-    fault, so scheduled runs are visible in Cloud Logging.
+    Structured processing logs mirror the ``/tasks/run-job/`` observability
+    (#235): START (name), END (duration + result summary), full traceback on
+    an uncaught fault, so scheduled runs are visible in Cloud Logging.
     """
     guard = _reject_if_not_from_cloud_scheduler(request)
     if guard is not None:
