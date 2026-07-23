@@ -36,7 +36,7 @@ from ..serializers import (
     SkillSerializer,
     _parse_date,
 )
-from django_q.tasks import async_task
+from job_hunting.lib.cloud_tasks import enqueue
 
 from job_hunting.lib.ai_client import get_client
 from job_hunting.lib.services.summary_service import SummaryService
@@ -1483,15 +1483,13 @@ class ResumeViewSet(BaseViewSet):
 
         uploaded_file = request.FILES["file"]
 
-        lower_name = uploaded_file.name.lower()
+        resume_name = uploaded_file.name
+        lower_name = resume_name.lower()
         if not (lower_name.endswith(".docx") or lower_name.endswith(".pdf")):
             return Response(
                 {"errors": [{"detail": "Only .docx and .pdf files are supported"}]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        file_blob = uploaded_file.read()
-        resume_name = uploaded_file.name
 
         # Derive a display name from the filename
         base_name = resume_name
@@ -1501,24 +1499,24 @@ class ResumeViewSet(BaseViewSet):
             base_name = base_name[:-4]
         derived_name = base_name.strip()[:100] or "Imported Resume"
 
-        # Create placeholder resume immediately. file_path records the
-        # original filename (as the user uploaded it) for reference —
-        # the server doesn't keep the uploaded blob on disk, so this is
-        # purely a human-readable "where did this come from" marker.
+        # CC-204: persist the upload to durable storage (Wasabi S3 in prod,
+        # local FileSystemStorage on self-host) via Resume.file, then enqueue
+        # only the resume_id. The bytes NEVER ride the async payload — the
+        # resume_parse_job worker reads them back from storage. This also fixes
+        # the old in-memory path's retry bug (a re-run had no bytes to re-read).
+        # file_path keeps the original filename as a human-readable marker.
         resume = Resume.objects.create(
             user_id=request.user.id,
             name=derived_name,
             file_path=resume_name,
             status="pending",
         )
+        # Save through default_storage under a per-resume key. .save() writes
+        # the field + row. Rewind first — DRF may have already read the stream.
+        uploaded_file.seek(0)
+        resume.file.save(resume_name, uploaded_file, save=True)
 
-        async_task(
-            "job_hunting.lib.tasks.resume_parse_job",
-            resume.id,
-            file_blob=file_blob,
-            resume_name=resume_name,
-            derived_name=derived_name,
-        )
+        enqueue("resume_ingest", resume_id=resume.id, derived_name=derived_name)
 
         ser = self.get_serializer()
         payload = {"data": ser.to_resource(resume)}

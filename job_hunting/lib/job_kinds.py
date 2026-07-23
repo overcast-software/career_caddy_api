@@ -40,6 +40,10 @@ KIND_REGISTRY: dict[str, str] = {
     # the JSON payload base64-encoded (AP bodies are small); the task wrapper
     # base64-decodes before calling process_inbound_activity.
     "federation_inbox": "job_hunting.lib.federation_inbox.run_inbound_activity_task",
+    # CC-204 — resume ingest. The uploaded blob is persisted to Resume.file
+    # (default_storage) by the ingest view; the payload carries only resume_id,
+    # and the worker reads the bytes back from storage.
+    "resume_ingest": "job_hunting.lib.tasks.resume_parse_job",
 }
 
 
