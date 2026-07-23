@@ -65,6 +65,14 @@ dependencies = [
     # HTTP tasks to an authenticated /tasks/* handler. Only imported when
     # CC_TASKS_ENABLED is on (job_hunting.lib.cloud_tasks).
     "google-cloud-tasks>=2.16.0",
+    # Blob storage for uploaded resumes — CC-204. django-storages S3Storage
+    # points default_storage at an S3-compatible bucket (Wasabi in prod, ONE
+    # backend on both deployments) so the ingest view persists the upload and
+    # the resume_parse_job worker reads it from storage — the bytes never ride
+    # the async payload. Env-gated: absent creds → local FileSystemStorage so
+    # self-host / `make up` stays keyless. See job_hunting.settings STORAGES.
+    "django-storages>=1.14.0",
+    "boto3>=1.35.0",
 ]
 
 [dependency-groups]

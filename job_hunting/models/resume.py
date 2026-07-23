@@ -46,7 +46,18 @@ class Resume(GetMixin, NanoIDModel):
         blank=True,
         related_name="resumes",
     )
+    # Human-readable "where did this come from" marker: the original upload
+    # filename. Retained for back-compat (serializer + duplicate export read
+    # it); NOT the durable blob — see ``file`` below.
     file_path = models.CharField(max_length=500, null=True, blank=True)
+    # CC-204 — the durable uploaded resume blob, stored via ``default_storage``
+    # (Wasabi S3 in prod, local FileSystemStorage on self-host). The ingest
+    # view saves the upload here and enqueues only ``resume_id``; the
+    # resume_parse_job worker reads the bytes back from storage. Nullable +
+    # blank because pre-CC-204 rows (and manually-created resumes) have none.
+    file = models.FileField(
+        upload_to="resumes/%Y/%m/", max_length=500, null=True, blank=True
+    )
     title = models.CharField(max_length=255, null=True, blank=True)
     name = models.CharField(max_length=255, null=True, blank=True)
     notes = models.TextField(null=True, blank=True)

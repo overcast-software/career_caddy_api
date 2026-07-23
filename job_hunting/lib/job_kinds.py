@@ -25,6 +25,10 @@ from importlib import import_module
 KIND_REGISTRY: dict[str, str] = {
     # CC-214 validation slice: the first migrated path.
     "score": "job_hunting.lib.tasks.score_job",
+    # CC-204 — resume ingest. The uploaded blob is persisted to Resume.file
+    # (default_storage) by the ingest view; the payload carries only resume_id,
+    # and the worker reads the bytes back from storage.
+    "resume_ingest": "job_hunting.lib.tasks.resume_parse_job",
 }
 
 

@@ -223,8 +223,9 @@ STATICFILES_DIRS = [
 
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
-# WhiteNoise configuration
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# WhiteNoise static storage is configured via STORAGES["staticfiles"] below
+# (CC-204 introduced the STORAGES dict; the deprecated STATICFILES_STORAGE
+# setting cannot coexist with it on Django 4.2+).
 
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = True
@@ -395,6 +396,67 @@ LOGGING = {
 from job_hunting.logfire_setup import setup_logfire  # noqa: E402
 
 setup_logfire("career_caddy_api")
+
+# ---------------------------------------------------------------------------
+# File storage — CC-204 uploaded-resume blob store.
+# ---------------------------------------------------------------------------
+# default_storage backs Resume.file (the uploaded blob the ingest view saves
+# and the resume_parse_job worker reads). Env-gated, mirroring the
+# CC_TASKS_ENABLED fallback philosophy: when the S3 bucket env is present we
+# point default_storage at an S3-compatible bucket (Wasabi in prod — ONE
+# backend on BOTH deployments, no GCP-vs-self-host split); when it's absent
+# (local dev, `make up`, self-host without creds) we fall back to the local
+# FileSystemStorage so the stack stays keyless and green.
+#
+# This is ORTHOGONAL to CC_TASKS_ENABLED: that flag chooses the queue
+# transport; STORAGES chooses where the file lives. The two are independent.
+#
+# Env vars (see deploy terraform — same names wired into api + tasks services):
+#   AWS_STORAGE_BUCKET_NAME  — the Wasabi bucket (presence flips to S3)
+#   AWS_S3_ENDPOINT_URL      — e.g. https://s3.us-west-1.wasabisys.com
+#   AWS_S3_REGION_NAME       — e.g. us-west-1
+#   AWS_ACCESS_KEY_ID        — Wasabi access key (Secret Manager in prod)
+#   AWS_SECRET_ACCESS_KEY    — Wasabi secret key (Secret Manager in prod)
+AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_STORAGE_BUCKET_NAME", "")
+
+# Local media root for the FileSystemStorage fallback (self-host / dev).
+MEDIA_ROOT = os.environ.get("MEDIA_ROOT", os.path.join(BASE_DIR, "media"))
+MEDIA_URL = os.environ.get("MEDIA_URL", "/media/")
+
+if AWS_STORAGE_BUCKET_NAME:
+    # Wasabi (S3-compatible) via django-storages. Path-style addressing +
+    # a custom endpoint are the Wasabi requirements (mirrors the tofu backend
+    # + Doug's wasabi backup scripts). Credentials come from the environment
+    # (Secret Manager on Cloud Run); never committed.
+    AWS_S3_ENDPOINT_URL = os.environ.get(
+        "AWS_S3_ENDPOINT_URL", "https://s3.us-west-1.wasabisys.com"
+    )
+    AWS_S3_REGION_NAME = os.environ.get("AWS_S3_REGION_NAME", "us-west-1")
+    AWS_S3_ADDRESSING_STYLE = "path"  # Wasabi uses path-style
+    # Uploaded resumes are private; served (if ever) through the app, not a
+    # public bucket ACL. Keep objects private + skip per-object ACLs (Wasabi
+    # buckets are private by default).
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    AWS_S3_FILE_OVERWRITE = False
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
+else:
+    # Self-host / local: durable enough on a shared volume; keyless.
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
 
 # Resume export template path
 RESUME_EXPORT_TEMPLATE = os.path.join(BASE_DIR, "templates", "resume_export.docx")

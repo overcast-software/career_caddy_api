@@ -38,6 +38,7 @@ For Phase 1, only the smoke-test task lives here.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from job_hunting.lib import events
@@ -545,22 +546,20 @@ def answer_job(
 def resume_parse_job(
     resume_id: int,
     *,
-    file_blob: bytes,
-    resume_name: str,
     derived_name: str | None = None,
 ) -> dict:
     """Parse an uploaded resume file and populate the Resume row.
 
     Replaces the daemon-thread body in
     ``api/job_hunting/api/views/resumes.py``'s ingest endpoint, including
-    the bespoke ``threading.Thread.join(timeout=300)`` ceiling — the
-    Q_CLUSTER ``timeout: 300`` setting now owns that contract, and
-    django_q.Failure will surface a timeout as a normal failure with the
-    traceback.
+    the bespoke ``threading.Thread.join(timeout=300)`` ceiling.
 
-    ``file_blob`` rides through the OrmQ row as pickle-serialized
-    bytes. Resume uploads average ~100KB–2MB which is fine for OrmQ;
-    a proper blob store (s3 or shared volume) is a Phase 6+ follow-up.
+    CC-204: the uploaded blob is no longer passed inline — the ingest view
+    persists it to ``Resume.file`` (``default_storage`` → Wasabi S3 in prod /
+    local FileSystemStorage on self-host) and enqueues only ``resume_id``. This
+    worker re-fetches the row and reads the bytes back from storage, so the
+    payload stays a small scalar (JSON-serializable on both transports) AND a
+    retry re-reads a durable blob instead of vanished in-memory bytes.
     """
     from django.contrib.auth import get_user_model
 
@@ -583,7 +582,22 @@ def resume_parse_job(
         events.notify("resume", resume_id, "failed", user_id)
         return {"status": "failed"}
 
+    # Read the uploaded blob back from durable storage. A pending Resume with
+    # no stored file is a malformed enqueue (or a legacy row) — fail cleanly.
+    if not resume.file:
+        Resume.objects.filter(pk=resume_id).update(status="failed")
+        events.notify("resume", resume_id, "failed", user_id)
+        logger.warning(
+            "resume_parse_job: resume_id=%s has no stored file", resume_id
+        )
+        return {"status": "failed"}
+
     try:
+        with resume.file.open("rb") as fh:
+            file_blob = fh.read()
+        # The original filename lives on file_path; fall back to the storage
+        # key's basename so IngestResume's extension sniffing still works.
+        resume_name = resume.file_path or os.path.basename(resume.file.name)
         ingest_service = IngestResume(
             user=user,
             resume=file_blob,
