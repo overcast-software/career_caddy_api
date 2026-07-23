@@ -84,6 +84,84 @@ class TestRunJobHandler(TestCase):
         self.assertEqual(self.client.get(self.url).status_code, 405)
 
 
+class TestRunJobHandlerObservability(TestCase):
+    """CC-214 follow-up — the handler must emit structured processing logs so
+    job processing is visible in Cloud Logging (the original slice was a total
+    blackout: a job that terminated without doing its work returned a clean
+    200 with no app-level log line, so a broken async path was invisible)."""
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("tasks-run-job")
+
+    def _post(self, body):
+        return self.client.post(
+            self.url, data=json.dumps(body), content_type="application/json"
+        )
+
+    _LOGGER = "job_hunting.api.views.tasks_handlers"
+
+    def test_start_and_end_logged_with_job_ref_on_completion(self):
+        with patch(
+            "job_hunting.lib.tasks.score_job",
+            return_value={"score": 91, "status": "completed"},
+        ):
+            with self.assertLogs(self._LOGGER, level="INFO") as cm:
+                resp = self._post(
+                    {"kind": "score", "payload": {"score_id": "abc123", "trigger": "score"}}
+                )
+        self.assertEqual(resp.status_code, 200)
+        text = "\n".join(cm.output)
+        # START carries the kind + the row id parsed out of the payload.
+        self.assertIn("run-job: START kind=score", text)
+        self.assertIn("score_id=abc123", text)
+        # END carries the verdict + a duration.
+        self.assertIn("run-job: END kind=score", text)
+        self.assertIn("verdict=completed", text)
+        self.assertIn("duration_ms=", text)
+
+    def test_non_completed_verdict_logged_at_warning(self):
+        # The exact silent-failure class from the CC-214 blackout: a terminal
+        # 'missing' verdict is a clean 200 but means no result row was
+        # produced — it MUST surface at WARNING.
+        with patch(
+            "job_hunting.lib.tasks.score_job",
+            return_value={"score": None, "status": "missing"},
+        ):
+            with self.assertLogs(self._LOGGER, level="INFO") as cm:
+                resp = self._post({"kind": "score", "payload": {"score_id": "gone"}})
+        self.assertEqual(resp.status_code, 200)
+        warnings = [r for r in cm.records if r.levelname == "WARNING"]
+        self.assertTrue(
+            any("verdict=missing" in r.getMessage() for r in warnings),
+            msg=f"expected a WARNING carrying verdict=missing; got {cm.output}",
+        )
+
+    def test_worker_exception_logs_traceback_at_error(self):
+        with patch(
+            "job_hunting.lib.tasks.score_job", side_effect=RuntimeError("boom")
+        ):
+            with self.assertLogs(self._LOGGER, level="INFO") as cm:
+                with self.assertRaises(RuntimeError):
+                    self._post({"kind": "score", "payload": {"score_id": "s1"}})
+        errors = [r for r in cm.records if r.levelname == "ERROR"]
+        self.assertTrue(errors, msg=f"expected an ERROR log; got {cm.output}")
+        rec = errors[-1]
+        self.assertIn("run-job: FAILED kind=score", rec.getMessage())
+        # logger.exception attaches the traceback so it lands in Cloud Logging.
+        self.assertIsNotNone(rec.exc_info)
+
+    def test_unknown_kind_logged_at_error(self):
+        with self.assertLogs(self._LOGGER, level="INFO") as cm:
+            resp = self._post({"kind": "does_not_exist", "payload": {"score_id": "z"}})
+        self.assertEqual(resp.status_code, 200)
+        errors = [r for r in cm.records if r.levelname == "ERROR"]
+        self.assertTrue(
+            any("UNKNOWN kind" in r.getMessage() for r in errors),
+            msg=f"expected an ERROR for the unknown kind; got {cm.output}",
+        )
+
+
 class TestRunJobsCommand(TestCase):
     """The self-host executor claims a Job, dispatches by kind, records status."""
 
