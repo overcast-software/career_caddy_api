@@ -1,6 +1,5 @@
 import math
 
-from django_q.tasks import async_task
 from rest_framework import status
 from rest_framework.response import Response
 from drf_spectacular.utils import (
@@ -13,6 +12,7 @@ from .base import BaseViewSet
 from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import SummarySerializer
 from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.cloud_tasks import enqueue
 from job_hunting.lib.models import CareerData
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.models import (
@@ -279,9 +279,9 @@ class SummaryViewSet(BaseViewSet):
             status="pending",
         )
 
-        async_task(
-            "job_hunting.lib.tasks.summary_job",
-            summary.id,
+        enqueue(
+            "summary",
+            summary_id=summary.id,
             resume_id=resume.id if resume is not None else None,
             injected_prompt=injected_prompt,
         )
