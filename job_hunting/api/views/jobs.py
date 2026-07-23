@@ -3,7 +3,6 @@ import math
 
 from datetime import timedelta
 
-from django_q.tasks import async_task
 from django.db import transaction
 from django.db.models import Q, OuterRef, Subquery
 from django.utils import timezone
@@ -51,6 +50,7 @@ from ..serializers import (
 )
 from job_hunting.api.permissions import IsGuestReadOnly
 from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.cloud_tasks import enqueue
 from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
 from job_hunting.lib.services.summary_service import SummaryService
 from job_hunting.models import (
@@ -2070,7 +2070,10 @@ class JobApplicationViewSet(BaseViewSet):
     # JobPost this ATS page belongs to. An ordinary JA create carries no
     # match_context and is completely unaffected.
     _MATCH_INPUT_KEYS = ("referrer", "page_title", "text_excerpt")
-    MATCH_TASK = "job_hunting.lib.tasks.job_application_match_job"
+    # Unified async kind for the JA-match worker (job_kinds.KIND_REGISTRY);
+    # enqueue('job_application_match', ...) picks Cloud Tasks on GCP or a Job
+    # row on self-host. The dotted path lives in the registry now.
+    MATCH_KIND = "job_application_match"
 
     def create(self, request):
         # Split the raw payload's attributes (flat or JSON:API envelope) so we
@@ -2195,7 +2198,7 @@ class JobApplicationViewSet(BaseViewSet):
                 logged_at=timezone.now(),
             )
 
-        async_task(self.MATCH_TASK, ja.id)
+        enqueue(self.MATCH_KIND, application_id=ja.id)
 
         ser = self.get_serializer()
         return Response(

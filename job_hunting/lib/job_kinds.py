@@ -25,6 +25,12 @@ from importlib import import_module
 KIND_REGISTRY: dict[str, str] = {
     # CC-214 validation slice: the first migrated path.
     "score": "job_hunting.lib.tasks.score_job",
+    # CC-202 — summary generation (summaries.py SummaryViewSet.create).
+    "summary": "job_hunting.lib.tasks.summary_job",
+    # CC-203 — question/answer generation (questions.py answer-create path).
+    "answer": "job_hunting.lib.tasks.answer_job",
+    # CC-205 — JobApplication match (jobs.py JA match-trigger create path).
+    "job_application_match": "job_hunting.lib.tasks.job_application_match_job",
 }
 
 
