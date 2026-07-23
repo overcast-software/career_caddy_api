@@ -13,11 +13,13 @@ Covers what the pre-CC-127 synchronous inbox suite can't:
   cheap drop (no raise, no side effect) on unverifiable
 
 Runs with ``ACTIVITYPUB_INBOX_DISPATCH_SYNC=False`` (prod async mode) and
-asserts on the ``async_task`` enqueue, then drives the worker explicitly —
-mirroring the phase5d dispatch tests that call ``dispatch_one`` directly.
+asserts on the ``enqueue('federation_inbox', ...)`` seam, then drives the
+worker explicitly — mirroring the phase5d dispatch tests that call
+``dispatch_one`` directly.
 """
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
 from email.utils import format_datetime
@@ -49,7 +51,6 @@ from job_hunting.tests.test_activitypub_phase5c_signing import FakeRemoteActor
 User = get_user_model()
 
 TEST_ORIGIN = "http://testserver"
-TASK_PATH = "job_hunting.lib.federation_inbox.process_inbound_activity"
 
 
 def _meta(headers: dict[str, str]) -> dict[str, str]:
@@ -108,19 +109,21 @@ class TestInboxEdgeEnqueues(TestCase):
     def test_valid_signed_post_202_enqueues_and_does_not_fetch(self):
         body = _follow_body(self.peer, self.target_uri)
         headers = _sign_inbox(self.peer, self.path, body)
-        with patch("django_q.tasks.async_task") as mock_async, \
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async, \
                 patch.object(federation_signing, "fetch_actor_public_key") as mock_fetch:
             response = self._post(body, headers)
         self.assertEqual(response.status_code, 202)
-        # Enqueued exactly once, with the raw request the worker re-verifies.
+        # Enqueued exactly once via the unified producer, with the raw request
+        # the worker re-verifies. The body rides base64-encoded (CC-206) — it
+        # must round-trip back to the exact request bytes.
         mock_async.assert_called_once()
         args, kwargs = mock_async.call_args
-        self.assertEqual(args[0], TASK_PATH)
+        self.assertEqual(args[0], "federation_inbox")
         self.assertEqual(kwargs["actor_kind"], "person")
         self.assertEqual(kwargs["identifier"], "dough")
         self.assertEqual(kwargs["method"], "POST")
         self.assertEqual(kwargs["path"], self.path)
-        self.assertEqual(kwargs["body"], body)
+        self.assertEqual(base64.b64decode(kwargs["body_b64"]), body)
         self.assertIn("Signature", kwargs["headers"])
         # The whole point: NO key fetch on the web thread, no side effect.
         mock_fetch.assert_not_called()
@@ -129,7 +132,7 @@ class TestInboxEdgeEnqueues(TestCase):
 
     def test_unsigned_post_401_no_enqueue(self):
         body = _follow_body(self.peer, self.target_uri)
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self.client.post(
                 self.path, data=body,
                 content_type="application/activity+json",
@@ -146,13 +149,13 @@ class TestInboxEdgeEnqueues(TestCase):
         headers["Date"] = format_datetime(
             datetime(2020, 1, 1, tzinfo=timezone.utc), usegmt=True
         )
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self._post(body, headers)
         self.assertEqual(response.status_code, 401)
         mock_async.assert_not_called()
 
     def test_malformed_json_400_no_enqueue(self):
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self.client.post(
                 self.path, data=b"{not json",
                 content_type="application/activity+json",
@@ -162,7 +165,7 @@ class TestInboxEdgeEnqueues(TestCase):
         mock_async.assert_not_called()
 
     def test_actor_not_found_404_no_enqueue(self):
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self.client.post(
                 "/actors/ghost/inbox", data=b"{}",
                 content_type="application/activity+json",
@@ -173,7 +176,7 @@ class TestInboxEdgeEnqueues(TestCase):
 
     @override_settings(ACTIVITYPUB_BODY_MAX_BYTES=128)
     def test_body_too_large_400_no_enqueue(self):
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self.client.post(
                 self.path, data=b"x" * 256,
                 content_type="application/activity+json",
@@ -184,7 +187,7 @@ class TestInboxEdgeEnqueues(TestCase):
 
     @override_settings(ACTIVITYPUB_INBOX_RATE_LIMIT_PER_HOUR=1)
     def test_rate_limited_429_does_not_enqueue_the_throttled_request(self):
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             b1 = _follow_body(self.peer, self.target_uri, activity_id="rl-a")
             r1 = self._post(b1, _sign_inbox(self.peer, self.path, b1))
             b2 = _follow_body(self.peer, self.target_uri, activity_id="rl-b")
@@ -219,7 +222,7 @@ class TestUnknownActorSelfActivityDrop(TestCase):
 
     def test_unknown_actor_self_delete_dropped_before_fetch(self):
         body = _delete_actor_body(self.peer)  # unsigned — drop is pre-verify
-        with patch("django_q.tasks.async_task") as mock_async, \
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async, \
                 patch.object(federation_signing, "fetch_actor_public_key") as mock_fetch:
             response = self._post(body)
         self.assertEqual(response.status_code, 202)
@@ -228,7 +231,7 @@ class TestUnknownActorSelfActivityDrop(TestCase):
 
     def test_unknown_actor_self_update_dropped(self):
         body = _update_actor_body(self.peer)
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self._post(body)
         self.assertEqual(response.status_code, 202)
         mock_async.assert_not_called()
@@ -243,7 +246,7 @@ class TestUnknownActorSelfActivityDrop(TestCase):
         )
         body = _delete_actor_body(self.peer)
         headers = _sign_inbox(self.peer, self.path, body)
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self._post(body, headers)
         self.assertEqual(response.status_code, 202)
         mock_async.assert_called_once()
@@ -259,7 +262,7 @@ class TestUnknownActorSelfActivityDrop(TestCase):
         }
         body = json.dumps(activity).encode("utf-8")
         headers = _sign_inbox(self.peer, self.path, body)
-        with patch("django_q.tasks.async_task") as mock_async:
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async:
             response = self._post(body, headers)
         self.assertEqual(response.status_code, 202)
         mock_async.assert_called_once()
@@ -423,7 +426,7 @@ class TestWorkerVerifyDispatch(TestCase):
 
 
 class TestEnqueueSyncKnob(TestCase):
-    """ACTIVITYPUB_INBOX_DISPATCH_SYNC routes in-band vs. async_task."""
+    """ACTIVITYPUB_INBOX_DISPATCH_SYNC routes in-band vs. enqueue()."""
 
     @override_settings(ACTIVITYPUB_INBOX_DISPATCH_SYNC=True)
     def test_sync_runs_worker_in_band(self):
@@ -436,12 +439,12 @@ class TestEnqueueSyncKnob(TestCase):
 
     @override_settings(ACTIVITYPUB_INBOX_DISPATCH_SYNC=False)
     def test_async_schedules_task_and_does_not_run_in_band(self):
-        with patch("django_q.tasks.async_task") as mock_async, \
+        with patch("job_hunting.lib.cloud_tasks.enqueue") as mock_async, \
                 patch.object(federation_inbox, "process_inbound_activity") as mock_proc:
             federation_inbox.enqueue_inbound_activity(
                 actor_kind="person", identifier="dough",
                 method="POST", path="/actors/dough/inbox", headers={}, body=b"{}",
             )
         mock_async.assert_called_once()
-        self.assertEqual(mock_async.call_args[0][0], TASK_PATH)
+        self.assertEqual(mock_async.call_args[0][0], "federation_inbox")
         mock_proc.assert_not_called()

@@ -19,9 +19,9 @@ never touches a web thread.
 Two entry points, same shape as the outbound module:
 
 1. ``enqueue_inbound_activity(...)`` — synchronous, called by the edge.
-   Schedules ``process_inbound_activity`` via ``async_task`` (or runs it
-   in-band when ``ACTIVITYPUB_INBOX_DISPATCH_SYNC`` is set — the test /
-   operator knob).
+   Enqueues verify+process via the unified ``enqueue('federation_inbox', ...)``
+   producer (or runs it in-band when ``ACTIVITYPUB_INBOX_DISPATCH_SYNC`` is set
+   — the test / operator knob).
 
 2. ``process_inbound_activity(...)`` — qcluster worker entry point.
    Re-runs the FULL signature verify (cheap checks + bounded, negatively
@@ -46,6 +46,7 @@ Design notes vs. Mastodon (validated against its reference impl):
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from dataclasses import dataclass, field
@@ -63,11 +64,6 @@ from job_hunting.models.federation_activity import DIRECTION_INBOUND
 
 
 log = logging.getLogger(__name__)
-
-
-# django-q task path — kept as a literal so the qcluster imports the same
-# dotted path the enqueue site schedules.
-_TASK_PATH = "job_hunting.lib.federation_inbox.process_inbound_activity"
 
 
 @dataclass
@@ -138,7 +134,7 @@ def enqueue_inbound_activity(
     signature off the web thread.
 
     When ``ACTIVITYPUB_INBOX_DISPATCH_SYNC`` is truthy the worker runs
-    in-band (default False in prod → real ``async_task``; defaulted True
+    in-band (default False in prod → real ``enqueue``; defaulted True
     under TESTING so the inbox suite observes side effects synchronously).
     Unlike ``Q_CLUSTER['sync']`` this knob affects ONLY the inbox path.
     """
@@ -153,10 +149,48 @@ def enqueue_inbound_activity(
         )
         return
 
-    from django_q.tasks import async_task
+    # CC-206: unified async producer. The raw request body is bytes (needed for
+    # HTTP-signature re-verification off the web thread) and JSON can't carry
+    # bytes, so we base64-encode it into the payload; the task wrapper
+    # (run_inbound_activity_task) base64-decodes back to bytes before calling
+    # process_inbound_activity. AP inbox bodies are small activities (the edge
+    # already caps body size), so inline base64 is fine — no blob store needed.
+    from job_hunting.lib.cloud_tasks import enqueue
 
-    async_task(
-        _TASK_PATH,
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    body_b64 = base64.b64encode(body or b"").decode("ascii")
+
+    enqueue(
+        "federation_inbox",
+        actor_kind=actor_kind,
+        identifier=identifier,
+        method=method,
+        path=path,
+        headers=headers,
+        body_b64=body_b64,
+    )
+
+
+def run_inbound_activity_task(
+    *,
+    actor_kind: str,
+    identifier: str,
+    method: str,
+    path: str,
+    headers: dict,
+    body_b64: str,
+) -> None:
+    """Task-registry entry point for the inbound inbox (CC-206).
+
+    Decodes the base64 ``body_b64`` from the JSON payload back to the raw
+    ``bytes`` the signature verify needs, then runs the existing
+    ``process_inbound_activity`` worker. Kept as a thin wrapper (rather than
+    changing ``process_inbound_activity``'s signature) so the in-band sync path
+    and any direct callers are untouched.
+    """
+    body = base64.b64decode(body_b64.encode("ascii")) if body_b64 else b""
+    process_inbound_activity(
         actor_kind=actor_kind,
         identifier=identifier,
         method=method,
