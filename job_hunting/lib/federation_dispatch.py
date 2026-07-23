@@ -8,7 +8,8 @@ Fan out a JobPost create / update / delete event to every accepted
    gates on the AS2-Public audience, materializes one
    ``FederationActivity`` row per unique target inbox (sharedInbox
    deduped where present), and schedules a ``dispatch_one`` task
-   per row via django-q2 ``async_task``.
+   per row via the unified ``enqueue('federation_dispatch', ...)``
+   producer (CC-206).
 
 2. ``dispatch_one(federation_activity_id)`` — qcluster worker entry
    point. Signs the persisted activity body with the local actor's
@@ -660,39 +661,34 @@ def _format_error(status_code: int, snippet: str) -> str:
 
 
 def _schedule_dispatch_task(federation_activity_id: int, *, when=None) -> None:
-    """Enqueue ``dispatch_one`` via django-q2.
+    """Enqueue ``dispatch_one`` via the unified async producer (CC-206).
+
+    ``enqueue('federation_dispatch', ...)`` picks the transport by
+    ``CC_TASKS_ENABLED`` (a Cloud Task → ``/tasks/run-job/`` on GCP, or a
+    ``Job`` row drained by ``run_jobs`` on self-host) — the same seam the
+    score/answer/JA-match paths use.
 
     Routing:
 
-    - ``when`` omitted (or already past) → fire immediately via
-      ``async_task`` so the qcluster process picks it up on its next
-      poll.
-    - ``when`` is a future datetime → create a one-shot ``Schedule`` row
-      (``schedule_type='O'``, ``next_run=when``, ``repeats=-1``) — that's
-      how django-q2 1.10 expresses "run this at time T." The qcluster
-      converts ``Schedule.ONCE`` rows into tasks at next-run time, then
-      sets ``repeats=0`` so the row doesn't fire again.
+    - ``when`` omitted (or already past) → fire immediately.
+    - ``when`` is a future datetime → pass ``run_after=when``. ``enqueue``
+      maps that to the Cloud Tasks ``schedule_time`` (GCP) / ``Job.run_after``
+      gate (self-host), the native delayed-dispatch primitive — replacing the
+      old django-q2 one-shot ``Schedule`` row.
 
-    Imports are lazy so the queue's models don't drag into test
-    environments that don't need them.
+    The retry state machine is unchanged: ``dispatch_one`` re-gates on
+    ``delivery_status`` and, on a transient failure, bumps
+    ``retry_count``/``next_attempt_at`` and re-schedules via this fn; the
+    ``sweep_pending_dispatches`` sweep (CC-213, now on the GCP Cloud Scheduler
+    clock) re-drives any row whose ``next_attempt_at`` has passed. So delayed
+    retry is fully covered on both transports even if a single scheduled
+    dispatch is dropped.
     """
-    from django_q.tasks import async_task
+    from job_hunting.lib.cloud_tasks import enqueue
 
-    func_path = "job_hunting.lib.federation_dispatch.dispatch_one"
-    if when is None or when <= timezone.now():
-        async_task(func_path, federation_activity_id=federation_activity_id)
-        return
-
-    # Future-dated → one-shot Schedule. django-q2 stores args as a
-    # repr-style tuple; kwargs as a python-dict repr string. Encoding
-    # mirrors the qcluster's own parser (see django_q.tasks.schedule).
-    from django_q.models import Schedule
-
-    Schedule.objects.create(
-        name=f"ap-dispatch-{federation_activity_id}-{int(when.timestamp())}",
-        func=func_path,
-        kwargs=f"federation_activity_id={federation_activity_id}",
-        schedule_type=Schedule.ONCE,
-        next_run=when,
-        repeats=-1,
+    run_after = when if (when is not None and when > timezone.now()) else None
+    enqueue(
+        "federation_dispatch",
+        run_after=run_after,
+        federation_activity_id=federation_activity_id,
     )

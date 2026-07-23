@@ -25,9 +25,8 @@ from ..serializers import (
     QuestionSerializer,
     AnswerSerializer,
 )
-from django_q.tasks import async_task
-
 from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.cloud_tasks import enqueue
 from job_hunting.models import (
     Question,
     Answer,
@@ -456,9 +455,9 @@ class AnswerViewSet(BaseViewSet):
 
             obj = Answer.objects.create(question_id=question.id, status="pending")
 
-            async_task(
-                "job_hunting.lib.tasks.answer_job",
-                obj.id,
+            enqueue(
+                "answer",
+                answer_id=obj.id,
                 injected_prompt=injected_prompt,
                 resume_id=resume_id or None,
             )
