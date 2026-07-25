@@ -85,8 +85,9 @@ class ScrapeProfileSharpenTests(TestCase):
 
     def test_staff_with_completed_scrape_enqueues_and_returns_202(self):
         """Happy path: a completed Scrape exists for the host, the
-        endpoint enqueues the task, returns 202 with the profile JSON
-        and a meta.job_id."""
+        endpoint enqueues the task and returns 202 with the profile JSON.
+        CC-207b: dispatch is via enqueue('sharpen_scrape_profile', ...),
+        which returns no task id — meta.job_id is now null."""
         user = User.objects.create_user(
             username="staff", password="pw", is_staff=True
         )
@@ -98,22 +99,20 @@ class ScrapeProfileSharpenTests(TestCase):
             status="completed",
         )
 
-        with patch(
-            "job_hunting.api.views.scrapes.async_task",
-            return_value="task-deadbeef",
-        ) as mock_async:
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_async:
             resp = client.post(self._url(), {}, format="json")
 
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         body = resp.json()
         self.assertEqual(body["data"]["id"], str(self.profile.id))
-        self.assertEqual(body["meta"]["job_id"], "task-deadbeef")
+        # enqueue() has no task id — meta.job_id is null now.
+        self.assertIsNone(body["meta"]["job_id"])
         self.assertEqual(body["meta"]["source_scrape_id"], source.id)
 
         mock_async.assert_called_once()
         args, kwargs = mock_async.call_args
-        self.assertEqual(args[0], "job_hunting.lib.tasks.sharpen_scrape_profile")
-        self.assertEqual(args[1], self.profile.id)
+        self.assertEqual(args[0], "sharpen_scrape_profile")
+        self.assertEqual(kwargs["profile_id"], self.profile.id)
         self.assertEqual(kwargs["source_scrape_id"], source.id)
         self.assertEqual(kwargs["requested_by_id"], user.id)
 
@@ -144,10 +143,7 @@ class ScrapeProfileSharpenTests(TestCase):
         newer.save(update_fields=["scraped_at"])
         self.assertGreater(newer.scraped_at, older.scraped_at)
 
-        with patch(
-            "job_hunting.api.views.scrapes.async_task",
-            return_value="job-2",
-        ) as mock_async:
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_async:
             resp = client.post(self._url(), {}, format="json")
 
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
@@ -172,10 +168,7 @@ class ScrapeProfileSharpenTests(TestCase):
             status="completed",
         )
 
-        with patch(
-            "job_hunting.api.views.scrapes.async_task",
-            return_value="job-sub",
-        ):
+        with patch("job_hunting.api.views.scrapes.enqueue"):
             resp = client.post(self._url(), {}, format="json")
 
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)

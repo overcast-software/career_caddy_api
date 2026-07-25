@@ -44,6 +44,13 @@ KIND_REGISTRY: dict[str, str] = {
     # (default_storage) by the ingest view; the payload carries only resume_id,
     # and the worker reads the bytes back from storage.
     "resume_ingest": "job_hunting.lib.tasks.resume_parse_job",
+    # CC-207b — browser-less scrape TEXT parse (extension-direct + from-text +
+    # the parse_scrape sync=False re-entry). NOT the scrape_runner claim path
+    # (that's status='hold' browser captures) — this is a text-already-captured
+    # LLM parse, re-read by scrape_id. Payload carries scrape_id + scalars only.
+    "parse_scrape": "job_hunting.lib.tasks.parse_scrape_job",
+    # CC-207b — staff ScrapeProfile sharpen request (light DB write).
+    "sharpen_scrape_profile": "job_hunting.lib.tasks.sharpen_scrape_profile",
 }
 
 

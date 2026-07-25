@@ -236,7 +236,7 @@ class ScrapeSerializerExtensionDirectValidationTests(TestCase):
                 del payload[missing]
                 url = f"https://example.com/jobs/extdirect-nofield-{missing}"
                 with patch(
-                    "job_hunting.api.views.scrapes.async_task"
+                    "job_hunting.api.views.scrapes.enqueue"
                 ) as mock_async:
                     resp = self.client.post(
                         "/api/v1/scrapes/",
@@ -253,11 +253,8 @@ class ScrapeSerializerExtensionDirectValidationTests(TestCase):
                 self.assertIsNone(scrape.job_post_id)
                 self.assertEqual(scrape.status, "pending")
                 mock_async.assert_called_once()
-                # Enqueued the SAME worker path from-text uses.
-                self.assertEqual(
-                    mock_async.call_args.args[0],
-                    "job_hunting.lib.tasks.parse_scrape_job",
-                )
+                # Enqueued the SAME worker path from-text uses (CC-207b kind).
+                self.assertEqual(mock_async.call_args.args[0], "parse_scrape")
 
     def test_extension_direct_empty_string_description_rejected(self):
         # "Trust presence" — empty-string is NOT presence. An extension
@@ -528,7 +525,7 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         # miss shape the extension sends for an auth-walled page.
         payload = {"description": captured_innertext}
 
-        with patch("job_hunting.api.views.scrapes.async_task") as mock_async:
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_async:
             resp = self.client.post(
                 "/api/v1/scrapes/",
                 _post_body(
@@ -551,13 +548,11 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         self.assertIsNone(scrape.job_post_id)
         self.assertEqual(JobPost.objects.count(), 0)
 
-        # Enqueued the from-text worker path, not a browser re-scrape.
+        # Enqueued the from-text worker path (CC-207b kind), not a browser
+        # re-scrape. scrape_id rides the payload as a kwarg.
         mock_async.assert_called_once()
-        self.assertEqual(
-            mock_async.call_args.args[0],
-            "job_hunting.lib.tasks.parse_scrape_job",
-        )
-        self.assertEqual(mock_async.call_args.args[1], scrape.id)
+        self.assertEqual(mock_async.call_args.args[0], "parse_scrape")
+        self.assertEqual(mock_async.call_args.kwargs["scrape_id"], scrape.id)
 
     def test_extension_direct_description_only_worker_persists_jobpost(self):
         """Integration: run the enqueued worker leg and prove it persists
@@ -573,7 +568,7 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         )
         payload = {"description": captured_innertext}
 
-        with patch("job_hunting.api.views.scrapes.async_task"):
+        with patch("job_hunting.api.views.scrapes.enqueue"):
             resp = self.client.post(
                 "/api/v1/scrapes/",
                 _post_body(
@@ -628,7 +623,7 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         captured_innertext = "Apply now. Share. Save. Report this job. " * 20
         payload = {"description": captured_innertext}
 
-        with patch("job_hunting.api.views.scrapes.async_task"):
+        with patch("job_hunting.api.views.scrapes.enqueue"):
             resp = self.client.post(
                 "/api/v1/scrapes/",
                 _post_body(

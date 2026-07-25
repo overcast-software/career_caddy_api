@@ -17,7 +17,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers as drf_serializers
 
-from django_q.tasks import async_task
+from job_hunting.lib.cloud_tasks import enqueue
 
 from .base import BaseViewSet
 from ._sorting import (
@@ -869,9 +869,9 @@ class ScrapeViewSet(BaseViewSet):
         # the trust-aware overwrite branch; True only when an explicit
         # job-post relationship was pre-bound, so parse_scrape re-parses
         # onto that named post instead of early-bailing on job_post_id.
-        async_task(
-            "job_hunting.lib.tasks.parse_scrape_job",
-            scrape.id,
+        enqueue(
+            "parse_scrape",
+            scrape_id=scrape.id,
             user_id=user.id if user else None,
             force=force,
         )
@@ -1212,9 +1212,9 @@ class ScrapeViewSet(BaseViewSet):
         # both depend on the JobPost existing, which is only true after the
         # parse runs. Both clients already poll the scrape to terminal, so
         # the JobPost simply materializes on a later poll.
-        async_task(
-            "job_hunting.lib.tasks.parse_scrape_job",
-            scrape.id,
+        enqueue(
+            "parse_scrape",
+            scrape_id=scrape.id,
             user_id=request.user.id,
             apply_url=apply_url,
             auto_score=auto_score,
@@ -2171,9 +2171,14 @@ class ScrapeProfileViewSet(BaseViewSet):
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
-        job_id = async_task(
-            "job_hunting.lib.tasks.sharpen_scrape_profile",
-            profile.id,
+        # CC-207b: dispatch via the unified producer (Cloud Task on GCP /
+        # Job row on self-host). Unlike django-q2 async_task, enqueue() returns
+        # no task id — the sharpen-status endpoint's django-q lookup is now
+        # vestigial (retired with django_q in CC-208); the live frontend does
+        # not poll it (operator refreshes the page), so meta.job_id is null.
+        enqueue(
+            "sharpen_scrape_profile",
+            profile_id=profile.id,
             source_scrape_id=source_scrape.id,
             requested_by_id=getattr(request.user, "id", None),
         )
@@ -2183,7 +2188,7 @@ class ScrapeProfileViewSet(BaseViewSet):
             {
                 "data": ser.to_resource(profile),
                 "meta": {
-                    "job_id": job_id,
+                    "job_id": None,
                     "source_scrape_id": source_scrape.id,
                 },
             },
