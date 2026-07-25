@@ -2,7 +2,6 @@ import logging
 import os
 import re
 
-from django_q.tasks import async_task
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -1549,13 +1548,17 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
     if sync:
         _run()
     else:
-        # Phase 5a of Plans/Job-queue integration. parse_scrape used to
-        # fork a daemon thread when sync=False; now the work runs on the
-        # qcluster worker. The task target re-enters parse_scrape with
-        # sync=True so the body above runs inline inside the worker.
-        async_task(
-            "job_hunting.lib.tasks.parse_scrape_job",
-            scrape_id,
+        # CC-207b: dispatch the async parse via the unified producer. The
+        # parse_scrape_job worker re-enters parse_scrape with sync=True so the
+        # body above runs inline. On GCP this is a Cloud Task → /tasks/run-job/
+        # (browser-less LLM text parse — no browser needed); on self-host a Job
+        # row drained by run_jobs. (Long/browser scrapes stay on the scrape
+        # runner's claim-next path — status='hold' — unchanged.)
+        from job_hunting.lib.cloud_tasks import enqueue
+
+        enqueue(
+            "parse_scrape",
+            scrape_id=scrape_id,
             user_id=user_id,
             force=force,
         )

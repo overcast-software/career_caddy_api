@@ -11,29 +11,28 @@ from job_hunting.lib.parsers.job_post_extractor import ParsedJobData
 from job_hunting.models import Company, JobPost, Scrape
 
 
-def _inline_async_task(name, *args, **kwargs):
-    """Stand-in for django_q.tasks.async_task that runs the target inline.
+def _inline_enqueue(kind, **payload):
+    """Stand-in for cloud_tasks.enqueue that runs the target inline.
 
-    Phase 5a of Plans/Job-queue integration replaced parse_scrape's
-    threading.Thread spawn with an async_task enqueue. The reextract
-    flow ends with parse_scrape(..., sync=False) which enqueues the
-    parse_scrape_job task; under test we resolve that target inline
-    so the assertions can read the post-parse JobPost row immediately.
+    CC-207b: parse_scrape(..., sync=False) now dispatches via
+    ``enqueue("parse_scrape", scrape_id=..., **kw)`` (was async_task). Under
+    test we resolve the kind through the shared KIND_REGISTRY and run the
+    worker fn inline so the assertions can read the post-parse JobPost row
+    immediately, exactly as the Cloud Task handler / run_jobs would.
     """
-    import importlib
+    from job_hunting.lib.job_kinds import resolve_kind
 
-    module_path, _, func_name = name.rpartition(".")
-    mod = importlib.import_module(module_path)
-    return getattr(mod, func_name)(*args, **kwargs)
+    return resolve_kind(kind)(**payload)
 
 
 def _inline_reextract(fn):
-    """Decorator: patches async_task in the parse_scrape module so the
-    parse_scrape_job task runs inline within the request thread instead
-    of being enqueued on the qcluster worker."""
+    """Decorator: patches enqueue at its source so the parse_scrape_job task
+    runs inline within the request thread instead of being enqueued to the
+    worker. job_post_extractor imports enqueue lazily (inside the sync=False
+    branch), so the patch target is the definition module, not the caller."""
     return patch(
-        "job_hunting.lib.parsers.job_post_extractor.async_task",
-        new=_inline_async_task,
+        "job_hunting.lib.cloud_tasks.enqueue",
+        new=_inline_enqueue,
     )(fn)
 
 
