@@ -1,20 +1,17 @@
-"""CC-202 — summary generation enqueue-contract (bucket-2).
+"""CC-202 — summary generation enqueue-contract (bucket-2) + CC-218 FK end-to-end.
 
 The AI-generation branch of ``SummaryViewSet.create`` creates a pending
 ``Summary`` row and dispatches the work through the unified async producer
 ``enqueue('summary', **payload)`` (CC-214 pattern — the generic transport
 switch picks Cloud Tasks on GCP or a ``Job`` row on self-host). These tests
 assert the enqueue SEAM: ``enqueue`` is called with ``kind='summary'`` and the
-NanoID-string ``summary_id`` payload. The ``summary_job`` worker leg itself is
-covered by the worker tests; here we patch the seam so the real LLM never runs.
+``summary_id`` payload. The ``summary_job`` worker leg itself is covered by the
+worker tests; here we patch the seam so the real LLM never runs.
 
-NOTE (blocker flagged on CC-202): ``Summary.job_post_id`` is a legacy
-``IntegerField`` that was NOT migrated to a NanoID FK when JobPost swapped to a
-string PK (CC-57). So the pending-``Summary`` write in the view rejects a real
-NanoID JobPost id end-to-end — a pre-existing straggler independent of this
-enqueue migration. To keep this a focused bucket-2 seam test (not gated on the
-unrelated schema bug) we stub the row creation and assert only the enqueue
-contract. The FK fix belongs to a separate schema ticket.
+CC-218: ``Summary.job_post`` is now a real NanoID ``ForeignKey(JobPost)`` (was a
+legacy ``IntegerField`` that rejected real NanoID JobPost ids end-to-end). These
+tests now persist a REAL ``Summary`` against a REAL NanoID ``JobPost`` — the
+exact write that failed before CC-218 — instead of stubbing ``objects.create``.
 """
 from unittest.mock import MagicMock, patch
 
@@ -42,7 +39,7 @@ class TestSummaryEnqueueContract(TestCase):
             description="a " * 100,
         )
 
-    def test_ai_path_enqueues_summary_kind_with_nanoid_payload(self):
+    def test_ai_path_persists_summary_on_nanoid_jobpost_and_enqueues(self):
         payload = {
             "data": {
                 "type": "summary",
@@ -54,18 +51,11 @@ class TestSummaryEnqueueContract(TestCase):
                 },
             }
         }
-        # A stub pending Summary carrying a NanoID string id, so the seam
-        # assertion is not gated on the unrelated Summary.job_post_id
-        # IntegerField straggler (blocker flagged on CC-202).
-        stub = Summary(id="Smry000001", user_id=self.user.id, status="pending")
         with patch(
             "job_hunting.api.views.summaries.get_client", return_value=MagicMock()
         ), patch(
             "job_hunting.api.views.summaries.ApplicationPromptBuilder"
         ) as mock_builder, patch(
-            "job_hunting.api.views.summaries.Summary.objects.create",
-            return_value=stub,
-        ), patch(
             "job_hunting.api.views.summaries.enqueue"
         ) as mock_enqueue:
             mock_builder.return_value.build_from_career_data.return_value = "resume md"
@@ -76,18 +66,25 @@ class TestSummaryEnqueueContract(TestCase):
             )
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
 
+        # CC-218: the real pending Summary persisted, linked to the NanoID
+        # JobPost via the FK — the write that failed before the FK swap.
+        summary = Summary.objects.get(user_id=self.user.id, job_post=self.jp)
+        self.assertEqual(summary.status, "pending")
+        self.assertEqual(summary.job_post_id, self.jp.id)  # NanoID string FK
+        self.assertIsInstance(summary.job_post_id, str)
+        self.assertEqual(summary.job_post.title, "Engineer")  # FK traversal
+
         mock_enqueue.assert_called_once()
         args, kwargs = mock_enqueue.call_args
         self.assertEqual(args[0], "summary")
-        self.assertEqual(kwargs["summary_id"], stub.id)
-        self.assertIsInstance(kwargs["summary_id"], str)
+        self.assertEqual(kwargs["summary_id"], summary.id)
         # No explicit resume relationship => career-data path (resume_id None).
         self.assertIsNone(kwargs["resume_id"])
         self.assertIn("injected_prompt", kwargs)
 
-    def test_manual_content_completes_without_enqueue(self):
-        # Manual content is synchronous + terminal — never enqueues.
-        stub = Summary(id="Smry000002", user_id=self.user.id, status="completed")
+    def test_manual_content_persists_completed_summary_on_nanoid_jobpost(self):
+        # Manual content is synchronous + terminal — never enqueues, and the
+        # completed Summary links to the NanoID JobPost (CC-218).
         payload = {
             "data": {
                 "type": "summary",
@@ -99,10 +96,7 @@ class TestSummaryEnqueueContract(TestCase):
                 },
             }
         }
-        with patch(
-            "job_hunting.api.views.summaries.Summary.objects.create",
-            return_value=stub,
-        ), patch("job_hunting.api.views.summaries.enqueue") as mock_enqueue:
+        with patch("job_hunting.api.views.summaries.enqueue") as mock_enqueue:
             resp = self.client.post(
                 SUMMARIES_URL,
                 data=payload,
@@ -110,3 +104,42 @@ class TestSummaryEnqueueContract(TestCase):
             )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         mock_enqueue.assert_not_called()
+
+        summary = Summary.objects.get(user_id=self.user.id, job_post=self.jp)
+        self.assertEqual(summary.status, "completed")
+        self.assertEqual(summary.content, "hand-written summary")
+        self.assertEqual(summary.job_post_id, self.jp.id)
+
+
+class TestSummaryNanoidFkMigration(TestCase):
+    """CC-218: the Summary.job_post FK round-trips a real NanoID JobPost — the
+    exact schema-level write that the legacy IntegerField rejected."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="fk", password="pw")
+        self.company = Company.objects.create(name="FK Co")
+        self.jp = JobPost.objects.create(
+            title="Backend", company=self.company, created_by=self.user,
+            description="x " * 60,
+        )
+
+    def test_summary_create_with_nanoid_job_post_round_trips(self):
+        # NanoID JobPost ids are 10-char strings; the old IntegerField column
+        # could not store them (ValueError / DataError). The FK does.
+        self.assertIsInstance(self.jp.id, str)
+        s = Summary.objects.create(
+            job_post=self.jp, user=self.user, content="c", status="completed"
+        )
+        s.refresh_from_db()
+        self.assertEqual(s.job_post_id, self.jp.id)
+        self.assertEqual(s.job_post.title, "Backend")
+        # Reverse relation.
+        self.assertIn(s, self.jp.summaries.all())
+
+    def test_summary_create_with_job_post_id_kwarg_round_trips(self):
+        # The write sites pass job_post_id=<nanoid> — must still work.
+        s = Summary.objects.create(
+            job_post_id=self.jp.id, user=self.user, status="pending"
+        )
+        s.refresh_from_db()
+        self.assertEqual(s.job_post_id, self.jp.id)
