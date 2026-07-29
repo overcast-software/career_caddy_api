@@ -12,8 +12,18 @@ class Summary(GetMixin, models.Model):
         blank=True,
         related_name="summaries",
     )
-    # Temporary plain int until JobPost is migrated to Django
-    job_post_id = models.IntegerField(null=True, blank=True)
+    # CC-218: a real FK onto JobPost's NanoID string PK. Was a legacy
+    # IntegerField (migration 0006) that CC-57 never converted — so writing a
+    # Summary for a real NanoID JobPost rejected the id end-to-end. Mirrors
+    # Score/CoverLetter's job_post FK (SET_NULL, nullable). Column stays
+    # ``job_post_id`` (Django's FK default), so existing reads are unaffected.
+    job_post = models.ForeignKey(
+        "JobPost",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="summaries",
+    )
     status = models.CharField(max_length=50, null=True, blank=True)
 
     class Meta:

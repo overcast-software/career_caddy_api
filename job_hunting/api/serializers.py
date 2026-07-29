@@ -1123,9 +1123,9 @@ class JobPostSerializer(BaseSerializer):
         if rel_name == "scores":
             qs = obj.scores.filter(user_id=user_id) if user_id else obj.scores.none()
             return "score", list(qs)
-        # `Summary.job_post_id` is a plain IntegerField (not a ForeignKey), so
-        # there is no `obj.summaries` reverse accessor — query manually and
-        # scope to the requesting user when we have one.
+        # Summaries are per-user; query via the job_post FK (CC-218: Summary.
+        # job_post is now a real FK, but we keep the explicit filter so the
+        # per-user scoping below is applied in the same queryset).
         if rel_name == "summaries":
             qs = Summary.objects.filter(job_post_id=obj.id)
             if user_id:
