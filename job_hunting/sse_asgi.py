@@ -27,19 +27,49 @@ The token-verify contract (`TimestampSigner(salt="events.sse.token")`,
 per-user forward filter, and the keepalive cadence are all imported
 directly from `job_hunting.api.events`. There is exactly one source of
 truth for the HMAC token + the `cc_events` channel wiring; this module
-only swaps the *transport* (async generator + `loop.add_reader` in
-place of the sync generator + `select.select`).
+only swaps the *transport* (async fan-out from a shared LISTEN
+connection in place of the sync generator + `select.select`).
 
-## Process model
+## Process model — ONE shared LISTEN connection per process (CC-229)
 
-uvicorn async worker. Each connection holds a dedicated psycopg2
-LISTEN connection (NOT borrowed from Django's pool) and an
-`asyncio.Event` set by a `loop.add_reader` callback on the connection
-fd. There is NO duration cap here — uvicorn has no arbiter that
-SIGKILLs a long-lived stream, which is the entire point of Option B.
-Disconnects are detected via `request.is_disconnected()` (checked once
-per keepalive cycle) and via `asyncio.CancelledError` propagated into
-the generator when the ASGI server tears the connection down.
+The naive design opened a dedicated psycopg2 LISTEN connection PER
+stream, held for the whole stream lifetime — so events-service DB
+connections scaled with the number of open EventSource tabs and never
+cleared. That was a primary driver of the CC-228 Cloud SQL
+connection-slot exhaustion.
+
+Instead, a per-process ``_Hub`` (module-level singleton) holds exactly
+ONE psycopg2 LISTEN connection on ``cc_events`` and one async dispatcher
+task. Each SSE client is an in-memory subscriber: an ``asyncio.Queue``
+registered in a per-process registry keyed by ``user_id``. The
+dispatcher reads NOTIFYs off the single connection (via
+``loop.add_reader`` + ``conn.poll()``) and fans each one out IN-PROCESS
+to the matching user's subscriber queues, using the SAME ``user_id``
+filter as before. Net: events-service DB connections go from O(open
+tabs) → O(processes). Cloud Run runs uvicorn single-process per
+instance (deploy locals.tf: no ``--workers``, min/max scale 1..2), so
+this is O(instances) — a handful of connections, not one-per-tab.
+
+LISTEN/NOTIFY needs a SESSION-mode connection, so the shared connection
+stays a direct psycopg2 connection (``_open_listen_connection``), NOT a
+pooled Django one. This is also why the ``events`` service must bypass
+any future transaction pooler (CC-230) — a transaction pooler would
+break LISTEN. This shared-connection design makes that cheap: one
+session-mode connection per process instead of one per tab.
+
+The shared connection is RESILIENT: if it drops, the dispatcher
+reconnects + re-LISTENs (with backoff) WITHOUT tearing down the live
+subscriber streams. A ``pg_notify`` fired during the reconnect window
+is lost (pg_notify is fire-and-forget — the row UPDATE is the source of
+truth and the client falls back to polling), but no stream dies.
+
+There is NO duration cap here — uvicorn has no arbiter that SIGKILLs a
+long-lived stream, which is the entire point of Option B. Disconnects
+are detected via ``request.is_disconnected()`` (checked once per
+keepalive cycle) and via ``asyncio.CancelledError`` propagated into the
+generator when the ASGI server tears the connection down. Either way
+the stream's subscriber is removed from the registry in ``finally`` —
+no registry leaks.
 """
 
 from __future__ import annotations
@@ -79,18 +109,232 @@ from job_hunting.api.events import (  # noqa: E402
 
 logger = logging.getLogger("job_hunting.api.events")
 
+# Bound on a subscriber's in-memory backlog. If a slow client can't
+# drain its queue faster than NOTIFYs arrive, we drop the OLDEST frames
+# rather than let the queue grow unbounded (memory) or block the
+# dispatcher (head-of-line stalling every other subscriber). SSE
+# consumers re-fetch state on reconnect, so a dropped transition is
+# recoverable — the row UPDATE remains the source of truth.
+_SUBSCRIBER_QUEUE_MAXSIZE = 1000
+
+# Reconnect backoff for the shared LISTEN connection. Small fixed
+# backoff — the DB being briefly unreachable shouldn't hammer it, but we
+# also want streams to resume promptly once it's back.
+_LISTEN_RECONNECT_BACKOFF_S = 1.0
+
+# How long ``subscribe`` waits for the shared connection to establish
+# LISTEN before returning anyway. Establishing LISTEN is a single local
+# round-trip, so this only elapses when the DB is genuinely unreachable
+# — in which case we let the stream come up (keepalives only) rather
+# than 500 the request.
+_LISTEN_READY_TIMEOUT_S = 5.0
+
+
+class _Hub:
+    """Per-process fan-out hub: ONE shared LISTEN connection, N streams.
+
+    Holds a single psycopg2 LISTEN connection on ``cc_events`` and a
+    single dispatcher task. Subscribers register an ``asyncio.Queue``
+    keyed by ``user_id``; the dispatcher reads NOTIFYs off the shared
+    connection and puts matching payloads onto the right queues.
+
+    The hub is lazily started on the first ``subscribe`` (module import
+    runs under ``django.setup()`` with no event loop, so we can't open
+    the connection or spawn the task at import time). It stops itself
+    when the last subscriber leaves, so an idle process holds zero DB
+    connections.
+    """
+
+    def __init__(self) -> None:
+        # user_id -> set of subscriber queues. A user with multiple open
+        # tabs has multiple queues under the same key.
+        self._subscribers: dict[int, set[asyncio.Queue[bytes]]] = {}
+        self._dispatcher: asyncio.Task | None = None
+        # Guards start/stop transitions so concurrent first/last
+        # subscribers don't race on the dispatcher task + connection.
+        self._lock = asyncio.Lock()
+        # Set by the dispatcher once its shared connection has
+        # successfully issued ``LISTEN``. ``subscribe`` awaits this so a
+        # NOTIFY fired right after a client connects (e.g. the client
+        # triggers work then watches for its own completion event) is
+        # not lost to a not-yet-established LISTEN — the same
+        # LISTEN-before-return guarantee the old per-stream design had.
+        self._listening: asyncio.Event = asyncio.Event()
+
+    async def subscribe(self, user_id: int) -> asyncio.Queue[bytes]:
+        """Register a subscriber queue for ``user_id`` and ensure the
+        dispatcher (and its shared LISTEN connection) is running.
+
+        Awaits until the shared connection is actively LISTENing before
+        returning, so events fired immediately after subscribe reach the
+        channel. If the connection can't be established promptly the
+        subscriber is still returned (the stream stays up on keepalives
+        and the dispatcher keeps retrying) rather than failing the
+        request.
+        """
+        queue: asyncio.Queue[bytes] = asyncio.Queue(
+            maxsize=_SUBSCRIBER_QUEUE_MAXSIZE
+        )
+        async with self._lock:
+            self._subscribers.setdefault(user_id, set()).add(queue)
+            if self._dispatcher is None or self._dispatcher.done():
+                self._listening.clear()
+                self._dispatcher = asyncio.ensure_future(self._run())
+        try:
+            await asyncio.wait_for(self._listening.wait(), _LISTEN_READY_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("events.hub.listen_not_ready_within_timeout")
+        return queue
+
+    async def unsubscribe(
+        self, user_id: int, queue: asyncio.Queue[bytes]
+    ) -> None:
+        """Remove a subscriber queue. When the last subscriber leaves,
+        stop the dispatcher so the shared connection is released."""
+        async with self._lock:
+            queues = self._subscribers.get(user_id)
+            if queues is not None:
+                queues.discard(queue)
+                if not queues:
+                    del self._subscribers[user_id]
+            if not self._subscribers and self._dispatcher is not None:
+                self._dispatcher.cancel()
+                self._dispatcher = None
+                # Next subscribe must wait for a fresh LISTEN, not see a
+                # stale ``set`` from the connection we're tearing down.
+                self._listening.clear()
+
+    def _fanout(self, payload: dict, raw: str) -> None:
+        """Deliver a decoded NOTIFY payload to every matching subscriber.
+
+        Filtered by ``user_id`` via the shared ``_should_forward`` rule.
+        A full subscriber queue drops its OLDEST frame to make room —
+        never blocks the dispatcher, never grows unbounded.
+        """
+        for user_id, queues in self._subscribers.items():
+            if not _should_forward(payload, user_id):
+                continue
+            frame = f"data: {raw}\n\n".encode("utf-8")
+            for queue in queues:
+                try:
+                    queue.put_nowait(frame)
+                except asyncio.QueueFull:
+                    # Slow consumer: drop the oldest frame, enqueue the
+                    # newest. SSE clients recover state on reconnect.
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        queue.put_nowait(frame)
+                    except asyncio.QueueFull:
+                        pass
+
+    async def _run(self) -> None:
+        """Dispatcher loop: hold ONE LISTEN connection, fan NOTIFYs out.
+
+        Resilient to connection drops — reconnects + re-LISTENs without
+        disturbing live subscribers. Exits only when cancelled (last
+        subscriber gone) via ``asyncio.CancelledError``.
+        """
+        loop = asyncio.get_running_loop()
+        conn = None
+        fd = None
+        readable = asyncio.Event()
+
+        def _on_readable() -> None:
+            readable.set()
+
+        try:
+            while True:
+                if conn is None:
+                    try:
+                        conn = _open_listen_connection()
+                        fd = conn.fileno()
+                        loop.add_reader(fd, _on_readable)
+                        # A NOTIFY may have landed between LISTEN and the
+                        # reader registration; poll once immediately.
+                        readable.set()
+                        # LISTEN is live — release any subscribers
+                        # blocked in ``subscribe`` waiting for it.
+                        self._listening.set()
+                        logger.info("events.hub.listen_connected")
+                    except Exception:
+                        logger.exception(
+                            "events.hub.listen_connect_failed"
+                        )
+                        conn = None
+                        fd = None
+                        await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_S)
+                        continue
+
+                await readable.wait()
+                readable.clear()
+
+                try:
+                    conn.poll()
+                except Exception:
+                    # Connection dropped mid-stream. Tear it down and
+                    # loop back to reconnect — subscribers untouched.
+                    logger.exception("events.hub.poll_failed_reconnecting")
+                    # Not LISTENing until the reconnect re-establishes it.
+                    self._listening.clear()
+                    if fd is not None:
+                        try:
+                            loop.remove_reader(fd)
+                        except Exception:
+                            pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
+                    fd = None
+                    await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_S)
+                    continue
+
+                while conn.notifies:
+                    notif = conn.notifies.pop(0)
+                    try:
+                        payload = json.loads(notif.payload)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "events: dropped malformed payload: %r",
+                            notif.payload,
+                        )
+                        continue
+                    self._fanout(payload, notif.payload)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if fd is not None:
+                try:
+                    loop.remove_reader(fd)
+                except Exception:
+                    pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.exception("events.hub.cleanup_failed")
+
+
+# Module-level per-process singleton. One hub → one shared LISTEN
+# connection → all streams in this uvicorn worker.
+_hub = _Hub()
+
 
 async def _async_event_stream(
     user_id: int,
     is_disconnected=None,
 ) -> AsyncGenerator[bytes, None]:
-    """Async equivalent of the sync view's ``_event_stream``.
+    """Async SSE generator backed by the per-process ``_Hub`` (CC-229).
 
-    Opens the same dedicated psycopg2 LISTEN connection and yields
-    SSE-formatted bytes for ``user_id`` until disconnect. Instead of
-    ``select.select`` it registers the connection fd with the running
-    loop via ``loop.add_reader`` and waits on an ``asyncio.Event`` so
-    the loop is never blocked.
+    Registers an in-memory subscriber queue with the hub (NOT its own DB
+    connection) and yields SSE-formatted bytes for ``user_id`` until
+    disconnect. NOTIFYs are delivered to the queue by the hub's single
+    shared dispatcher; this generator just drains the queue and emits
+    idle keep-alives.
 
     ``is_disconnected`` is an optional awaitable-returning callable
     (``request.is_disconnected``); when it reports True the stream
@@ -100,21 +344,15 @@ async def _async_event_stream(
     Lifecycle: emits ``events.stream.start`` on entry and
     ``events.stream.end user_id=.. duration_ms=.. closed_by=..`` on
     exit (``closed_by`` ∈ {client, error, unknown}). No duration cap.
+    The subscriber is ALWAYS removed from the hub registry in
+    ``finally`` — no registry leaks on any exit path.
     """
-    loop = asyncio.get_running_loop()
-    conn = _open_listen_connection()
-    fd = conn.fileno()
-    notified = asyncio.Event()
     started_at = time.monotonic()
     closed_by = "unknown"
     logger.info("events.stream.start user_id=%s", user_id)
 
-    def _on_readable() -> None:
-        notified.set()
-
+    queue = await _hub.subscribe(user_id)
     try:
-        loop.add_reader(fd, _on_readable)
-
         # Initial comment line establishes the channel — EventSource
         # fires `open` on the client, distinguishing "connected, no
         # events yet" from "still connecting."
@@ -126,8 +364,8 @@ async def _async_event_stream(
                 break
 
             try:
-                await asyncio.wait_for(
-                    notified.wait(), _KEEPALIVE_INTERVAL_S
+                frame = await asyncio.wait_for(
+                    queue.get(), _KEEPALIVE_INTERVAL_S
                 )
             except asyncio.TimeoutError:
                 # Idle keep-alive. Comment line — EventSource ignores
@@ -137,23 +375,7 @@ async def _async_event_stream(
                 )
                 continue
 
-            notified.clear()
-            conn.poll()
-            while conn.notifies:
-                notif = conn.notifies.pop(0)
-                try:
-                    payload = json.loads(notif.payload)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "events: dropped malformed payload: %r",
-                        notif.payload,
-                    )
-                    continue
-
-                if not _should_forward(payload, user_id):
-                    continue
-
-                yield f"data: {notif.payload}\n\n".encode("utf-8")
+            yield frame
     except asyncio.CancelledError:
         # uvicorn tore the connection down (client gone). Mirrors the
         # sync view's GeneratorExit path.
@@ -170,16 +392,9 @@ async def _async_event_stream(
             duration_ms,
             closed_by,
         )
-        try:
-            loop.remove_reader(fd)
-        except Exception:
-            pass
-        try:
-            conn.close()
-        except Exception:
-            logger.exception(
-                "events.stream.cleanup_failed user_id=%s", user_id
-            )
+        # Always unregister — no registry leak. When this is the last
+        # subscriber the hub releases its shared LISTEN connection.
+        await _hub.unsubscribe(user_id, queue)
 
 
 async def events_stream(request: Request):
