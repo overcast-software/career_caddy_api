@@ -316,24 +316,32 @@ class AnswerService:
         if hasattr(self.ai_client, "chat") and hasattr(
             self.ai_client.chat, "completions"
         ):
+            from job_hunting.lib.ai_client import (
+                is_temperature_error,
+                note_temperature_rejected,
+                rejects_temperature,
+            )
+
             kwargs = {
                 "model": self.model,
                 "messages": messages,
-                "temperature": self.temperature,
                 "timeout": self._AI_CALL_TIMEOUT,
             }
+            # Some newer OpenAI models (the gpt-5 line, the o-series) accept
+            # only the default temperature and 400 on an explicit one —
+            # VERIFIED against gpt-5 on 2026-08-12. That must not turn every
+            # answer into a failure the moment the model is bumped, so we
+            # retry without it; and once a model has rejected it we stop
+            # sending it at all, so the wasted round-trip happens at most once
+            # per process rather than on every generation.
+            if not rejects_temperature(self.model):
+                kwargs["temperature"] = self.temperature
             try:
                 response = self.ai_client.chat.completions.create(**kwargs)
             except Exception as exc:
-                # Some newer OpenAI models (the gpt-5 line, the o-series) accept
-                # only the default temperature and 400 on an explicit one. That
-                # must not turn every answer into a failure the moment the model
-                # is bumped — retry once without it. Detected from the error
-                # text rather than a model allowlist, which would rot on the
-                # next release.
-                msg = str(exc).lower()
-                if "temperature" not in msg:
+                if "temperature" not in kwargs or not is_temperature_error(exc):
                     raise
+                note_temperature_rejected(self.model)
                 kwargs.pop("temperature", None)
                 response = self.ai_client.chat.completions.create(**kwargs)
             return response.choices[0].message.content or ""

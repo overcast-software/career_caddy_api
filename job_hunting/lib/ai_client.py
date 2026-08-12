@@ -56,6 +56,37 @@ def resolve_model(env_var, default):
     return raw or default
 
 
+# Models observed at RUNTIME to reject an explicit `temperature`. Learned from
+# the API's own 400 rather than hardcoded, so it can't rot when OpenAI ships
+# the next model — but cached, so the wasted round-trip happens at most once
+# per model per process instead of on every single generation.
+#
+# VERIFIED 2026-08-12 against the live API: gpt-5 returns
+#   400 "Unsupported value: 'temperature' does not support 0.7 with this
+#        model. Only the default (1) value is supported."
+# and the same request without `temperature` returns 200.
+_NO_TEMPERATURE_MODELS = set()
+
+
+def rejects_temperature(model):
+    """True if this model has already 400'd on an explicit temperature."""
+    return model in _NO_TEMPERATURE_MODELS
+
+
+def note_temperature_rejected(model):
+    """Record that `model` rejects an explicit temperature."""
+    _NO_TEMPERATURE_MODELS.add(model)
+
+
+def is_temperature_error(exc):
+    """Whether an exception is the API complaining about `temperature`.
+
+    Matched on the error text, not a model allowlist — the set of models with
+    this restriction changes with every release, but the message does not.
+    """
+    return "temperature" in str(exc).lower()
+
+
 def _read_timeout_env():
     """Read OpenAI HTTP timeout (in seconds) from environment without caching."""
     val = os.environ.get("OPENAI_TIMEOUT_SECONDS") or os.environ.get("OPENAI_TIMEOUT_SECS") or os.environ.get("OPENAI_HTTP_TIMEOUT")

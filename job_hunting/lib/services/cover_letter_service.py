@@ -1,5 +1,10 @@
 from jinja2 import Environment, FileSystemLoader
-from job_hunting.lib.ai_client import resolve_model
+from job_hunting.lib.ai_client import (
+    is_temperature_error,
+    note_temperature_rejected,
+    rejects_temperature,
+    resolve_model,
+)
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
@@ -90,17 +95,21 @@ class CoverLetterService:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.7,
         }
+        # Newer OpenAI models (the gpt-5 line, o-series) accept only the
+        # default temperature and 400 on an explicit one — verified against
+        # gpt-5 on 2026-08-12. Retry without it rather than failing the
+        # generation, and remember the rejection so the wasted round-trip
+        # happens once per process, not on every cover letter. Same guard as
+        # AnswerService._call_ai.
+        if not rejects_temperature(self.model):
+            kwargs["temperature"] = 0.7
         try:
             completion = self.ai_client.chat.completions.create(**kwargs)
         except Exception as exc:
-            # Newer OpenAI models (gpt-5 line, o-series) may accept only the
-            # default temperature and 400 on an explicit one — retry once
-            # without rather than failing the generation. Matches the same
-            # guard in AnswerService._call_ai.
-            if "temperature" not in str(exc).lower():
+            if "temperature" not in kwargs or not is_temperature_error(exc):
                 raise
+            note_temperature_rejected(self.model)
             kwargs.pop("temperature", None)
             completion = self.ai_client.chat.completions.create(**kwargs)
         return completion.choices[0].message.content.strip()
