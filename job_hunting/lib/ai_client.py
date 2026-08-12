@@ -38,12 +38,20 @@ def resolve_model(env_var, default):
 
     The convention writes provider-prefixed ids ("openai:gpt-5"), but the
     services that call this hand the value straight to
-    client.chat.completions.create(model=...), which needs a BARE id. Strip
-    the prefix so one env var works for both styles of consumer.
+    client.chat.completions.create(model=...), which needs a BARE id. An
+    `openai:` prefix is therefore stripped.
 
-    A non-openai provider prefix is honored as a bare name rather than
-    rejected — get_client() is OpenAI-only today, so pointing these roles at
-    Anthropic needs routing work, not just a config value.
+    A NON-OPENAI prefix RAISES instead of being stripped. get_client() builds
+    an OpenAI client and nothing else, so silently handing it
+    "claude-sonnet-4-6" would produce a confusing model_not_found from the
+    wrong provider's API — which is precisely the misroute
+    job_post_extractor._build_agent_for_model guards against by the same
+    means, after the Tier2 incident (scrape #237 / jp 1550, 2026-04-30).
+    Failing loudly at config time beats a baffling runtime error.
+
+    Routing these roles at Anthropic is real work, not a config value: they
+    call the raw OpenAI SDK with string prompts, so they would have to move
+    onto the pydantic-ai path that job_post_extractor already uses.
     """
     raw = (
         os.environ.get(env_var)
@@ -52,8 +60,48 @@ def resolve_model(env_var, default):
     )
     raw = str(raw).strip()
     if ":" in raw:
-        raw = raw.split(":", 1)[1].strip()
+        provider, bare = raw.split(":", 1)
+        provider, bare = provider.strip().lower(), bare.strip()
+        if provider != "openai":
+            raise ValueError(
+                f"{env_var}={raw!r} names provider {provider!r}, but this role "
+                "runs on the OpenAI client only (job_hunting.lib.ai_client."
+                "get_client). Use an 'openai:' model here, or move the role "
+                "onto the pydantic-ai path if you need another provider."
+            )
+        raw = bare
     return raw or default
+
+
+# Models observed at RUNTIME to reject an explicit `temperature`. Learned from
+# the API's own 400 rather than hardcoded, so it can't rot when OpenAI ships
+# the next model — but cached, so the wasted round-trip happens at most once
+# per model per process instead of on every single generation.
+#
+# VERIFIED 2026-08-12 against the live API: gpt-5 returns
+#   400 "Unsupported value: 'temperature' does not support 0.7 with this
+#        model. Only the default (1) value is supported."
+# and the same request without `temperature` returns 200.
+_NO_TEMPERATURE_MODELS = set()
+
+
+def rejects_temperature(model):
+    """True if this model has already 400'd on an explicit temperature."""
+    return model in _NO_TEMPERATURE_MODELS
+
+
+def note_temperature_rejected(model):
+    """Record that `model` rejects an explicit temperature."""
+    _NO_TEMPERATURE_MODELS.add(model)
+
+
+def is_temperature_error(exc):
+    """Whether an exception is the API complaining about `temperature`.
+
+    Matched on the error text, not a model allowlist — the set of models with
+    this restriction changes with every release, but the message does not.
+    """
+    return "temperature" in str(exc).lower()
 
 
 def _read_timeout_env():
