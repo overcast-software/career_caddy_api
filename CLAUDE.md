@@ -1,30 +1,43 @@
 # api/CLAUDE.md
 
 Guidance for Claude Code when working in `api/` (Django + DRF +
-JSON:API + MCP). This file is a pointer; the canonical state lives
-in `api/notes.org`.
+JSON:API + MCP). This file is a quickstart; durable canon lives in
+claudex.
 
 ## Source of truth — read FIRST
 
-- **`api/notes.org`** (drill via `claude/cap-*`) — auth scheme,
-  dedupe pipeline contract, JSON:API conventions, MCP composites vs
-  CRUD split, migration gotchas.
-- **Parent `todo.org`** (drill via `claude/cc-*`) — api work-items
-  are filed under the parent `Inbox`; there is no `api/todo.org`.
-
-Boot sequence (every cc-api session):
+**claudex is the source of truth for priming.** Boot every cc-api
+session from it, with an explicit `projectId` (the dockerized MCP
+CWD-detects to a bogus `-app`):
 
 ```
-emacsclient --eval '(claude/cap-help)'
-emacsclient --eval '(claude/cap-notes-toc)'
-emacsclient --eval '(claude/cap-notes-read "Architecture/Auth scheme — Bearer not Api-Key")'
-emacsclient --eval '(claude/cap-notes-read "Architecture/Dedupe pipeline contract")'
-emacsclient --eval '(claude/cap-notes-read "Architecture/API basic CRUD, MCP composites")'
+mcp__claudex__get_project_context  projectId=-home-oldbones-Network-syncthing-Projects-career-caddy-api
+mcp__claudex__recall_memory        projectId=-home-oldbones-Network-syncthing-Projects-career-caddy-api
 ```
 
-For scrape-ingestion or JobPost write-path work, also read
-`Architecture/Dedupe-first on new write paths` before adding the
-endpoint.
+Also recall the parent's `bootstrap` map memory under
+`-home-oldbones-Network-syncthing-Projects-career-caddy` for the
+cross-repo orientation. The api canon that used to live in
+`api/notes.org Architecture/*` is now claudex memories — auth scheme
+(`api-auth-scheme-bearer-not-api-key`), the dedupe pipeline contract,
+JSON:API conventions, the CRUD-vs-MCP-composites split, migration
+gotchas, and the fast-test recipe (`api-fast-test-recipe`).
+
+Work state lives on the **PACA** board (Platform
+`438e9c51-1c71-4cad-b597-8356b0b600ec`, prefix `CC`; Backend `BACK`),
+not in an org file.
+
+For scrape-ingestion or JobPost write-path work, recall the
+dedupe-first convention before adding the endpoint — it is a hard rule
+on every JobPost write path.
+
+### RETIRED for agents — do not use
+
+`api/notes.org` and the parent `todo.org` are Doug's personal emacs
+surface: no `Read`, no writes, no commits. The `claude/cap-*` /
+`cc-todo-*` emacsclient helpers no longer exist — `~/.config/doom/elisp/`
+was deleted 2026-08-04, so calling one returns a void-function error.
+Do not reintroduce them into a boot sequence.
 
 ## What this submodule is
 
@@ -46,8 +59,9 @@ agents and automation.
 
 All conventions — auth scheme, dedupe contract, JSON:API patterns,
 ScrapeProfile schema, MCP composites split, write-path dedupe rule —
-live in `api/notes.org Architecture/*`. The wiki is the source; this
-file does not duplicate them.
+live in claudex (`recall_memory` on the api projectId, plus the
+parent's `bootstrap`). claudex is the source; this file does not
+duplicate them.
 
 ## Running tests + lint
 
