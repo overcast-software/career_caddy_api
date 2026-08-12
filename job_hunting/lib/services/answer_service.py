@@ -5,17 +5,32 @@ from job_hunting.lib.services.application_prompt_builder import ApplicationPromp
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
+# CC: answers are the most quality-sensitive generation path in the product —
+# they become prose the user pastes into a real application. This role was the
+# only one hardcoded to the cheapest model with no env override and no entry in
+# the admin agent-role registry, so nobody could see it or change it. It now
+# follows the same convention as every other role (ANSWER_MODEL ->
+# CADDY_DEFAULT_MODEL -> default). See api/views/admin.py _agent_role_specs.
+ANSWER_MODEL_ENV = "ANSWER_MODEL"
+ANSWER_MODEL_DEFAULT = "openai:gpt-5"
+# 0.3 produced safe, interchangeable prose. Answers should draw on the user's
+# specific history, which needs room to vary.
+ANSWER_TEMPERATURE_DEFAULT = 0.7
+
+
 class AnswerService:
     def __init__(
         self,
         ai_client,
-        model="gpt-4o-mini",
-        temperature=0.3,
+        model=None,
+        temperature=ANSWER_TEMPERATURE_DEFAULT,
         previous_limit=None,
         max_section_chars=60000,
     ):
+        from job_hunting.lib.ai_client import resolve_model
+
         self.ai_client = ai_client
-        self.model = model
+        self.model = model or resolve_model(ANSWER_MODEL_ENV, ANSWER_MODEL_DEFAULT)
         self.temperature = temperature
         self.previous_limit = previous_limit  # None means no limit
         self.max_section_chars = max_section_chars
@@ -264,12 +279,32 @@ class AnswerService:
     # that "stuck forever" becomes "failed in 2 min" so the UI can react.
     _AI_CALL_TIMEOUT = 120
 
+    # The old system message ("Be concise and professional") was an instruction
+    # to be bland, and that is what it produced: correct, interchangeable prose
+    # that ignored the specifics sitting in the Career Profile. The user's
+    # favorited Q&A history is full of concrete, distinguishing material — the
+    # model's job is to REACH for it, not to summarize a generic candidate.
+    _SYSTEM_PROMPT = (
+        "You help a job seeker answer application questions in their own voice.\n"
+        "\n"
+        "Ground every answer in the specific evidence provided — the Career "
+        "Profile, prior Q&A, resumes and cover letters are the source material, "
+        "not decoration. Name the actual employer, project, tool, or outcome "
+        "rather than describing the shape of one. Prefer a concrete detail the "
+        "user actually lived over a general claim that would fit anyone.\n"
+        "\n"
+        "Never invent an experience, employer, metric, or credential. If the "
+        "material does not support a direct answer, answer honestly from what "
+        "is there — a candid, specific 'here is the closest thing I have done' "
+        "beats a confident generality.\n"
+        "\n"
+        "Match the register of the user's own prior answers. Be substantive "
+        "rather than padded: length should follow the question, not a template."
+    )
+
     def _call_ai(self, prompt: str) -> str:
         messages = [
-            {
-                "role": "system",
-                "content": "You are an assistant helping craft job application answers. Reply in GitHub-Flavored Markdown. Be concise and professional.",
-            },
+            {"role": "system", "content": self._SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
 
@@ -281,12 +316,26 @@ class AnswerService:
         if hasattr(self.ai_client, "chat") and hasattr(
             self.ai_client.chat, "completions"
         ):
-            response = self.ai_client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                timeout=self._AI_CALL_TIMEOUT,
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "timeout": self._AI_CALL_TIMEOUT,
+            }
+            try:
+                response = self.ai_client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                # Some newer OpenAI models (the gpt-5 line, the o-series) accept
+                # only the default temperature and 400 on an explicit one. That
+                # must not turn every answer into a failure the moment the model
+                # is bumped — retry once without it. Detected from the error
+                # text rather than a model allowlist, which would rot on the
+                # next release.
+                msg = str(exc).lower()
+                if "temperature" not in msg:
+                    raise
+                kwargs.pop("temperature", None)
+                response = self.ai_client.chat.completions.create(**kwargs)
             return response.choices[0].message.content or ""
 
         if hasattr(self.ai_client, "responses"):

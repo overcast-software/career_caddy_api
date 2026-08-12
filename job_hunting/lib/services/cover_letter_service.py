@@ -1,15 +1,34 @@
 from jinja2 import Environment, FileSystemLoader
+from job_hunting.lib.ai_client import resolve_model
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
+# CC: like answers, cover letters generate prose the user actually sends, and
+# were likewise pinned to the cheapest model with no env override and no entry
+# in the admin agent-role registry. Same convention as every other role now:
+# COVER_LETTER_MODEL -> CADDY_DEFAULT_MODEL -> default.
+COVER_LETTER_MODEL_ENV = "COVER_LETTER_MODEL"
+COVER_LETTER_MODEL_DEFAULT = "openai:gpt-5"
+
 
 class CoverLetterService:
-    def __init__(self, ai_client, job_post, resume=None, resume_markdown=None, user_id=None):
+    def __init__(
+        self,
+        ai_client,
+        job_post,
+        resume=None,
+        resume_markdown=None,
+        user_id=None,
+        model=None,
+    ):
         self.job_post = job_post
         self.resume = resume
         self.ai_client = ai_client
         self._resume_markdown = resume_markdown
         self._user_id = user_id
+        self.model = model or resolve_model(
+            COVER_LETTER_MODEL_ENV, COVER_LETTER_MODEL_DEFAULT
+        )
 
     def generate_cover_letter(self, injected_prompt=None) -> str:
         """Generate cover-letter text from the configured job_post + resume.
@@ -51,15 +70,37 @@ class CoverLetterService:
             },
         )
 
-        completion = self.ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
+        kwargs = {
+            "model": self.model,
+            "messages": [
                 {
                     "role": "system",
-                    "content": "You are a professional cover letter writer. Output only the letter text.",
+                    "content": (
+                        "You write cover letters for a job seeker, in their own "
+                        "voice. Output only the letter text.\n"
+                        "\n"
+                        "Ground the letter in the specific evidence provided — "
+                        "name the actual employer, project, tool, or outcome "
+                        "from the candidate's history rather than describing "
+                        "the shape of one. Never invent an experience, metric, "
+                        "or credential. Connect their real work to this "
+                        "specific role and company; a letter that could be sent "
+                        "to any employer has failed."
+                    ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
-        )
+            "temperature": 0.7,
+        }
+        try:
+            completion = self.ai_client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            # Newer OpenAI models (gpt-5 line, o-series) may accept only the
+            # default temperature and 400 on an explicit one — retry once
+            # without rather than failing the generation. Matches the same
+            # guard in AnswerService._call_ai.
+            if "temperature" not in str(exc).lower():
+                raise
+            kwargs.pop("temperature", None)
+            completion = self.ai_client.chat.completions.create(**kwargs)
         return completion.choices[0].message.content.strip()
