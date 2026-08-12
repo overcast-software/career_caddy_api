@@ -224,3 +224,71 @@ class TestStreamForwarding(TransactionTestCase):
         )
         self.assertEqual(body["id"], 42)
         self.assertEqual(body["user_id"], user.id)
+
+
+class TestHubSurvivesLoopChange(TransactionTestCase):
+    """``_hub`` is a module-level singleton, so it outlives any single
+    event loop and must rebind its loop-bound state when the loop
+    changes (BACK-126).
+
+    ``asyncio`` primitives bind to the first loop that *awaits* them,
+    so a hub built at import and then used from two successive loops
+    raised ``RuntimeError: <asyncio.locks.Event ...> is bound to a
+    different event loop`` on the second one.
+
+    Production never hits this — uvicorn runs one loop per process — so
+    the bug was only ever visible where a process opens successive
+    loops. That made it invisible under a sharded test run (each shard
+    is a fresh process with a fresh import) and fatal under a
+    single-process one, which is why api CI was red while the same 2063
+    tests passed under Dagger. This test asserts the invariant directly
+    rather than leaving it to depend on how the suite happens to shard.
+    """
+
+    def test_hub_rebinds_across_successive_event_loops(self):
+        user = User.objects.create_user(username="frank", password="pw")
+
+        async def _cycle():
+            queue = await sse_asgi._hub.subscribe(user.id)
+            await sse_asgi._hub.unsubscribe(user.id, queue)
+            return sse_asgi._hub._loop
+
+        first_loop = asyncio.run(_cycle())
+        # A second, distinct loop over the same singleton. This is the
+        # call that used to raise.
+        second_loop = asyncio.run(_cycle())
+
+        self.assertIsNotNone(first_loop)
+        self.assertIsNotNone(second_loop)
+        self.assertIsNot(
+            first_loop,
+            second_loop,
+            "expected two distinct loops — the test would be vacuous "
+            "if asyncio.run reused one",
+        )
+
+    def test_stale_subscribers_are_dropped_on_loop_change(self):
+        """State from the dead loop is discarded, not carried forward.
+
+        A subscriber queue is itself loop-bound, so keeping one across
+        loops would trade a clear RuntimeError for a stream that
+        silently never delivers.
+        """
+        user = User.objects.create_user(username="grace", password="pw")
+
+        async def _subscribe_and_abandon():
+            # Deliberately no unsubscribe — leave the hub holding a
+            # queue that belongs to a loop about to be closed.
+            await sse_asgi._hub.subscribe(user.id)
+
+        asyncio.run(_subscribe_and_abandon())
+        self.assertIn(user.id, sse_asgi._hub._subscribers)
+
+        async def _resubscribe():
+            queue = await sse_asgi._hub.subscribe(user.id)
+            # Exactly one: the abandoned queue from the previous loop
+            # was dropped, not accumulated.
+            self.assertEqual(len(sse_asgi._hub._subscribers[user.id]), 1)
+            await sse_asgi._hub.unsubscribe(user.id, queue)
+
+        asyncio.run(_resubscribe())

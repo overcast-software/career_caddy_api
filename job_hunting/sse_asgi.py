@@ -150,6 +150,9 @@ class _Hub:
         # tabs has multiple queues under the same key.
         self._subscribers: dict[int, set[asyncio.Queue[bytes]]] = {}
         self._dispatcher: asyncio.Task | None = None
+        # The loop the primitives below are bound to. See
+        # ``_bind_running_loop``.
+        self._loop: asyncio.AbstractEventLoop | None = None
         # Guards start/stop transitions so concurrent first/last
         # subscribers don't race on the dispatcher task + connection.
         self._lock = asyncio.Lock()
@@ -160,6 +163,38 @@ class _Hub:
         # not lost to a not-yet-established LISTEN — the same
         # LISTEN-before-return guarantee the old per-stream design had.
         self._listening: asyncio.Event = asyncio.Event()
+
+    def _bind_running_loop(self) -> None:
+        """Rebuild loop-bound state when the running loop has changed.
+
+        ``_hub`` is a module-level singleton constructed at import, but
+        an ``asyncio`` primitive binds to the first loop that *awaits*
+        it (3.10+ dropped the explicit ``loop=`` parameter in favour of
+        this lazy binding). A process that runs more than one loop over
+        its lifetime therefore hits ``RuntimeError: <asyncio.locks.Event
+        ...> is bound to a different event loop`` the moment the second
+        loop touches ``self._lock`` or ``self._listening``.
+
+        Under uvicorn there is exactly one loop per process, so this is
+        a no-op in production. It matters wherever a process opens
+        successive loops — most visibly ``asyncio.run()`` per test, which
+        is what made ``test_sse_asgi`` fail on a single-process test run
+        while passing under a sharded one (BACK-126).
+
+        Everything held here belongs to the previous loop and is
+        unusable from the new one — the lock, the event, every
+        subscriber ``Queue``, and the dispatcher ``Task`` — so it is
+        dropped wholesale rather than migrated. Those subscribers'
+        streams died with their loop; there is nothing to preserve.
+        """
+        loop = asyncio.get_running_loop()
+        if self._loop is loop:
+            return
+        self._loop = loop
+        self._lock = asyncio.Lock()
+        self._listening = asyncio.Event()
+        self._subscribers = {}
+        self._dispatcher = None
 
     async def subscribe(self, user_id: int) -> asyncio.Queue[bytes]:
         """Register a subscriber queue for ``user_id`` and ensure the
@@ -172,6 +207,7 @@ class _Hub:
         and the dispatcher keeps retrying) rather than failing the
         request.
         """
+        self._bind_running_loop()
         queue: asyncio.Queue[bytes] = asyncio.Queue(
             maxsize=_SUBSCRIBER_QUEUE_MAXSIZE
         )
@@ -191,6 +227,11 @@ class _Hub:
     ) -> None:
         """Remove a subscriber queue. When the last subscriber leaves,
         stop the dispatcher so the shared connection is released."""
+        # A stream always unsubscribes on the loop it subscribed on, so
+        # this is normally an early return. It is here so the ``finally``
+        # cleanup in ``_async_event_stream`` can never be the call that
+        # raises a cross-loop error while unwinding.
+        self._bind_running_loop()
         async with self._lock:
             queues = self._subscribers.get(user_id)
             if queues is not None:
