@@ -65,6 +65,13 @@ def _agent_role_specs():
         ("job_parser", "Extracts JobPost fields from scraped HTML", "JOB_PARSER_MODEL", global_default if os.environ.get("CADDY_DEFAULT_MODEL") else "gpt-4o"),
         ("hint_generator", "Suggests scrape selectors / tier-0 hints", "HINT_GENERATOR_MODEL", "openai:gpt-4o-mini"),
         ("description_arbiter", "Picks between two job descriptions when scrapes disagree", "DESCRIPTION_ARBITER_MODEL", "openai:gpt-4o-mini"),
+        # User-facing prose. These were absent from this registry and pinned to
+        # gpt-4o-mini in their service constructors, so the two roles whose
+        # output a user actually sends were both the cheapest and the only ones
+        # invisible on this page. They resolve through ai_client.resolve_model,
+        # which strips the provider prefix for the raw OpenAI SDK.
+        ("answer", "Answers an application question from career data", "ANSWER_MODEL", "openai:gpt-5"),
+        ("cover_letter", "Writes a cover letter for a job post", "COVER_LETTER_MODEL", "openai:gpt-5"),
     ]
 
 

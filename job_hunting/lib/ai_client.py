@@ -29,6 +29,33 @@ def get_api_key(required=False):
     return _API_KEY
 
 
+def resolve_model(env_var, default):
+    """Resolve a per-role model id for the RAW OpenAI SDK.
+
+    Follows the same precedence the pydantic-ai roles use (see
+    api/views/admin.py _agent_role_specs): the role's own env var, then
+    CADDY_DEFAULT_MODEL, then the caller's built-in default.
+
+    The convention writes provider-prefixed ids ("openai:gpt-5"), but the
+    services that call this hand the value straight to
+    client.chat.completions.create(model=...), which needs a BARE id. Strip
+    the prefix so one env var works for both styles of consumer.
+
+    A non-openai provider prefix is honored as a bare name rather than
+    rejected — get_client() is OpenAI-only today, so pointing these roles at
+    Anthropic needs routing work, not just a config value.
+    """
+    raw = (
+        os.environ.get(env_var)
+        or os.environ.get("CADDY_DEFAULT_MODEL")
+        or default
+    )
+    raw = str(raw).strip()
+    if ":" in raw:
+        raw = raw.split(":", 1)[1].strip()
+    return raw or default
+
+
 def _read_timeout_env():
     """Read OpenAI HTTP timeout (in seconds) from environment without caching."""
     val = os.environ.get("OPENAI_TIMEOUT_SECONDS") or os.environ.get("OPENAI_TIMEOUT_SECS") or os.environ.get("OPENAI_HTTP_TIMEOUT")
