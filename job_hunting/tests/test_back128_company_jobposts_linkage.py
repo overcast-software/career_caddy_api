@@ -179,15 +179,26 @@ class TestDottedIncludeEmitsLinkage(_SharedCompanyBase):
         )
         self.assertEqual(ids, {self.app_alice.id})
 
-    def test_no_include_stays_links_only(self):
-        """The gate still holds: without `?include=`, no `data`. Emitting
-        linkage here would hand Ember Data ids with no loaded records and
-        it would fetch them one at a time — worse than the single
-        related-link request it makes today."""
+    def test_linkage_is_emitted_without_include_too(self):
+        """`linked_relationships` makes the linkage unconditional, so the
+        relationship is real on every read of a company — not only when the
+        caller thought to ask for it. Still user-scoped."""
         resp = self._get_company(self.client_alice, include=None)
-        rels = self._company_resource(resp).get("relationships") or {}
-        self.assertNotIn("data", rels.get("job-posts") or {})
-        self.assertNotIn("data", rels.get("job-applications") or {})
+        resource = self._company_resource(resp)
+        self.assertEqual(
+            self._linkage_ids(resource, "job-posts"), {self.jp_alice.id},
+        )
+        self.assertEqual(
+            self._linkage_ids(resource, "job-applications"),
+            {self.app_alice.id},
+        )
+
+    def test_list_emits_linkage_without_include(self):
+        resp = self.client_alice.get("/api/v1/companies/")
+        resource = self._company_resource(resp)
+        self.assertEqual(
+            self._linkage_ids(resource, "job-posts"), {self.jp_alice.id},
+        )
 
 
 class TestJobPostsLinkageIsUserScoped(_SharedCompanyBase):

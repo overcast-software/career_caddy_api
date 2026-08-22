@@ -1453,15 +1453,29 @@ class CompanySerializer(BaseSerializer):
         "aliases": {"attr": "aliases", "type": "company", "uselist": True},
     }
     relationship_fks = {"canonical": "canonical_id"}
-    # NOTE: deliberately NOT in `linked_relationships`. Both to-manys emit
-    # `data` linkage via the `?include=` gate in BaseSerializer.to_resource,
-    # which is the shape that actually helps: linkage AND the records
-    # sideloaded in `included`, so Ember Data resolves the hasMany with no
-    # further request. Forcing the linkage unconditionally would emit ids
-    # with NO records loaded on the bare `findAll('company')` paths, and the
-    # adapter's `coalesceFindRequests` is false — so Ember Data would fetch
-    # them one GET per record, which is worse than the single related-link
-    # request it does today. See BACK-128.
+    # Emit real `data` linkage for both to-manys instead of links-only.
+    # Without it Ember Data cannot associate the records that
+    # `?include=job-posts` already put in `included`; it falls back to
+    # `links.related` and refetches the relationship. `await
+    # company.jobPosts` is the correct Ember idiom and needs no rewrite on
+    # the frontend once the linkage is real.
+    #
+    # Both legs are user-scoped in `get_related` below. Company is shared
+    # across all users (no `created_by` on the model), so its `job_posts`
+    # reverse FK spans the whole platform — an unscoped linkage would
+    # publish the ids and existence of every other user's posts at this
+    # company. Under-scoping is equally bad: embedding an id the caller
+    # cannot fetch makes Ember Data 404 and silently drop it.
+    #
+    # Pair this with `?include=` on the caller, as JobApplicationSerializer
+    # does for `application-statuses`. Linkage tells Ember Data which
+    # records belong to the hasMany; only the sideload puts them in the
+    # store. A caller that emits linkage without the include hands Ember
+    # ids it must then fetch — and the legacy adapter's
+    # `coalesceFindRequests` is false, so that is one GET per record. Both
+    # flows that traverse these two today do pass an include
+    # (`job-posts/selector.js`, `questions/form.js`). See BACK-128.
+    linked_relationships = ["job-posts", "job-applications"]
 
     def get_related(self, obj, rel_name):
         request = getattr(self, "request", None)
