@@ -162,7 +162,20 @@ class BaseSerializer:
         """Parse the request's `?include=` (and `?includes=`) into a set of
         relationship names matched against this serializer's relationships
         keys. Tolerant of dasherized/underscored variants. Returns the
-        empty set when no include is requested."""
+        empty set when no include is requested.
+
+        Dotted paths match on their FIRST segment: `?include=job-applications
+        .job-post` requests this resource's `job-applications`, and the
+        `.job-post` tail is a further hop applied to each of those. The
+        viewset's `_build_included` already walks dotted paths segment by
+        segment; matching the whole undivided string here meant a dotted
+        include sideloaded its records into `included` but emitted NO `data`
+        linkage for the first hop — so Ember Data could not associate them
+        and refetched the relationship through `links.related`, one request
+        per parent. That was the `await company.jobApplications` N+1 on the
+        questions form, whose include is literally
+        `job-posts,job-applications.job-post` (BACK-128).
+        """
         request = getattr(self, "request", None)
         if request is None:
             return set()
@@ -176,10 +189,11 @@ class BaseSerializer:
         rel_keys = set(self.relationships.keys())
         out = set()
         for name in raw_parts:
-            if name in rel_keys:
-                out.add(name)
+            head = name.split(".", 1)[0]
+            if head in rel_keys:
+                out.add(head)
                 continue
-            dasher = name.replace("_", "-")
+            dasher = head.replace("_", "-")
             if dasher in rel_keys:
                 out.add(dasher)
         return out
@@ -405,6 +419,9 @@ class DjangoUserSerializer:
         the empty set when no include is requested OR when no request
         is attached — the latter is the read-time default that keeps
         /me/ JSON:API-compliant (links-only relationships).
+
+        Dotted paths match on their first segment, for the same reason as
+        BaseSerializer._requested_includes — see the note there.
         """
         request = getattr(self, "request", None)
         if request is None:
@@ -421,10 +438,11 @@ class DjangoUserSerializer:
         rel_keys = {name for name, _t, _u in self._REL_DEFS}
         out = set()
         for name in raw_parts:
-            if name in rel_keys:
-                out.add(name)
+            head = name.split(".", 1)[0]
+            if head in rel_keys:
+                out.add(head)
                 continue
-            dasher = name.replace("_", "-")
+            dasher = head.replace("_", "-")
             if dasher in rel_keys:
                 out.add(dasher)
         return out
@@ -1435,30 +1453,50 @@ class CompanySerializer(BaseSerializer):
         "aliases": {"attr": "aliases", "type": "company", "uselist": True},
     }
     relationship_fks = {"canonical": "canonical_id"}
+    # Emit real `data` linkage for both to-manys instead of links-only.
+    # Without it Ember Data cannot associate the records that
+    # `?include=job-posts` already put in `included`; it falls back to
+    # `links.related` and refetches the relationship. `await
+    # company.jobPosts` is the correct Ember idiom and needs no rewrite on
+    # the frontend once the linkage is real.
+    #
+    # Both legs are user-scoped in `get_related` below. Company is shared
+    # across all users (no `created_by` on the model), so its `job_posts`
+    # reverse FK spans the whole platform — an unscoped linkage would
+    # publish the ids and existence of every other user's posts at this
+    # company. Under-scoping is equally bad: embedding an id the caller
+    # cannot fetch makes Ember Data 404 and silently drop it.
+    #
+    # Pair this with `?include=` on the caller, as JobApplicationSerializer
+    # does for `application-statuses`. Linkage tells Ember Data which
+    # records belong to the hasMany; only the sideload puts them in the
+    # store. A caller that emits linkage without the include hands Ember
+    # ids it must then fetch — and the legacy adapter's
+    # `coalesceFindRequests` is false, so that is one GET per record. Both
+    # flows that traverse these two today do pass an include
+    # (`job-posts/selector.js`, `questions/form.js`). See BACK-128.
+    linked_relationships = ["job-posts", "job-applications"]
 
     def get_related(self, obj, rel_name):
         request = getattr(self, "request", None)
-        user_id = getattr(getattr(request, "user", None), "id", None) if request else None
+        user = getattr(request, "user", None) if request else None
+        user_id = getattr(user, "id", None)
         if rel_name == "job-posts":
-            qs = JobPost.objects.filter(company_id=obj.id)
-            # Visibility filter mirrors JobPostViewSet.list — without
-            # `scrapes` and `discoveries` here, sideloaded company.job-posts
-            # disagrees with what /companies/<id>/job-posts/ returns.
-            if user_id:
-                is_staff = bool(getattr(getattr(request, "user", None), "is_staff", False))
-                if not is_staff:
-                    qs = qs.filter(
-                        Q(created_by_id=user_id) |
-                        Q(applications__user_id=user_id) |
-                        Q(scores__user_id=user_id) |
-                        Q(scrapes__created_by_id=user_id) |
-                        Q(discoveries__user_id=user_id)
-                    ).distinct()
+            # `visible_to` is the six-clause filter (created / applied /
+            # scored / scraped / discovered / member, staff see all) living
+            # on JobPostQuerySet — the same predicate JobPostViewSet uses,
+            # reached through the model layer because `serializers` must not
+            # import from `views`. No user (anonymous, or a serializer used
+            # outside a request) resolves to empty, never to unfiltered.
+            qs = JobPost.objects.filter(company_id=obj.id).visible_to(user)
             return "job-post", list(qs)
         elif rel_name == "job-applications":
-            qs = JobApplication.objects.filter(company_id=obj.id)
-            if user_id:
-                qs = qs.filter(user_id=user_id)
+            # JobApplication is per-user, so ownership IS the whole filter
+            # (mirrors JobApplicationViewSet.list). No user -> empty, for
+            # the same reason as above.
+            if not user_id:
+                return "job-application", []
+            qs = JobApplication.objects.filter(company_id=obj.id, user_id=user_id)
             return "job-application", list(qs)
         elif rel_name == "aliases":
             return "company", list(Company.objects.filter(canonical_id=obj.id))

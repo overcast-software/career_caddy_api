@@ -209,21 +209,13 @@ class CompanyViewSet(BaseViewSet):
         if not Company.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
         # JobPost is universal; per-user visibility flows through the same
-        # set of signals as JobPostViewSet.list. Without `discoveries` here
-        # email-ingested posts were invisible on the company page even
-        # though the user had been notified via cc_auto. Staff bypass
-        # mirrors list() — every post on the company shows.
-        if request.user.is_staff:
-            qs = JobPost.objects.filter(company_id=pk)
-        else:
-            qs = JobPost.objects.filter(company_id=pk).filter(
-                Q(created_by_id=request.user.id) |
-                Q(applications__user_id=request.user.id) |
-                Q(scores__user_id=request.user.id) |
-                Q(scrapes__created_by_id=request.user.id) |
-                Q(discoveries__user_id=request.user.id)
-            ).distinct()
-        posts = list(qs)
+        # set of signals as JobPostViewSet.list, via the one home for that
+        # predicate (JobPostQuerySet.visible_to). This endpoint and the
+        # `job-posts` linkage on CompanySerializer MUST agree — a post in
+        # the linkage that this endpoint refuses is a 404 the frontend
+        # silently drops. Inlining the clauses here is what let the two
+        # drift apart (this copy had lost the `member` clause).
+        posts = list(JobPost.objects.filter(company_id=pk).visible_to(request.user))
         # Pre-attach user-scoped `_top_score` to each JobPost so the
         # serializer reports the requesting user's highest score, not
         # the cross-user max. Without this the model property falls
