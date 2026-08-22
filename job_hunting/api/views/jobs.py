@@ -203,20 +203,13 @@ class JobPostViewSet(BaseViewSet):
 
     @staticmethod
     def _visible_jobpost_qs(request):
-        """Posts the caller can reach via the five-clause visibility filter
-        (created / applied / scored / scraped / discovered). Staff see all.
-        Mirrors list() and compute_duplicate_candidates so dup-verb authz
-        matches what the user can otherwise see in the UI."""
-        if request.user.is_staff:
-            return JobPost.objects.all()
-        return JobPost.objects.filter(
-            Q(created_by_id=request.user.id)
-            | Q(applications__user_id=request.user.id)
-            | Q(scores__user_id=request.user.id)
-            | Q(scrapes__created_by_id=request.user.id)
-            | Q(discoveries__user_id=request.user.id)
-            | Q(user_memberships__user_id=request.user.id)
-        ).distinct()
+        """Posts the caller can reach via the six-clause visibility filter
+        (created / applied / scored / scraped / discovered / member). Staff
+        see all. Delegates to ``JobPost.objects.visible_to`` — the single
+        home for this predicate, so the serializer layer can apply the same
+        rule without importing from ``views``. Kept as a named method
+        because five call sites below read better for it."""
+        return JobPost.objects.visible_to(request.user)
 
     def pre_save_payload(self, request, attrs, creating):
         # Remove any client-supplied ownership fields so they can't be spoofed

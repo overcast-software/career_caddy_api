@@ -2,6 +2,7 @@ from django.conf import settings
 from django.contrib.postgres.indexes import HashIndex
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 from .base import GetMixin
@@ -85,11 +86,58 @@ def _default_source_instance():
     return settings.CAREER_CADDY_INSTANCE
 
 
+class JobPostQuerySet(models.QuerySet):
+    """Queryset carrying the canonical JobPost visibility filter."""
+
+    def visible_to(self, user):
+        """Narrow to the posts ``user`` may see.
+
+        JobPost rows are UNIVERSAL — the table is shared across every user,
+        and ``Company`` has no ``created_by`` at all, so a company's
+        ``job_posts`` reverse FK spans the whole platform. Visibility is
+        therefore never ``created_by == me``; it is the presence of any
+        per-user signal on the shared row:
+
+            created · applied · scored · scraped · discovered · member
+
+        Staff see everything. An anonymous or missing user sees nothing —
+        note this is NOT the same as omitting the filter. Passing a user
+        with no ``id`` into the ``Q`` block below would compile to
+        ``created_by_id IS NULL`` and match every ownerless post, so the
+        empty case is short-circuited rather than left to fall through.
+
+        This lives on the queryset, not on a viewset, because both the view
+        layer and the serializer layer need it and ``serializers`` must not
+        import from ``views`` — that dependency is one-way. Chainable, so
+        callers can compose: ``JobPost.objects.filter(company_id=x)
+        .visible_to(request.user)``.
+        """
+        if user is None or not getattr(user, "id", None):
+            return self.none()
+        if getattr(user, "is_staff", False):
+            return self
+        return self.filter(
+            Q(created_by_id=user.id)
+            | Q(applications__user_id=user.id)
+            | Q(scores__user_id=user.id)
+            | Q(scrapes__created_by_id=user.id)
+            | Q(discoveries__user_id=user.id)
+            | Q(user_memberships__user_id=user.id)
+        ).distinct()
+
+
 class JobPost(GetMixin, NanoIDModel):
     # ``id`` is the 10-char NanoID string PK provided by NanoIDModel
     # (CC-77 true PK swap). JobPost is the lead/only federated model, so
     # this id is simultaneously the API resource id, the
     # ``/api/v1/job-posts/<id>`` path key, and the ActivityPub object id.
+
+    # Default manager built from JobPostQuerySet so `visible_to` is reachable
+    # as `JobPost.objects.visible_to(user)` and chains off any queryset.
+    # `as_manager()` leaves `use_in_migrations` False, so this adds no
+    # migration — it changes no column, index, or constraint.
+    objects = JobPostQuerySet.as_manager()
+
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
