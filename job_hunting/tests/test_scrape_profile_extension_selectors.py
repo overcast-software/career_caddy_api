@@ -153,3 +153,79 @@ class TestScrapeProfileExtensionSelectors(TestCase):
         self.assertFalse(self.user.is_staff)
         resp = self.client.get(self.URL + "?hostname=linkedin.com")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+class TestExtensionSelectorsReadinessShape(TestCase):
+    """Readiness belongs in `data.attributes`, under the names the full
+    ScrapeProfile resource already uses.
+
+    Two separate problems were being solved here, and only one of them is
+    about JSON:API.
+
+    1. SPEC. `known_good`/`tier`/`reasons` shipped as top-level siblings of
+       `data`. JSON:API permits only `data`, `errors`, `meta`, `jsonapi`,
+       `links` and `included` there, so any normalizing client drops them —
+       and the extension reads `body.known_good === true`, which turns a
+       dropped key into `false` rather than an error. The extension-direct
+       fast path would silently disable itself for every domain, forever,
+       with nothing to report.
+
+    2. NAME DRIFT, which is the bigger one. `ScrapeProfileSerializer` already
+       exposes `is_known_good` and the nested `readiness` struct on the full
+       resource, and automation/src/client/api_client.py:734 already consumes
+       exactly that. This endpoint had invented a third shape for the same
+       three values. Converging is worth more than merely becoming spec-legal
+       — `meta` would have been legal AND a third shape.
+    """
+
+    URL = "/api/v1/scrape-profiles/extension-selectors/"
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="extshape", password="pw")
+        self.client.force_authenticate(user=self.user)
+
+    def _attrs(self):
+        resp = self.client.get(self.URL + "?hostname=linkedin.com")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.json()["data"]["attributes"]
+
+    def test_is_known_good_is_an_attribute(self):
+        self.assertIsInstance(self._attrs()["is_known_good"], bool)
+
+    def test_readiness_struct_is_an_attribute(self):
+        readiness = self._attrs()["readiness"]
+        self.assertIsInstance(readiness, dict)
+        for key in ("known_good", "tier", "reasons"):
+            self.assertIn(key, readiness)
+
+    def test_names_match_the_full_resource_contract(self):
+        """The same three values, one shape. Guards against re-inventing
+        `known_good`/`tier`/`reasons` as flat attributes here."""
+        attrs = self._attrs()
+        self.assertNotIn("known_good", attrs)
+        self.assertNotIn("tier", attrs)
+        self.assertNotIn("reasons", attrs)
+
+    def test_attribute_agrees_with_the_nested_struct(self):
+        attrs = self._attrs()
+        self.assertEqual(attrs["is_known_good"], attrs["readiness"]["known_good"])
+
+    def test_deprecated_top_level_copies_still_present(self):
+        """Kept ONLY for the 2.3.0 build being sideloaded during the rewrite.
+        Delete this test together with the duplicates, in the PR that ships
+        the 3.x extension."""
+        body = self.client.get(self.URL + "?hostname=linkedin.com").json()
+        for key in ("known_good", "tier", "reasons"):
+            self.assertIn(key, body)
+
+    def test_no_unexpected_top_level_members(self):
+        """Guards against a NEW non-spec sibling being added later — the exact
+        mistake this change corrects."""
+        body = self.client.get(self.URL + "?hostname=linkedin.com").json()
+        allowed = {
+            "data", "errors", "meta", "jsonapi", "links", "included",
+            # deprecated, tracked above
+            "known_good", "tier", "reasons",
+        }
+        self.assertEqual(set(body) - allowed, set())
