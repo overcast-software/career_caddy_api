@@ -11,11 +11,20 @@ an id and never scores a post that wasn't handed to it.
 
 Mirrors ``DescriptionArbiter`` (same directory): a pydantic-ai ``Agent`` with a
 pydantic ``output_type`` for structured output, wrapped so ``_call_llm`` is a
-clean mock seam. No retries — one LLM call per invocation is the cost guardrail.
+clean mock seam. One retry (CC-240), spent only when the model contradicts
+itself by picking a post at a company it just said the page is not for — see
+the ``output_validator`` in ``_call_llm``. Everything else is one LLM call.
 
 Controlled by:
 
-    JOB_MATCHER_MODEL — provider:model spec (default: openai:gpt-4o-mini)
+    JOB_MATCHER_MODEL — provider:model spec (default: openai:gpt-5)
+
+Resolution order is the explicit ``model`` argument, then JOB_MATCHER_MODEL,
+then ``_DEFAULT_MODEL``. Note CADDY_DEFAULT_MODEL does NOT apply here: this
+role carries its own default, and the ``job_matcher`` row in
+``job_hunting.api.views.admin._agent_role_specs`` hardcodes the same value so
+the admin surface reports what actually resolves. Change one, change both —
+``tests/test_agent_model_registry.py`` fails if they drift.
 """
 from __future__ import annotations
 
