@@ -501,11 +501,23 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         self.assertIn(str(jp.id), found_ids)
 
     def test_extension_direct_does_not_use_raw_top_level_description(self):
-        """Defense-in-depth for the description-source rule: even when the
-        payload carries NO structured_prefill.description, the raw
-        top-level description (full-page innerText) must not become the
-        JobPost description. The post is created with title/company but an
-        empty description rather than page chrome."""
+        """Defense-in-depth for the description-source rule: when the payload
+        carries NO structured_prefill.description, the raw top-level
+        description (full-page innerText) must not become the JobPost
+        description.
+
+        The *outcome* changed here, the rule did not. This test used to
+        assert the post was created with title/company and an EMPTY
+        description — page chrome kept out, but a shell saved, which scoring
+        then rejects with "Job post has no description to score against".
+        CC-122's rule is "take the data and make lemonade, or fail — never
+        save a shell", so a Tier-0 hit now requires all three fields and a
+        missing description escalates to Tier 1 instead of persisting.
+
+        The chrome-exclusion half is unchanged and still pinned: no post
+        exists yet, and the raw text goes to job_content for the LLM rather
+        than to any description field.
+        """
         link = "https://example.com/jobs/no-clean-desc"
         raw_page_text = "Nav. Footer. page has loaded. APPLY NOW. " * 20
         payload = _curated_payload(
@@ -525,10 +537,17 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.content)
         scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
-        jp = JobPost.objects.get(pk=scrape.job_post_id)
-        self.assertEqual(jp.title, "Data Engineer")
-        self.assertFalse(jp.description)
-        self.assertNotIn("page has loaded", jp.description or "")
+
+        # Escalated, not completed — no shell persisted.
+        self.assertEqual(scrape.status, "pending")
+        self.assertIsNone(scrape.job_post_id)
+        self.assertFalse(
+            JobPost.objects.filter(link=link).exists(),
+            "a description-less Tier-0 hit must not mint a JobPost",
+        )
+
+        # The raw innerText is staged for the LLM, not used as a description.
+        self.assertIn("page has loaded", scrape.job_content or "")
 
     def test_extension_direct_description_only_enqueues_async_parse(self):
         """CC-122 — auth-walled curated-miss (LinkedIn/Toptal): the
@@ -725,7 +744,15 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
         scrape must be set even when the submitted URL differs from
         the JP's stored link by tracking params. Without this the
         runner can't find the existing JP and the fast-path would
-        mint a duplicate."""
+        mint a duplicate.
+
+        Uses ``_curated_payload`` rather than ``_well_formed_payload``: this
+        test needs a Tier-0 HIT to reach the binding code, and a Tier-0 hit
+        resolves its description from ``extraction_hints.structured_prefill``
+        only, which the minimal helper does not carry. That is a fixture
+        detail — the invariant under test is the canonical-link binding, not
+        where the description comes from.
+        """
         # The JP stored link is the clean form; incoming carries
         # tracking junk that canonicalize_link() will strip.
         JobPost.objects.create(
@@ -746,7 +773,11 @@ class ScrapeViewSetExtensionDirectCreateTests(TestCase):
             _post_body(
                 dirty_url,
                 source_mode="extension-direct",
-                captured_payload=_well_formed_payload(),
+                captured_payload=_curated_payload(
+                    title="Senior Widget Engineer",
+                    company_name="Acme Co",
+                    description="Build widgets at scale. " * 5,
+                ),
             ),
             format="json",
         )
@@ -1382,3 +1413,105 @@ class ExtensionDirectHintPlumbingTests(TestCase):
         mock_enqueue.assert_called_once()
         _args, kwargs = mock_enqueue.call_args
         self.assertIsNone(kwargs["apply_url"])
+
+
+class ExtensionDirectShellAndJobContentTests(TestCase):
+    """Two invariants on the Tier-0 fast path.
+
+    1. A Tier-0 HIT requires a description. Without one the result is a
+       SHELL, and CC-122's rule is explicit: "take the data and make
+       lemonade, or fail — never save a shell." That rule was written about
+       a description with no title/company; this is the same shell from the
+       other side, and Tier 1 is the same remedy.
+
+    2. `job_content` is seeded on the HIT path, not only on the escalation.
+       Closed-state detection and the closed_evidence substring check both
+       read it and both are guarded on it being non-empty. The paste/
+       extension description fallback reads it too, but invariant 1 is what
+       keeps that fallback from firing here — see
+       ``test_tier0_hit_description_still_comes_from_structured_prefill``.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="shelltest", password="p", is_staff=True
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _create(self, payload, url="https://boards.example.com/jobs/9001"):
+        return self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(url, source_mode="extension-direct", captured_payload=payload),
+            format="json",
+        )
+
+    def test_missing_description_escalates_instead_of_saving_a_shell(self):
+        """THE LINKEDIN CASE.
+
+        Migration 0093 seeds linkedin.com with exactly two selectors —
+        `title: h1` and `company_name: a[href*='/company/']` — and
+        deliberately no description. So structured_prefill carries title and
+        company and nothing else.
+
+        Before this fix that was a Tier-0 HIT: ParsedJobData.description is
+        Optional, so `description=None` validated happily and the post was
+        saved without one. Scoring then failed with "Job post has no
+        description to score against".
+        """
+        resp = self._create(
+            _curated_payload(
+                title="Senior Cloud Security Engineer",
+                company_name="Rescale",
+                description=None,
+                raw_description="Senior Cloud Security Engineer at Rescale. " * 20,
+            )
+        )
+        self.assertIn(resp.status_code, (200, 201, 202))
+        scrape = Scrape.objects.order_by("-created_at").first()
+
+        # Escalated, not completed — Tier 1 will recover the description
+        # from the innerText.
+        self.assertEqual(scrape.status, "pending")
+        self.assertIsNone(scrape.job_post_id)
+
+        # And the escalation seeded the text the LLM needs.
+        self.assertTrue((scrape.job_content or "").strip())
+
+    def test_tier0_hit_seeds_job_content(self):
+        """A complete Tier-0 hit still persists the raw innerText, because
+        closed-state detection and the description fallback both read it and
+        both are guarded on it being non-empty."""
+        raw = "No longer accepting applications. " + ("body text " * 40)
+        resp = self._create(
+            _curated_payload(
+                title="Backend Engineer",
+                company_name="Acme",
+                description="We are looking for a backend engineer. " * 10,
+                raw_description=raw,
+            )
+        )
+        self.assertIn(resp.status_code, (200, 201, 202))
+        scrape = Scrape.objects.order_by("-created_at").first()
+
+        self.assertEqual(scrape.status, "completed")
+        self.assertIsNotNone(scrape.job_post_id)
+        self.assertEqual(scrape.job_content, raw.strip())
+
+    def test_tier0_hit_description_still_comes_from_structured_prefill(self):
+        """Seeding job_content must NOT change where the description comes
+        from. The raw innerText is nav/footer noise; the clean per-selector
+        value is what the post gets."""
+        clean = "Clean description from the selector. " * 8
+        resp = self._create(
+            _curated_payload(
+                title="Data Engineer",
+                company_name="Globex",
+                description=clean,
+                raw_description="Skip to main content. Cookie banner. " * 30,
+            )
+        )
+        self.assertIn(resp.status_code, (200, 201, 202))
+        scrape = Scrape.objects.order_by("-created_at").first()
+        self.assertIsNotNone(scrape.job_post_id)
+        self.assertEqual(scrape.job_post.description.strip(), clean.strip())

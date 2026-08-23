@@ -772,7 +772,33 @@ class ScrapeViewSet(BaseViewSet):
         description = pick(structured.get("description"))
         location = pick(structured.get("location"), payload.get("location"))
 
-        if not (title and company):
+        # A Tier-0 hit needs ALL THREE. Gating on title+company alone
+        # persisted a shell, because ParsedJobData.description is Optional —
+        # so `description=None` validated happily and Tier 0 "succeeded" with
+        # an empty description.
+        #
+        # This is not hypothetical and it is not rare: it is LINKEDIN, on
+        # every send. Migration 0093 seeds that profile with exactly two
+        # selectors, `title: h1` and `company_name: a[href*='/company/']`,
+        # and deliberately no description (its own comment explains why —
+        # the .jobs-description block omits header/footer). So title and
+        # company resolve, description does not, and the post is saved
+        # without one. Scoring then fails with "Job post has no description
+        # to score against".
+        #
+        # CC-122's rule is symmetric and already decided this: "take the data
+        # and make lemonade, or fail — never save a shell", and a curated
+        # selector miss is NOT unrecoverable because the captured innerText
+        # still contains the field. That rule was written about a
+        # description with no title/company; a title/company with no
+        # description is the same shell from the other side, and Tier 1 is
+        # the same remedy.
+        #
+        # Returning None escalates to _enqueue_extension_direct_llm_parse,
+        # which seeds job_content with the raw innerText and lets the
+        # extractor recover a clean description from it — which is exactly
+        # what that path is for.
+        if not (title and company and description):
             return None
         try:
             return ParsedJobData(
@@ -846,14 +872,41 @@ class ScrapeViewSet(BaseViewSet):
         from job_hunting.lib.parsers.job_post_extractor import JobPostExtractor
         from job_hunting.lib.scraper import _log_scrape_status
 
-        parsed = self._parsed_job_data_from_payload(
-            scrape.captured_payload or {}, link=scrape.url
-        )
+        payload = scrape.captured_payload or {}
+
+        parsed = self._parsed_job_data_from_payload(payload, link=scrape.url)
         if parsed is None:
             self._enqueue_extension_direct_llm_parse(
                 scrape, user, force=force, apply_url=apply_url
             )
             return
+
+        # Seed job_content on the Tier-0 HIT path too, not only on the
+        # Tier-1 escalation below.
+        #
+        # This is the raw full-page innerText the extension captured. Three
+        # things downstream read it, and until now all three were dead on
+        # this path because the field was left null:
+        #
+        #   1. detect_posting_status(raw_source) — job_post_extractor.py:726.
+        #      Guarded by `and raw_source`, so with an empty job_content a
+        #      closed posting can NEVER be detected on an extension send. The
+        #      panel shows the user "No longer accepting applications" and the
+        #      server records nothing.
+        #   2. The closed_evidence substring check at :746, which requires
+        #      `evidence in raw_source` — same guard, same outcome.
+        #   3. The description fallback at :666-672, which explicitly accepts
+        #      source in ("paste", "extension") and cannot fire without it.
+        #
+        # It is also what makes the scrape inspectable afterwards. A row with
+        # a JobPost and no job_content cannot be re-parsed, diffed, or used to
+        # discover selectors.
+        #
+        # Written BEFORE process_evaluation, because that is what reads it.
+        captured_text = payload.get("description")
+        if isinstance(captured_text, str) and captured_text.strip():
+            scrape.job_content = captured_text.strip()
+            scrape.save(update_fields=["job_content"])
 
         extractor = JobPostExtractor()
         ok = extractor.process_evaluation(scrape, parsed, user=user, force=force)
