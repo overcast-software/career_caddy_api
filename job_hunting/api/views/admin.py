@@ -72,6 +72,11 @@ def _agent_role_specs():
         # which strips the provider prefix for the raw OpenAI SDK.
         ("answer", "Answers an application question from career data", "ANSWER_MODEL", "openai:gpt-5"),
         ("cover_letter", "Writes a cover letter for a job post", "COVER_LETTER_MODEL", "openai:gpt-5"),
+        # CC-240: matching an application page to a job post is a RESTRAINT
+        # task — the hard part is returning null. It ran on gpt-4o-mini and was
+        # invisible here, and it tied a Block application to a Golden Analytics
+        # post at 0.9 confidence because both were hosted on Rippling.
+        ("job_matcher", "Picks the job post an application page belongs to", "JOB_MATCHER_MODEL", "openai:gpt-5"),
     ]
 
 
