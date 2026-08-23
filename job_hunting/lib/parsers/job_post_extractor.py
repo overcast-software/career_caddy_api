@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.ollama import OllamaProvider
@@ -115,11 +115,96 @@ _ESTIMATED_PAY_TOKEN = re.compile(
 _EXTRACTION_DATE_DRIFT_DAYS = 30
 
 
-class ParsedJobData(BaseModel):
-    """Pydantic model for structured extraction from scraped job content."""
+# Anti-invention contract for the extractor agent.
+#
+# This exists because the schema alone used to make fabrication the only
+# legal output: `title` and `company_name` were required non-empty
+# strings with validators that raised, so pydantic-ai fed the validation
+# error back and retried until the model produced *something*. On a
+# capture that was pure page chrome (the canonical case: scrape
+# X04b4IjnTi / jp rHeRo6qWCG, a LinkedIn partial render where all 19
+# description selectors timed out and only 808 characters of top card +
+# footer were captured) the cheapest legal answer was an invented one.
+#
+# The schema now permits a refusal (see ParsedJobData.refusal_or_identity),
+# and this prompt tells the model that the refusal exists and is correct.
+# Prompt and schema are not alternatives: the prompt advertises the
+# affordance, the schema is what actually makes it cheaper than a
+# fabrication. Register matches AnswerService._SYSTEM_PROMPT — the other
+# place in this codebase where an invented detail reaches a real employer.
+_EXTRACTOR_SYSTEM_PROMPT = """\
+You extract job-posting fields from captured web-page content for a
+job-hunt management tool. The content you are given is whatever a
+scraper actually captured — sometimes a complete posting, sometimes a
+page that failed to render, a login wall, a search-results list, or
+nothing but navigation chrome.
 
-    title: str = Field(..., min_length=1, max_length=500, description="Job title")
-    company_name: str = Field(..., min_length=1, max_length=200, description="Company name")
+Extract only what the content in front of you actually says. Never
+invent a title, an employer, a location, a salary, a date, or a
+sentence of description. Do not infer an employer from a URL, a
+cookie banner, or a site footer; do not reconstruct a job description
+from a job title; do not fill a field because it looks empty.
+
+If the content does not contain a job posting — or contains only
+chrome, a partial render, or a wall — say so: set
+extraction_failed=true with a one-line extraction_failure_reason and
+leave every other field null. That is a correct and expected outcome,
+not a failure on your part, and it is always the right answer when you
+would otherwise be guessing. A returned "I could not find this" costs
+the user nothing; a plausible fabrication is written to their job
+board as fact.
+
+When the page does carry a real posting but some fields are absent,
+extract what is there and leave the rest null. Partial is fine.
+Missing is fine. Invented is not.
+"""
+
+
+class ParsedJobData(BaseModel):
+    """Pydantic model for structured extraction from scraped job content.
+
+    Two shapes are valid, and exactly one invariant separates them:
+
+    - **An extraction.** ``title`` and ``company_name`` are both
+      present; ``extraction_failed`` is False.
+    - **A refusal.** ``extraction_failed`` is True and
+      ``extraction_failure_reason`` says why; identity fields are
+      forced to None so a refusal cannot smuggle a guessed title
+      through.
+
+    Anything else raises — and the raised message names the refusal
+    path, because pydantic-ai hands validation errors back to the model
+    as a retry. That is deliberate: the retry loop used to push the
+    model toward inventing a title, and now it points at the honest
+    answer instead.
+    """
+
+    # Nullable on purpose. These were required non-empty strings, which
+    # made "there is no job posting on this page" an illegal answer and
+    # a fabricated title the only reachable one. The model_validator
+    # below preserves the guarantee that a *successful* extraction still
+    # carries both, so every downstream consumer keeps what it had.
+    title: Optional[str] = Field(None, max_length=500, description="Job title")
+    company_name: Optional[str] = Field(None, max_length=200, description="Company name")
+    extraction_failed: bool = Field(
+        False,
+        description=(
+            "True when the content contains no extractable job posting — "
+            "an unrendered page, a login/paywall, a search-results list, "
+            "or nothing but navigation chrome. Set this instead of "
+            "guessing a title or company. Leave all other fields null."
+        ),
+    )
+    extraction_failure_reason: Optional[str] = Field(
+        None,
+        max_length=300,
+        description=(
+            "One line saying what was actually on the page, when "
+            "extraction_failed is true (e.g. 'page rendered only the "
+            "LinkedIn top card; no description subtree present'). "
+            "Ignored when extraction_failed is false."
+        ),
+    )
     company_display_name: Optional[str] = Field(None, max_length=200, description="Company display name if different from name")
     description: Optional[str] = Field(None, description="Full job description / responsibilities / qualifications")
     posted_date: Optional[datetime] = Field(None, description="Date the job was posted")
@@ -147,19 +232,18 @@ class ParsedJobData(BaseModel):
         ),
     )
 
-    @field_validator("title")
+    @field_validator("title", "company_name")
     @classmethod
-    def validate_title(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Job title cannot be empty")
-        return v.strip()
+    def blank_identity_is_absent(cls, v):
+        """Normalize "" / "   " to None rather than raising.
 
-    @field_validator("company_name")
-    @classmethod
-    def validate_company_name(cls, v):
-        if not v or not v.strip():
-            raise ValueError("Company name cannot be empty")
-        return v.strip()
+        These used to raise on empty, which is what turned an honest
+        blank into a pydantic-ai retry. Blank now means absent, and
+        ``refusal_or_identity`` below decides whether absent is legal.
+        """
+        if v is None:
+            return None
+        return v.strip() or None
 
     @field_validator("company_display_name", "description", "location", "link")
     @classmethod
@@ -167,6 +251,41 @@ class ParsedJobData(BaseModel):
         if v is not None:
             return v.strip() if v.strip() else None
         return v
+
+    @model_validator(mode="after")
+    def refusal_or_identity(self) -> "ParsedJobData":
+        """Enforce: a real extraction has an identity, a refusal has a reason.
+
+        Mirrors ``ArbitrationDecision.merged_required_when_merge`` in
+        ``description_arbiter`` — a discriminant field plus a
+        model-level check that the dependent fields agree with it.
+        """
+        if self.extraction_failed:
+            # A refusal must not carry identity fields. Otherwise the
+            # model can hedge — flag the failure *and* hand over a
+            # guessed title — and process_evaluation's caller would have
+            # to decide which half to believe.
+            self.title = None
+            self.company_name = None
+            if not (self.extraction_failure_reason or "").strip():
+                self.extraction_failure_reason = "No job posting found in captured content."
+            return self
+
+        if not self.title or not self.company_name:
+            # pydantic-ai surfaces this text to the model as a retry
+            # prompt, so it names the legal alternative explicitly. The
+            # retry is the leverage point: it used to push toward
+            # inventing a title, and now it points at extraction_failed.
+            raise ValueError(
+                "title and company_name are required unless extraction_failed "
+                "is true. If the content has no job posting — an unrendered "
+                "page, a login wall, a search-results list, or only "
+                "navigation chrome — set extraction_failed=true with a short "
+                "extraction_failure_reason instead of guessing."
+            )
+
+        self.extraction_failure_reason = None
+        return self
 
 
 def _to_decimal(value) -> Optional[Decimal]:
@@ -281,7 +400,11 @@ class JobPostExtractor:
                 f"Unknown provider {provider!r} in model spec {model_name!r}. "
                 "Supported: 'openai', 'anthropic', 'ollama'."
             )
-        return Agent(model, output_type=ParsedJobData)
+        return Agent(
+            model,
+            output_type=ParsedJobData,
+            system_prompt=_EXTRACTOR_SYSTEM_PROMPT,
+        )
 
     def get_agent(self):
         """Return (and cache) the default agent resolved from env."""
@@ -475,6 +598,21 @@ class JobPostExtractor:
 
     def process_evaluation(self, scrape: Scrape, validated_data: ParsedJobData, user=None, force: bool = False) -> bool:
         self.last_outcome = "created"
+        if validated_data.extraction_failed:
+            # The model declined, which is a successful outcome for the
+            # model and a failed scrape for us. Recorded the same way as
+            # a placeholder rejection — the difference is that we now
+            # have the model's own reason instead of inferring one from
+            # a sentinel word it happened to pick.
+            reason = validated_data.extraction_failure_reason or "no reason given"
+            logger.info(
+                "Scrape %s: extraction declined by the model (%s)", scrape.id, reason
+            )
+            scrape.failure_reason = f"Extraction declined: {reason}"[:2000]
+            scrape.status = "failed"
+            scrape.save()
+            self.last_outcome = "extraction_failed"
+            return False
         if self._is_placeholder(validated_data.title):
             logger.warning("Scrape %s: extracted title is a placeholder (%r), skipping", scrape.id, validated_data.title)
             # Diagnostic surface for the operator — the extension popup
@@ -1299,6 +1437,15 @@ Fields to extract:
 - location: city/state/country (e.g. "United States" or "Austin, TX")
 - remote: true if role is remote or hybrid, false if fully on-site, null if unknown
 - link: the job application or posting URL if present (null otherwise)
+
+If the content below is not a job posting — an unrendered or partially
+rendered page, a login wall, a cookie or consent screen, a
+search-results list, or only navigation chrome — do not extract
+anything. Set extraction_failed=true and put one line in
+extraction_failure_reason describing what the content actually is.
+Leave title, company_name and every other field null. Returning that
+refusal is correct; guessing a title or company from a URL or a page
+footer is not.
 {hints_block}
 Content:
 {content}
