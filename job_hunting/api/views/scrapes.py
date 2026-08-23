@@ -78,6 +78,31 @@ def _normalize_source_hint(raw):
     return candidate
 
 
+def _clean_hint_url(raw):
+    """Validate a best-effort extension hint URL, or return None.
+
+    The three hints (``apply_url``, ``canonical_link_hint``,
+    ``referrer_url``) are advisory signals the browser extension scrapes
+    off the page. A malformed, non-string, or policy-blocked value is
+    DROPPED rather than 4xx'd — a bad hint must never block ingestion of
+    an otherwise-valid capture.
+
+    This is the shared implementation of the treatment
+    ``ScrapeViewSet.from_text`` already applies inline to the same three
+    values; both entry points route through it so the two paths cannot
+    drift apart on what counts as a droppable hint.
+    """
+    if not isinstance(raw, str):
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    try:
+        return validate_submission_url(candidate)
+    except UrlPolicyError:
+        return None
+
+
 @extend_schema_view(
     list=extend_schema(
         tags=["Scrapes"],
@@ -559,6 +584,54 @@ class ScrapeViewSet(BaseViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
 
+        # BACK-131 — extension-direct hint plumbing.
+        #
+        # The extension ships `apply_url` at the top level of
+        # captured_payload and `canonical_link_hint` / `referrer_url`
+        # under captured_payload.extraction_hints (send-gate.ts:123-131).
+        # Historically only `structured_prefill` was read out of that
+        # dict, so the other three were discarded with no error and no
+        # log. Since CC-176 made extension-direct the only route for any
+        # page with text, that silently disabled three shipped features:
+        # LinkedIn og:url canonicalization, referrer->ATS click-through
+        # pairing, and the apply_url leg of cross-platform dedupe. Read
+        # them here so this path honours the same three values
+        # POST /scrapes/from-text/ honours at :1045-1047.
+        direct_apply_url = None
+        direct_referrer_url = None
+        if is_extension_direct and isinstance(captured_payload_attr, dict):
+            direct_apply_url = _clean_hint_url(
+                captured_payload_attr.get("apply_url")
+            )
+            direct_hints = captured_payload_attr.get("extraction_hints")
+            if isinstance(direct_hints, dict):
+                direct_referrer_url = _clean_hint_url(
+                    direct_hints.get("referrer_url")
+                )
+                canonical_hint = _clean_hint_url(
+                    direct_hints.get("canonical_link_hint")
+                )
+                # Prefer the page's own canonical (LinkedIn's og:url) over
+                # the submitted location.href, so a tracker-laden address
+                # never becomes JobPost.link — the same override from_text
+                # applies at :1129-1130.
+                #
+                # This does not fight the dedupe walk. extension-direct is
+                # exempt from the 409 dedupe gate above (:526) AND from the
+                # same-URL pre-bind below (:603), so `url` has exactly two
+                # remaining consumers on this path: the persisted
+                # Scrape.url, and the `link=` handed to
+                # _parsed_job_data_from_payload — which becomes
+                # ParsedJobData.link and drives process_evaluation's
+                # canonical_link -> apply_url -> fingerprint walk.
+                # Overriding therefore only makes that walk's INPUT
+                # cleaner (the same direction canonicalize_link already
+                # pushes); it cannot flip a match decision already taken.
+                # `source_link` still records the pre-resolution tracker,
+                # so provenance survives the swap.
+                if canonical_hint:
+                    url = canonical_hint
+
         # JobPost.source provenance. An extension-direct push carries the
         # `extension` provenance: the user verified the page in their own
         # browser before pushing it, so it sits at the top of the
@@ -576,6 +649,14 @@ class ScrapeViewSet(BaseViewSet):
             status="hold",
             created_by=request.user,
             source=source,
+            # BACK-131 — the referrer is a per-submit signal with no
+            # symmetric home on JobPost, so the Scrape row IS its storage.
+            # compute_duplicate_candidates joins this column against a
+            # candidate's link/canonical_link (serializers.py:919-924) to
+            # emit the high-confidence `referrer_hint` candidate; the
+            # column is db_index'd for exactly that (models/scrape.py:70-76).
+            # None on every non-extension-direct path, as before.
+            referrer_url=direct_referrer_url,
         )
         if source_mode_attr is not None:
             create_kwargs["source_mode"] = source_mode_attr
@@ -619,7 +700,10 @@ class ScrapeViewSet(BaseViewSet):
         # (GET /job-posts/?filter[link]=) finds it immediately.
         if is_extension_direct and scrape.captured_payload:
             self._consume_extension_direct_payload(
-                scrape, request.user, force=bool(scrape.job_post_id)
+                scrape,
+                request.user,
+                force=bool(scrape.job_post_id),
+                apply_url=direct_apply_url,
             )
             scrape.refresh_from_db()
         else:
@@ -709,7 +793,9 @@ class ScrapeViewSet(BaseViewSet):
             )
             return None
 
-    def _consume_extension_direct_payload(self, scrape, user, *, force=False):
+    def _consume_extension_direct_payload(
+        self, scrape, user, *, force=False, apply_url=None
+    ):
         """Phase B consumer — synchronously turn an extension-direct
         ``captured_payload`` into a JobPost (create-or-update) with no
         browser fetch and no runner.
@@ -726,6 +812,13 @@ class ScrapeViewSet(BaseViewSet):
         pre-bound (force-merge onto that named post); the normal extension
         path leaves it False so process_evaluation resolves the post by
         link/canonical and runs the trust-aware overwrite branch.
+
+        ``apply_url`` is the already-validated hint the caller read out of
+        ``captured_payload`` (BACK-131). Both branches below have to carry
+        it or the bug just moves: the Tier-0 hit stamps it inline via
+        ``_stamp_apply_url``, and the Tier-0 miss forwards it to
+        ``parse_scrape_job``, which performs the identical stamp on the
+        worker.
 
         Terminal status: on success the scrape is flipped to ``completed``
         so it is not left as a dangling ``hold`` a runner would claim;
@@ -757,13 +850,16 @@ class ScrapeViewSet(BaseViewSet):
             scrape.captured_payload or {}, link=scrape.url
         )
         if parsed is None:
-            self._enqueue_extension_direct_llm_parse(scrape, user, force=force)
+            self._enqueue_extension_direct_llm_parse(
+                scrape, user, force=force, apply_url=apply_url
+            )
             return
 
         extractor = JobPostExtractor()
         ok = extractor.process_evaluation(scrape, parsed, user=user, force=force)
         scrape.refresh_from_db()
         if ok:
+            self._stamp_apply_url(scrape.job_post_id, apply_url)
             if scrape.status != "completed":
                 scrape.status = "completed"
                 scrape.save(update_fields=["status"])
@@ -787,7 +883,47 @@ class ScrapeViewSet(BaseViewSet):
                 scrape.id, scrape.failure_reason,
             )
 
-    def _enqueue_extension_direct_llm_parse(self, scrape, user, *, force=False):
+    def _stamp_apply_url(self, job_post_id, apply_url):
+        """Stamp an extension-supplied apply_url onto the JobPost (BACK-131).
+
+        The synchronous Tier-0 branch has no worker task to carry this, so
+        the write has to happen here. Nothing else on this path can do it:
+        ``process_evaluation`` never touches the column (``ParsedJobData``
+        carries no such field, and ``apply_url`` does not appear anywhere
+        in ``lib/parsers/job_post_extractor.py``), and the resolver-driven
+        ``apply-url`` action further down only fires for browser-tier
+        scrapes, which an extension-direct capture never becomes.
+
+        Deliberately identical in effect to the Tier-1 leg in
+        ``lib/tasks.py:669-684``: canonicalized value, status
+        ``resolved``, and a ``queryset.update()`` so ``JobPost.save()``
+        (and the fingerprint recompute it triggers) is not re-run for a
+        column dedupe does not read. Note this stamps LESS than the
+        resolver action at :1658-1683, which also sets
+        ``apply_url_resolved_at`` — matching that here would make Tier 0
+        and Tier 1 produce different rows for the same capture, which is
+        the exact class of divergence BACK-131 exists to close.
+
+        Ordering: this lands AFTER process_evaluation's dedupe walk,
+        exactly as from_text's stamp lands after ``parse_scrape``. The
+        column is a real dedupe signal — ``find_duplicate``'s middle leg
+        is ``find_apply_url_matches`` (job_post_dedupe.py:330) — but it
+        feeds FUTURE walks, not this post's own. Writing it earlier would
+        make the two ingestion paths disagree about which signals were in
+        hand at match time.
+        """
+        if not (job_post_id and apply_url):
+            return
+        from job_hunting.models.job_post_dedupe import canonicalize_apply_url
+
+        JobPost.objects.filter(pk=job_post_id).update(
+            apply_url=canonicalize_apply_url(apply_url),
+            apply_url_status="resolved",
+        )
+
+    def _enqueue_extension_direct_llm_parse(
+        self, scrape, user, *, force=False, apply_url=None
+    ):
         """CC-122 — Tier 0 miss on an extension-direct capture: escalate
         to the async Tier 1 LLM parse instead of giving up here.
 
@@ -869,11 +1005,19 @@ class ScrapeViewSet(BaseViewSet):
         # the trust-aware overwrite branch; True only when an explicit
         # job-post relationship was pre-bound, so parse_scrape re-parses
         # onto that named post instead of early-bailing on job_post_id.
+        # BACK-131 — carry the extension's apply_url through to the
+        # worker. parse_scrape_job accepts it (lib/tasks.py:640) and
+        # applies the same canonicalize-and-stamp _stamp_apply_url does
+        # on the Tier-0 hit, so the same capture yields the same JobPost
+        # row whichever tier resolves it. `auto_score` is deliberately
+        # left at its default here — starting a score on this path is a
+        # separate decision with a documented double-scoring hazard.
         enqueue(
             "parse_scrape",
             scrape_id=scrape.id,
             user_id=user.id if user else None,
             force=force,
+            apply_url=apply_url,
         )
         logger.info(
             "ScrapeViewSet.create: extension-direct scrape id=%s "
@@ -1042,9 +1186,15 @@ class ScrapeViewSet(BaseViewSet):
         source = _normalize_source_hint(data.get("source"))
         auto_score_raw = data.get("auto_score")
         auto_score = True if auto_score_raw is None else bool(auto_score_raw)
-        apply_url = (data.get("apply_url") or "").strip() or None
-        canonical_link_hint = (data.get("canonical_link_hint") or "").strip() or None
-        referrer_url = (data.get("referrer_url") or "").strip() or None
+        # Hints are best-effort signals from the extension. Adversarial or
+        # malformed values are dropped silently rather than 4xx'd — a bad
+        # hint should never block ingestion of an otherwise-valid scrape.
+        # Shared with the extension-direct path in create() via
+        # _clean_hint_url so the two routes cannot drift apart on what
+        # counts as a droppable hint (BACK-131).
+        apply_url = _clean_hint_url(data.get("apply_url"))
+        canonical_link_hint = _clean_hint_url(data.get("canonical_link_hint"))
+        referrer_url = _clean_hint_url(data.get("referrer_url"))
         # Per-field structured values the extension extracted client-side
         # via ScrapeProfile.css_selectors.job_data. Strings only; ints/dicts
         # in this dict are extension bugs and get dropped. The extractor
@@ -1104,25 +1254,6 @@ class ScrapeViewSet(BaseViewSet):
                     }]},
                     status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
-
-        # Hints are best-effort signals from the extension. Adversarial or
-        # malformed values are dropped silently rather than 4xx'd — a bad
-        # hint should never block ingestion of an otherwise-valid scrape.
-        if canonical_link_hint:
-            try:
-                canonical_link_hint = validate_submission_url(canonical_link_hint)
-            except UrlPolicyError:
-                canonical_link_hint = None
-        if apply_url:
-            try:
-                apply_url = validate_submission_url(apply_url)
-            except UrlPolicyError:
-                apply_url = None
-        if referrer_url:
-            try:
-                referrer_url = validate_submission_url(referrer_url)
-            except UrlPolicyError:
-                referrer_url = None
 
         # The canonical_link_hint (e.g. LinkedIn og:url) is preferred over the
         # submitted location.href so tracker-laden URLs don't get persisted.

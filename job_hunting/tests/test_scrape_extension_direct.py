@@ -101,6 +101,29 @@ def _curated_payload(
     return payload
 
 
+def _hinted_payload(
+    *,
+    canonical_link_hint=None,
+    referrer_url=None,
+    **curated_kwargs,
+):
+    """``_curated_payload`` plus the two sibling extraction_hints (BACK-131).
+
+    ``send-gate.ts:126-127`` nests ``canonical_link_hint`` and
+    ``referrer_url`` alongside ``structured_prefill`` under
+    ``captured_payload.extraction_hints`` — a different shape from
+    ``/scrapes/from-text/``, which takes all three top-level. This helper
+    builds the nested (extension-direct) shape so tests exercise the real
+    wire format rather than a convenient approximation.
+    """
+    payload = _curated_payload(**curated_kwargs)
+    if canonical_link_hint is not None:
+        payload["extraction_hints"]["canonical_link_hint"] = canonical_link_hint
+    if referrer_url is not None:
+        payload["extraction_hints"]["referrer_url"] = referrer_url
+    return payload
+
+
 def _post_body(url, *, source_mode=None, captured_payload=None, **extra_attrs):
     """Build a JSON:API scrape-create payload.
 
@@ -1000,3 +1023,362 @@ class ExtensionDirectMergeBiasTests(TestCase):
         # Link is NOT flipped to the browser-mode URL — extension-direct
         # on existing wins despite incoming being higher trust.
         self.assertEqual(existing_jp.link, kept_link)
+
+
+class ExtensionDirectHintPlumbingTests(TestCase):
+    """BACK-131 — the three hints the extension sends on every Send.
+
+    ``send-gate.ts`` puts ``apply_url`` at the top level of
+    captured_payload and ``canonical_link_hint`` / ``referrer_url`` under
+    ``captured_payload.extraction_hints``. Before this change the consume
+    path read only ``extraction_hints.structured_prefill``, so the sibling
+    three were discarded with no error and no log — which is why
+    ``apply_url`` was populated on ~3 of 100 recently-created prod posts.
+
+    CC-176 made extension-direct the only route for any page with text, so
+    ``/scrapes/from-text/`` — the route that always honoured these — is
+    unreachable in practice. These tests pin the fast path to the same
+    behaviour on BOTH tiers: the synchronous Tier-0 hit stamps inline, the
+    Tier-0 miss forwards to the worker. Fixing only one branch would move
+    the bug rather than close it.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="dough", password="p", is_staff=True
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_tier0_hit_stamps_canonicalized_apply_url(self):
+        """AC1 — a valid apply_url lands on the JobPost, canonicalized,
+        with apply_url_status='resolved'.
+
+        Canonicalization is the point, not a detail: tracking params in an
+        apply destination break the exact-equality legs of the
+        ``filter[link]`` lookup AND the apply_url leg of find_duplicate
+        (``find_apply_url_matches``), which is the strongest signal for
+        recognising the same role reached via two different boards.
+        """
+        link = "https://example.com/jobs/hint-apply-url"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                link,
+                source_mode="extension-direct",
+                captured_payload=_curated_payload(
+                    title="Platform Engineer",
+                    company_name="StampCo",
+                    description="Real curated description. " * 20,
+                    apply_url=(
+                        "https://ats.example.com/apply/77?utm_source=linkedin"
+                        "&utm_campaign=q3"
+                    ),
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.status, "completed")
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        # Tracking params stripped by canonicalize_apply_url — the same
+        # helper parse_scrape_job uses, not a second implementation.
+        self.assertEqual(jp.apply_url, "https://ats.example.com/apply/77")
+        self.assertEqual(jp.apply_url_status, "resolved")
+
+    def test_tier0_hit_without_apply_url_leaves_column_untouched(self):
+        """The stamp is opt-in: a payload with no apply_url must not write
+        an empty value or flip apply_url_status off its default. Guards a
+        regression where the stamp fires unconditionally and blanks a
+        value an earlier resolver had already found."""
+        link = "https://example.com/jobs/hint-no-apply-url"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                link,
+                source_mode="extension-direct",
+                captured_payload=_curated_payload(
+                    title="Platform Engineer",
+                    company_name="StampCo",
+                    description="Real curated description. " * 20,
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertFalse(jp.apply_url)
+        self.assertEqual(jp.apply_url_status, "unknown")
+
+    def test_invalid_apply_url_is_dropped_not_4xxd(self):
+        """AC3 — a bad hint must never block ingestion.
+
+        ``from_text`` drops malformed/policy-blocked hints silently, and
+        the two paths must not disagree: a private-network apply_url is a
+        dropped field, not a rejected Send. The post still persists in
+        full; only the hint is discarded.
+        """
+        link = "https://example.com/jobs/hint-bad-apply-url"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                link,
+                source_mode="extension-direct",
+                captured_payload=_curated_payload(
+                    title="Platform Engineer",
+                    company_name="StampCo",
+                    description="Real curated description. " * 20,
+                    apply_url="http://192.168.1.1/admin",
+                ),
+            ),
+            format="json",
+        )
+        # The Send succeeds — that is the whole point of AC3.
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.status, "completed")
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(jp.title, "Platform Engineer")
+        self.assertFalse(jp.apply_url)
+        self.assertEqual(jp.apply_url_status, "unknown")
+
+    def test_malformed_apply_url_is_dropped_not_4xxd(self):
+        """Same contract for a non-http string — the extension's decoder
+        can emit garbage when a site changes its apply-button markup, and
+        that must degrade to "no hint", never to a failed Send."""
+        link = "https://example.com/jobs/hint-garbage-apply-url"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                link,
+                source_mode="extension-direct",
+                captured_payload=_curated_payload(
+                    title="Platform Engineer",
+                    company_name="StampCo",
+                    description="Real curated description. " * 20,
+                    apply_url="javascript:void(0)",
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertFalse(jp.apply_url)
+
+    def test_canonical_link_hint_overrides_submitted_url(self):
+        """AC2 — the page's own canonical (LinkedIn og:url) wins over the
+        tracker-laden location.href the extension submits.
+
+        Same override ``from_text`` applies at :1129-1130. It reaches both
+        the persisted Scrape.url and the JobPost, because the consume path
+        hands ``scrape.url`` to _parsed_job_data_from_payload as
+        ParsedJobData.link — which is what process_evaluation's dedupe walk
+        resolves against.
+        """
+        submitted = (
+            "https://www.linkedin.com/jobs/view/4437716572/"
+            "?refId=abc123&trackingId=xyz789"
+        )
+        canonical = "https://www.linkedin.com/jobs/view/4437716572/"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                submitted,
+                source_mode="extension-direct",
+                captured_payload=_hinted_payload(
+                    title="Staff Engineer",
+                    company_name="HintCo",
+                    description="Real curated description. " * 20,
+                    canonical_link_hint=canonical,
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.url, canonical)
+        jp = JobPost.objects.get(pk=scrape.job_post_id)
+        self.assertEqual(jp.link, canonical)
+
+    def test_invalid_canonical_link_hint_leaves_submitted_url(self):
+        """A dropped canonical hint falls back to the submitted URL, not
+        to None — otherwise a bad hint would strand the scrape with no
+        link at all."""
+        submitted = "https://example.com/jobs/hint-bad-canonical"
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                submitted,
+                source_mode="extension-direct",
+                captured_payload=_hinted_payload(
+                    title="Staff Engineer",
+                    company_name="HintCo",
+                    description="Real curated description. " * 20,
+                    canonical_link_hint="http://10.0.0.5/internal",
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.url, submitted)
+
+    def test_referrer_url_persisted_on_scrape(self):
+        """AC2 — referrer_url lands on Scrape.referrer_url.
+
+        That column IS the storage for this signal (there is no symmetric
+        field on JobPost), and it is db_index'd precisely so
+        compute_duplicate_candidates can join it against a candidate's
+        link/canonical_link and emit the high-confidence ``referrer_hint``
+        candidate. Persisting it is what makes the referrer->ATS pairing
+        live on this path.
+        """
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                "https://ats.example.com/jobs/hint-referrer",
+                source_mode="extension-direct",
+                captured_payload=_hinted_payload(
+                    title="Staff Engineer",
+                    company_name="HintCo",
+                    description="Real curated description. " * 20,
+                    referrer_url="https://www.linkedin.com/jobs/view/999/",
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(
+            scrape.referrer_url, "https://www.linkedin.com/jobs/view/999/"
+        )
+
+    def test_invalid_referrer_url_dropped_not_4xxd(self):
+        """A private-network referrer is dropped; the Send still lands."""
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body(
+                "https://ats.example.com/jobs/hint-bad-referrer",
+                source_mode="extension-direct",
+                captured_payload=_hinted_payload(
+                    title="Staff Engineer",
+                    company_name="HintCo",
+                    description="Real curated description. " * 20,
+                    referrer_url="http://192.168.1.1/admin",
+                ),
+            ),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertIsNone(scrape.referrer_url)
+
+    def test_referrer_url_absent_on_browser_mode_create(self):
+        """Browser-mode writes carry no captured_payload, so the hint read
+        is skipped entirely and referrer_url stays null — the pre-BACK-131
+        behaviour for every non-extension-direct caller."""
+        resp = self.client.post(
+            "/api/v1/scrapes/",
+            _post_body("https://example.com/jobs/browser-mode-no-hints"),
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.status, "hold")
+        self.assertIsNone(scrape.referrer_url)
+
+    def test_tier1_escalation_forwards_apply_url_to_worker(self):
+        """AC4 — the Tier-0 MISS branch carries apply_url too.
+
+        The escalation enqueues parse_scrape_job, which performs the
+        identical canonicalize-and-stamp. Omitting the kwarg would just
+        relocate the bug onto the auth-walled pages (LinkedIn/Toptal) that
+        are the whole reason the Tier-1 path exists — and those are
+        exactly the pages whose apply_url is most worth having, since the
+        posting itself is unfetchable.
+        """
+        link = "https://www.linkedin.com/jobs/view/4437716572/"
+        captured_innertext = (
+            "Senior Software Engineer at BigCorp. We are hiring engineers "
+            "to build distributed systems. Apply now. " * 10
+        )
+        payload = {
+            "description": captured_innertext,
+            "apply_url": "https://ats.example.com/apply/88?utm_source=li",
+            "extraction_hints": {
+                "referrer_url": "https://www.linkedin.com/jobs/search/",
+            },
+        }
+
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(
+                "/api/v1/scrapes/",
+                _post_body(
+                    link,
+                    source_mode="extension-direct",
+                    captured_payload=payload,
+                ),
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        scrape = Scrape.objects.get(pk=resp.json()["data"]["id"])
+        self.assertEqual(scrape.status, "pending")
+        # The referrer leg is handled at create time, so it is persisted
+        # regardless of which tier ends up resolving the capture.
+        self.assertEqual(
+            scrape.referrer_url, "https://www.linkedin.com/jobs/search/"
+        )
+
+        mock_enqueue.assert_called_once()
+        _args, kwargs = mock_enqueue.call_args
+        self.assertEqual(kwargs["scrape_id"], scrape.id)
+        # Validated but NOT canonicalized here — parse_scrape_job owns the
+        # canonicalization, so the worker receives the same shape of value
+        # from_text hands it.
+        self.assertEqual(
+            kwargs["apply_url"],
+            "https://ats.example.com/apply/88?utm_source=li",
+        )
+        # auto_score deliberately not passed: starting a score on this path
+        # is a separate decision with a documented double-scoring hazard
+        # (seven existing score starters, enqueue has no dedup key).
+        self.assertNotIn("auto_score", kwargs)
+
+    def test_tier1_escalation_drops_invalid_apply_url(self):
+        """The drop-don't-4xx rule holds on the escalation branch too: an
+        unusable hint reaches the worker as None rather than failing the
+        Send or handing the worker a value it would stamp verbatim."""
+        link = "https://www.linkedin.com/jobs/view/4437716573/"
+        payload = {
+            "description": "Senior Software Engineer at BigCorp. " * 20,
+            "apply_url": "http://192.168.1.1/admin",
+        }
+
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(
+                "/api/v1/scrapes/",
+                _post_body(
+                    link,
+                    source_mode="extension-direct",
+                    captured_payload=payload,
+                ),
+                format="json",
+            )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        mock_enqueue.assert_called_once()
+        _args, kwargs = mock_enqueue.call_args
+        self.assertIsNone(kwargs["apply_url"])
