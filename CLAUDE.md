@@ -56,12 +56,26 @@ not in a bespoke endpoint.
 
 Every AI role resolves its model through the registry in
 `job_hunting/api/views/admin.py` `_agent_role_specs()`, surfaced by the
-staff-only `GET /api/v1/admin/agent-models/`. Precedence is
-`<ROLE>_MODEL` → `CADDY_DEFAULT_MODEL` → a per-role default.
+staff-only `GET /api/v1/agent-models/` (`urls.py`; **not** under `/admin/`).
 
-**If you add an AI-backed feature, register its role.** Two roles were once
-hardcoded to the cheapest model with no env override and no registry entry —
-they were the two that generated user-facing prose, and nobody could see it.
+Precedence is `<ROLE>_MODEL` → `CADDY_DEFAULT_MODEL` → a per-role default —
+**but only for the rows that opt in.** `CADDY_DEFAULT_MODEL` reaches a role
+only where `_agent_role_specs()` passes `global_default` for it: `caddy`,
+`chat`, `job_extractor`, `browser_scraper`, and `job_parser` (conditionally).
+Every role carrying a *literal* default — `chat_smart`, `hint_generator`,
+`description_arbiter`, `answer`, `cover_letter`, `job_matcher` — ignores it
+entirely, and so does the runtime code behind them: `JobMatcher.__init__`
+reads `JOB_MATCHER_MODEL` and its own `_DEFAULT_MODEL`, nothing else. Setting
+`CADDY_DEFAULT_MODEL` and expecting it to move the whole fleet will silently
+miss the roles you most care about.
+
+**If you add an AI-backed feature, register its role.** Three roles have now
+been hardcoded to a model with no registry entry — `answer` and `cover_letter`
+(the two that generate prose a user sends an employer) and `job_matcher`,
+which decides *which company's* context those answers are written against.
+None of them were visible on the admin page, so nobody could see what they
+ran on. `tests/test_agent_model_registry.py` is what makes dropping a
+registration fail loudly now.
 
 Note there are two model plumbing families and they are not interchangeable:
 
