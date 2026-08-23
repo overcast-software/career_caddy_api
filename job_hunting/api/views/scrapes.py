@@ -2104,8 +2104,60 @@ class ScrapeProfileViewSet(BaseViewSet):
                         ),
                         "apply_url_decoder": cfg.get("apply_url_decoder"),
                         "job_data_selectors": job_data,
+                        # CANONICAL HOME, and deliberately the SAME names and
+                        # shape ScrapeProfileSerializer already uses on the
+                        # full resource (serializers.py:2010-2025):
+                        # `is_known_good` as a bool, `readiness` as the whole
+                        # {known_good, tier, reasons} struct.
+                        #
+                        # These belong in `attributes`, not in `meta`. They are
+                        # properties OF the profile, not metadata about the
+                        # response — `meta` is for `total`, `next_cursor` and
+                        # the like. Putting them in document-level `meta` would
+                        # also mean a normalizing client keeps them on the
+                        # request document rather than the record, so
+                        # `peekRecord(...).is_known_good` would be undefined.
+                        #
+                        # Converging on the existing names matters more than it
+                        # looks: automation/src/client/api_client.py:734 already
+                        # reads `attrs["is_known_good"]` and `readiness.tier`
+                        # off the full resource. Before this change the narrow
+                        # endpoint diverged from that contract three ways
+                        # (`known_good` vs `is_known_good`, flattened `tier`
+                        # and `reasons` vs nested). One shape now, not three.
+                        "is_known_good": readiness["known_good"],
+                        "readiness": readiness,
                     },
                 },
+                # DEPRECATED. Delete them; do not open a deprecation window.
+                #
+                # A consumer audit (2026-08-23, extension/CONTRACTS.md) found
+                # the COMPLETE set of readers of this top-level form:
+                #   - three assertions in this repo's own tests
+                #     (test_scrape_profile_known_good.py:256,257,280,281 and
+                #     test_scrape_profile_extension_selectors.py:110-113)
+                #   - the retired 1.x/2.x popup, dropped from frontend at
+                #     95aad96 and alive only on unmerged branches
+                # and nothing else. automation reads `is_known_good` off the
+                # FULL /scrape-profiles/ resource, not this endpoint; the
+                # frontend declares neither attribute; agents only writes
+                # extension_selectors.
+                #
+                # The Glimmer extension ALREADY reads the canonical location
+                # above, so nothing ships behind this. The removal is a
+                # test-only change whenever someone wants it. This repo already
+                # carries one unretired deprecation window (`slim_attributes`,
+                # serializers.py:98-108); a second is how that becomes a habit.
+                #
+                # They are not spec-legal — JSON:API permits only `data`,
+                # `errors`, `meta`, `jsonapi`, `links` and `included` at the top
+                # level — so any normalizing client drops them. Combined with
+                # the extension's `body.known_good === true` (which turns a
+                # missing key into `false` rather than an error), the failure
+                # mode is that the readiness signal reads FALSE for every
+                # domain, everything still appears to work, and nothing is ever
+                # reported. Verified live against prod on 2026-08-23: the
+                # extension was doing exactly that. That is why they moved.
                 "known_good": readiness["known_good"],
                 "tier": readiness["tier"],
                 "reasons": readiness["reasons"],
