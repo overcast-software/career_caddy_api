@@ -65,6 +65,13 @@ def _agent_role_specs():
         ("job_parser", "Extracts JobPost fields from scraped HTML", "JOB_PARSER_MODEL", global_default if os.environ.get("CADDY_DEFAULT_MODEL") else "gpt-4o"),
         ("hint_generator", "Suggests scrape selectors / tier-0 hints", "HINT_GENERATOR_MODEL", "openai:gpt-4o-mini"),
         ("description_arbiter", "Picks between two job descriptions when scrapes disagree", "DESCRIPTION_ARBITER_MODEL", "openai:gpt-4o-mini"),
+        # The final gate that decides whether an extracted post is a real
+        # job description. Absent from this registry until 2026-08-23
+        # despite reading COMPLETENESS_REVIEWER_MODEL — the same "reads
+        # its own env var but nobody can see it" gap that hid `answer`,
+        # `cover_letter` and `job_matcher`. It is the only role that can
+        # veto a fabricated post, so its model choice needs to be visible.
+        ("completeness_reviewer", "Final gate: does an extracted post read like a real job posting", "COMPLETENESS_REVIEWER_MODEL", "anthropic:claude-haiku-4-5"),
         # User-facing prose. These were absent from this registry and pinned to
         # gpt-4o-mini in their service constructors, so the two roles whose
         # output a user actually sends were both the cheapest and the only ones

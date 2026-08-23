@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -164,6 +165,33 @@ _REVIEWABLE_OUTCOMES = {
 }
 
 
+# A description that is nothing but a bracketed "not captured" marker —
+# e.g. "[DESCRIPTION NOT CAPTURED — LinkedIn page rendered only the top
+# card; rescrape later or capture via the cc_sender extension]", the
+# exact wording migration 0101 installs in the linkedin.com
+# ScrapeProfile.extraction_hints and the agents/ scrape-graph now
+# recognizes as a stub.
+#
+# Why this needs its own gate: the marker is ~120 non-empty characters,
+# so it sails past the `if not desc` short-circuit below and lands on
+# the LLM — whose prompt has never heard of the sentinel and is told to
+# "default to ACCEPT when uncertain". Live evidence: jp rHeRo6qWCG
+# carries exactly this description and still has complete=True. A
+# refusal is only as good as its survival through persistence.
+#
+# Anchored to the whole string on purpose. A real description that
+# happens to quote the marker mid-body is a real description.
+_NOT_CAPTURED_SENTINEL = re.compile(
+    r"^\s*\[[^\]]*\bnot\s+captured\b[^\]]*\]\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def is_not_captured_sentinel(description: Optional[str]) -> bool:
+    """True when ``description`` is only a "not captured" placeholder."""
+    return bool(_NOT_CAPTURED_SENTINEL.match(description or ""))
+
+
 def maybe_review_and_persist(
     job_post,
     *,
@@ -191,10 +219,13 @@ def maybe_review_and_persist(
         return None
 
     desc = (job_post.description or "").strip()
-    if not desc:
+    sentinel = is_not_captured_sentinel(desc)
+    if not desc or sentinel:
         # Empty descriptions don't need an LLM judgement — there's
-        # literally nothing to evaluate. The user / agent / extension
-        # caller will see complete=False and re-trigger a scrape.
+        # literally nothing to evaluate. Neither does a bare "not
+        # captured" marker: the extractor has already told us, in
+        # writing, that it found no description. Both mean the same
+        # thing to every caller — complete=False, re-trigger a scrape.
         # Short-but-non-empty descriptions fall through to the LLM
         # so a plausible 30-word stub gets a fair read; the cost of
         # a false-reject (annoying) outweighs paying for the call.
@@ -204,7 +235,11 @@ def maybe_review_and_persist(
         return ReviewDecision(
             looks_like_job_description=False,
             confidence="high",
-            reasoning="Description is empty; skipped LLM.",
+            reasoning=(
+                "Description is a 'not captured' placeholder; skipped LLM."
+                if sentinel
+                else "Description is empty; skipped LLM."
+            ),
         )
 
     decision = (reviewer or CompletenessReviewer()).review(

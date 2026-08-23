@@ -52,6 +52,23 @@ Viewsets do straightforward CRUD. Multi-lookup or composite operations
 (find-then-create, cross-model orchestration) belong in the MCP tool layer,
 not in a bespoke endpoint.
 
+### An LLM schema that forbids "I don't know" will get you a lie
+
+If a model must return a value, it will invent one. `ParsedJobData.title` and
+`.company_name` were required non-empty strings whose validators raised on
+empty — and pydantic-ai feeds validation errors back to the model as a retry,
+so an honest blank was *rejected* and the model was pushed until it produced
+prose. On a capture that was 808 characters of page chrome, fabrication was
+the only legal output. Every extraction schema needs a refusal path
+(`extraction_failed` + a reason), and the refusal has to be **cheaper** than
+the invention or the model will still take the other road.
+
+Say it in the prompt too, but the prompt is not the mechanism — a rule in a
+system prompt is a request, a rule in the output schema is a guarantee.
+Downstream, a refusal must survive persistence: a labelled placeholder
+description is not an empty one, and any gate that only checks for empty will
+wave the placeholder through.
+
 ### Model selection for AI features
 
 Every AI role resolves its model through the registry in

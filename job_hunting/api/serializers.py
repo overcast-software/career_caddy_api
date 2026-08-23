@@ -1294,8 +1294,10 @@ class ScrapeSerializer(BaseSerializer):
     # A description-only payload is the *input* to Tier 1, never a
     # persistable *output*. JobPostExtractor.process_evaluation refuses to
     # mint a JobPost whose title or company is empty/placeholder (it flips
-    # the scrape to `failed` instead), and ParsedJobData itself requires
-    # non-empty title + company_name. So there is no path from a
+    # the scrape to `failed` instead), and ParsedJobData permits a
+    # missing title/company_name only on a refusal
+    # (``extraction_failed=True``), which process_evaluation also routes
+    # to `failed`. So there is no path from a
     # description-only capture to a description-only JobPost: if Tier 1
     # cannot recover title+company the scrape FAILS rather than saving a
     # shell. `description` stays required so an empty capture is rejected
