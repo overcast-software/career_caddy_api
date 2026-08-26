@@ -1,7 +1,10 @@
 from datetime import datetime
 
 from job_hunting.models import Answer, JobApplication, JobPost, Company, CoverLetter, Question, Resume
-from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
+from job_hunting.lib.services.application_prompt_builder import (
+    ApplicationPromptBuilder,
+    resolve_max_section_chars,
+)
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
 
 
@@ -25,7 +28,15 @@ class AnswerService:
         model=None,
         temperature=ANSWER_TEMPERATURE_DEFAULT,
         previous_limit=None,
-        max_section_chars=60000,
+        # None, not a literal. The cap now resolves from
+        # ANSWER_MAX_SECTION_CHARS with a raised default (see
+        # application_prompt_builder). It was hardcoded 60000 here AND at ten
+        # other construction sites, so the builder's own default could never
+        # take effect anywhere — raising it meant editing eleven files or
+        # none. Only the two on the ANSWER path were changed; scores, cover
+        # letters, summaries and the markdown exports keep their own 60000
+        # deliberately, because nobody asked for their prompts to grow.
+        max_section_chars=None,
     ):
         from job_hunting.lib.ai_client import resolve_model
 
@@ -33,7 +44,11 @@ class AnswerService:
         self.model = model or resolve_model(ANSWER_MODEL_ENV, ANSWER_MODEL_DEFAULT)
         self.temperature = temperature
         self.previous_limit = previous_limit  # None means no limit
-        self.max_section_chars = max_section_chars
+        self.max_section_chars = (
+            max_section_chars
+            if max_section_chars is not None
+            else resolve_max_section_chars()
+        )
         self.prompt_builder = ApplicationPromptBuilder(
             max_section_chars=self.max_section_chars
         )

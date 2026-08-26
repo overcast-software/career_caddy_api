@@ -507,7 +507,11 @@ def answer_job(
         )
     elif user_id is not None:
         career_data = CareerData.for_user(user_id)
-        prompt_builder = ApplicationPromptBuilder(max_section_chars=60000)
+        # No explicit cap: this is the ANSWER path, so it follows
+        # ANSWER_MAX_SECTION_CHARS like AnswerService does. The other
+        # ApplicationPromptBuilder call sites in this module belong to score,
+        # cover-letter and summary jobs and keep their own 60000.
+        prompt_builder = ApplicationPromptBuilder()
         career_markdown = (
             prompt_builder.build_from_career_data(career_data) or ""
         )
