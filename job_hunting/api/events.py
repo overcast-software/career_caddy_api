@@ -66,12 +66,12 @@ from typing import Optional
 
 import psycopg2
 import psycopg2.extensions
-from django.conf import settings
 from django.core.signing import (
     BadSignature,
     SignatureExpired,
     TimestampSigner,
 )
+from django.db import DEFAULT_DB_ALIAS, connections
 from django.http import (
     HttpResponse,
     JsonResponse,
@@ -146,21 +146,59 @@ def events_token(request) -> Response:
     )
 
 
+# Keys Django puts in its connect kwargs for the ORM's own adapter
+# plumbing. They are not libpq connection parameters and a raw LISTEN
+# connection has no use for them — we want psycopg2's plain cursor, not
+# Django's.
+_NON_LIBPQ_CONNECT_KEYS = ("cursor_factory", "context")
+
+
+def _listen_connection_params(alias: str = DEFAULT_DB_ALIAS) -> dict:
+    """Return psycopg2 connect kwargs for ``alias``, as Django builds them.
+
+    This delegates to Django's own backend instead of re-deriving the
+    connection from ``settings.DATABASES``, because the settings dict is
+    not the whole story. ``dj_database_url`` parses the Cloud SQL socket
+    form — ``postgres://user:pw@/dbname?host=/cloudsql/<instance>`` — into
+    ``HOST=""`` with the socket path in ``OPTIONS["host"]``, and Django's
+    ``get_connection_params`` splats ``OPTIONS`` into the connect kwargs.
+    Reading ``HOST`` alone sees an empty string and misses the socket
+    entirely; that is how this connection spent a week dialling
+    ``localhost`` on Cloud Run while the ORM beside it worked fine
+    (CC-252).
+
+    THE INVARIANT: this connection goes wherever Django goes. If the two
+    can ever disagree about the destination, that disagreement is the
+    bug — that is the whole lesson of CC-252, and it holds in both
+    directions. So there is no host fallback (the old ``or "localhost"``
+    substituted a host nobody configured), and equally no host
+    *requirement*: when Django passes no ``host``, neither do we, and
+    libpq applies the same default it would for the ORM. A URL Django
+    connects with must not fail here.
+
+    Validation is Django's too, for the same reason — ``dbname`` is
+    checked inside ``get_connection_params``, which raises
+    ``ImproperlyConfigured`` on a config that is genuinely unusable
+    rather than one we merely didn't anticipate.
+    """
+    params = dict(connections[alias].get_connection_params())
+    for key in _NON_LIBPQ_CONNECT_KEYS:
+        params.pop(key, None)
+    return params
+
+
 def _open_listen_connection() -> psycopg2.extensions.connection:
     """Open a dedicated psycopg2 connection in autocommit + LISTEN.
 
     NOT borrowed from Django's pool — LISTEN ties up the connection
     for the entire SSE channel lifetime, and we don't want to starve
-    request-handling workers.
+    request-handling workers. It also has to be a *session*-mode
+    connection: transaction-mode pooling does not support LISTEN at all.
+
+    Only the connection is ours; the parameters come from Django. See
+    ``_listen_connection_params`` for why that distinction matters.
     """
-    db = settings.DATABASES["default"]
-    conn = psycopg2.connect(
-        dbname=db["NAME"],
-        user=db["USER"],
-        password=db.get("PASSWORD") or "",
-        host=db.get("HOST") or "localhost",
-        port=db.get("PORT") or 5432,
-    )
+    conn = psycopg2.connect(**_listen_connection_params())
     conn.set_isolation_level(
         psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT
     )

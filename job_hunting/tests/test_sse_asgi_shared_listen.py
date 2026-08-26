@@ -30,11 +30,11 @@ from unittest import mock
 
 import psycopg2
 import psycopg2.extensions
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TransactionTestCase
 
 from job_hunting import sse_asgi
+from job_hunting.api import events as events_view
 from job_hunting.lib import events as events_lib
 
 
@@ -44,15 +44,13 @@ User = get_user_model()
 def _fire_notify(payload: dict) -> None:
     """Emit a pg_notify on ``cc_events`` from a dedicated autocommit
     connection so it commits immediately and crosses to the hub's
-    separate LISTEN connection."""
-    db = settings.DATABASES["default"]
-    conn = psycopg2.connect(
-        dbname=db["NAME"],
-        user=db["USER"],
-        password=db.get("PASSWORD") or "",
-        host=db.get("HOST") or "localhost",
-        port=db.get("PORT") or 5432,
-    )
+    separate LISTEN connection.
+
+    Connects through ``_listen_connection_params`` for the same reason
+    production does — a config shape the LISTEN connection can't reach
+    should break this helper too, not quietly work against some other
+    database (CC-252)."""
+    conn = psycopg2.connect(**events_view._listen_connection_params())
     conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
     try:
         with conn.cursor() as cur:
