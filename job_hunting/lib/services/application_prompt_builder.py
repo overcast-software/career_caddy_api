@@ -1,7 +1,41 @@
+import os
+
 from typing import Optional
 from datetime import datetime
 from job_hunting.lib.models import CareerData
 from jinja2 import Environment, FileSystemLoader
+
+# How much of any ONE section survives into the prompt.
+#
+# Env-overridable because it is a tuning knob, not a design decision, and
+# tuning it should not need a deploy — the same reasoning that keeps
+# ScrapeProfile in JSONB. `ANSWER_MODEL` next door already establishes the
+# pattern for this role.
+#
+# Raised from a hardcoded 60,000 on Doug's call, 2026-08-25, so a long career
+# profile is not silently clipped mid-history. Note what this does NOT fix:
+# a bigger profile makes the user's own directive a smaller FRACTION of the
+# prompt, which is the opposite of what he also asked for. That is why the
+# restatement at the end of `build()` ships in the same change — raising this
+# alone would have made the reported symptom worse.
+MAX_SECTION_CHARS_ENV = "ANSWER_MAX_SECTION_CHARS"
+MAX_SECTION_CHARS_DEFAULT = 120000
+
+
+def resolve_max_section_chars() -> int:
+    """The per-section cap, from the environment or the default.
+
+    A bad value falls back rather than raising: a typo in an env var must not
+    take down answer generation, and the default is always a safe answer.
+    """
+    raw = os.environ.get(MAX_SECTION_CHARS_ENV)
+    if not raw:
+        return MAX_SECTION_CHARS_DEFAULT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_SECTION_CHARS_DEFAULT
+    return value if value > 0 else MAX_SECTION_CHARS_DEFAULT
 
 
 class ApplicationPromptBuilder:
@@ -12,8 +46,12 @@ class ApplicationPromptBuilder:
     build_from_career_data uses career-data
     """
 
-    def __init__(self, max_section_chars=60000):
-        self.max_section_chars = max_section_chars
+    def __init__(self, max_section_chars=None):
+        self.max_section_chars = (
+            max_section_chars
+            if max_section_chars is not None
+            else resolve_max_section_chars()
+        )
 
     def _truncate(self, text, max_chars):
         if not text:
@@ -290,5 +328,33 @@ class ApplicationPromptBuilder:
         qas_text = self._qas_text(context["qas"])
         if qas_text:
             sections.append(f"## Q&A History (for reference style and tone only — do NOT answer these)\n{qas_text}")
+
+        # --- Last word: the user's own directive, restated ---
+        #
+        # THE PRIORITY BLOCK AT THE TOP WAS NOT WINNING, and the arithmetic
+        # says why. Doug, 2026-08-25: "I gave it a clear directive to highlight
+        # mcp and it didn't." His instruction was 27 characters. Everything
+        # between it and this line — career profile, job description, resumes,
+        # cover letters, Q&A history — runs to tens of thousands. The word
+        # PRIORITY was asserted once and then buried.
+        #
+        # Position is the cheapest lever available. Every section above is
+        # REFERENCE MATERIAL; the directive is the TASK, and the task should be
+        # the last thing read before generating. This is not a second, competing
+        # instruction — it is the same string, deliberately repeated at the far
+        # end, which is why it quotes rather than paraphrases.
+        #
+        # Only when there IS one. An empty restatement would tell the model its
+        # final word is blank, the same trap `composeInjectedPrompt` avoids by
+        # returning null rather than an empty string.
+        if injected_prompt:
+            sections.append(
+                "## Reminder — the User Instructions above are the controlling "
+                "directive\n"
+                "Everything between them and this line is reference material. "
+                "Where it conflicts with the instructions, the instructions "
+                "win. Restated so they are the last thing you read:\n\n"
+                f"{injected_prompt}"
+            )
 
         return "\n\n".join(sections)
