@@ -1,3 +1,4 @@
+from django.db.models import Q
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -236,9 +237,25 @@ def generate_prompt(request):
 def career_data_export(request):
     from openpyxl import Workbook
 
+    # SCOPING (BACK-133). Every queryset below MUST be narrowed to the
+    # requesting user. These four were previously unfiltered, so any
+    # authenticated caller could download every user's applications, notes,
+    # questions and answers.
+    #
+    # This deliberately does NOT use ``JobPost.objects.visible_to()``: that
+    # helper returns the whole table for staff, and the ruling here is that
+    # the export has no cross-user mode at all, staff included. An admin who
+    # needs another user's data has the per-user ``/career-data/<user_id>/``
+    # read, which is separately gated. Anyone editing this function: adding a
+    # queryset without a user predicate re-opens the leak.
+    me = request.user.id
+
     wb = Workbook()
 
     # -- job-posts --
+    # JobPost rows are UNIVERSAL (one shared table), so ownership is the
+    # presence of a per-user signal on the row, not ``created_by == me``.
+    # Mirrors JobPostQuerySet.visible_to minus its staff escape.
     ws = wb.active
     ws.title = "job-posts"
     jp_headers = [
@@ -247,7 +264,20 @@ def career_data_export(request):
         "location", "remote", "created_at",
     ]
     ws.append(jp_headers)
-    for jp in JobPost.objects.select_related("company").order_by("id"):
+    my_job_posts = (
+        JobPost.objects.filter(
+            Q(created_by_id=me)
+            | Q(applications__user_id=me)
+            | Q(scores__user_id=me)
+            | Q(scrapes__created_by_id=me)
+            | Q(discoveries__user_id=me)
+            | Q(user_memberships__user_id=me)
+        )
+        .distinct()
+        .select_related("company")
+        .order_by("id")
+    )
+    for jp in my_job_posts:
         ws.append([
             jp.id, jp.title,
             jp.company.name if jp.company else None,
@@ -268,7 +298,9 @@ def career_data_export(request):
         "applied_at", "tracking_url", "notes",
     ]
     ws2.append(ja_headers)
-    for ja in JobApplication.objects.select_related("company").order_by("id"):
+    for ja in JobApplication.objects.filter(user_id=me).select_related(
+        "company"
+    ).order_by("id"):
         ws2.append([
             ja.id, ja.job_post_id,
             ja.company.name if ja.company else None,
@@ -281,7 +313,9 @@ def career_data_export(request):
     ws3 = wb.create_sheet("questions")
     q_headers = ["id", "application_id", "company", "job_post_id", "content", "favorite", "created_at"]
     ws3.append(q_headers)
-    for q in Question.objects.select_related("company").order_by("id"):
+    for q in Question.objects.filter(created_by_id=me).select_related(
+        "company"
+    ).order_by("id"):
         ws3.append([
             q.id, q.application_id,
             q.company.name if q.company else None,
@@ -293,7 +327,9 @@ def career_data_export(request):
     ws4 = wb.create_sheet("answers")
     a_headers = ["id", "question_id", "content", "favorite", "status", "created_at"]
     ws4.append(a_headers)
-    for a in Answer.objects.order_by("id"):
+    # Answer has no user column of its own; ownership runs through its
+    # Question, which is the same path CareerData.favorite_answers uses.
+    for a in Answer.objects.filter(question__created_by_id=me).order_by("id"):
         ws4.append([
             a.id, a.question_id, a.content, a.favorite, a.status,
             a.created_at.isoformat() if a.created_at else None,
