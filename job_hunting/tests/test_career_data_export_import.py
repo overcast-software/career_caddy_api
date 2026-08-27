@@ -287,3 +287,99 @@ class TestExportImportRoundTrip(TestCase):
         self.assertEqual(JobPost.objects.first().title, "RoundDev")
         self.assertEqual(Question.objects.first().content, "Round question?")
         self.assertTrue(Answer.objects.first().favorite)
+
+
+class TestExportIsolatesUsers(TestCase):
+    """BACK-133 regression: the export must never cross user boundaries.
+
+    The endpoint was gated on IsAuthenticated with four completely unfiltered
+    querysets, so any authenticated caller downloaded every user's job
+    applications, notes, questions and answers.
+
+    It survived because every pre-existing test in this file runs a single
+    superuser fixture: with one user in the database, an unscoped queryset and
+    a correctly scoped one return identical rows. Only a second user makes the
+    two distinguishable, which is what this class adds.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.mine = User.objects.create_user(username="mine", password="pass")
+        self.theirs = User.objects.create_user(username="theirs", password="pass")
+
+        self.company = Company.objects.create(name="Shared Co")
+
+        # Mine
+        self.my_jp = JobPost.objects.create(
+            title="MY ROLE", company=self.company,
+            link="https://shared.co/mine", created_by=self.mine,
+        )
+        self.my_ja = JobApplication.objects.create(
+            user=self.mine, job_post=self.my_jp, company=self.company,
+            status="Applied", notes="MY PRIVATE NOTE",
+        )
+        self.my_q = Question.objects.create(
+            application=self.my_ja, company=self.company, created_by=self.mine,
+            content="MY QUESTION", favorite=True,
+        )
+        Answer.objects.create(
+            question=self.my_q, content="MY ANSWER", favorite=True, status="draft",
+        )
+
+        # Theirs — same company, so a company join cannot be what separates them
+        self.their_jp = JobPost.objects.create(
+            title="THEIR ROLE", company=self.company,
+            link="https://shared.co/theirs", created_by=self.theirs,
+        )
+        self.their_ja = JobApplication.objects.create(
+            user=self.theirs, job_post=self.their_jp, company=self.company,
+            status="Applied", notes="THEIR PRIVATE NOTE",
+        )
+        self.their_q = Question.objects.create(
+            application=self.their_ja, company=self.company, created_by=self.theirs,
+            content="THEIR QUESTION", favorite=True,
+        )
+        Answer.objects.create(
+            question=self.their_q, content="THEIR ANSWER", favorite=True, status="draft",
+        )
+
+    def _export_text(self, user):
+        self.client.force_authenticate(user=user)
+        resp = self.client.get("/api/v1/career-data/export/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        wb = load_workbook(BytesIO(resp.content))
+        chunks = []
+        for name in wb.sheetnames:
+            for row in wb[name].iter_rows(values_only=True):
+                chunks.append(" ".join("" if c is None else str(c) for c in row))
+        return "\n".join(chunks)
+
+    def test_export_excludes_other_users_rows(self):
+        text = self._export_text(self.mine)
+        self.assertIn("MY ROLE", text)
+        self.assertIn("MY PRIVATE NOTE", text)
+        self.assertIn("MY QUESTION", text)
+        self.assertIn("MY ANSWER", text)
+        for leaked in ("THEIR ROLE", "THEIR PRIVATE NOTE", "THEIR QUESTION", "THEIR ANSWER"):
+            self.assertNotIn(leaked, text, f"{leaked} leaked into another user's export")
+
+    def test_export_is_symmetric(self):
+        text = self._export_text(self.theirs)
+        self.assertIn("THEIR ROLE", text)
+        for leaked in ("MY ROLE", "MY PRIVATE NOTE", "MY QUESTION", "MY ANSWER"):
+            self.assertNotIn(leaked, text, f"{leaked} leaked into another user's export")
+
+    def test_staff_get_no_cross_user_export(self):
+        """Doug, 2026-08-27: 'No cross user export.'
+
+        JobPostQuerySet.visible_to returns the whole table for staff. The
+        export deliberately does not use it — a staff account exports its own
+        data and nothing else. If a cross-user export is ever wanted it needs
+        an explicit user_id, not a silent everything.
+        """
+        staff = User.objects.create_superuser(
+            username="staff", password="pass", email="s@x.com"
+        )
+        text = self._export_text(staff)
+        for leaked in ("MY ROLE", "THEIR ROLE", "MY PRIVATE NOTE", "THEIR PRIVATE NOTE"):
+            self.assertNotIn(leaked, text, f"staff export leaked {leaked}")
