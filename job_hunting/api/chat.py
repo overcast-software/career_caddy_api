@@ -125,6 +125,19 @@ def chat_proxy(request):
     if not message:
         return JsonResponse({"error": "message is required"}, status=400)
 
+    # THIS DICT IS A WHITELIST, AND THAT IS THE POINT OF FAILURE HERE.
+    #
+    # Unknown keys in `body` are NOT forwarded. So a new chat request field
+    # needs THREE commits in THREE repos — frontend/extension sends it,
+    # chat_server consumes it, and this line. The middle one is the one nobody
+    # diffs, and it has now been forgotten twice:
+    #
+    #   - `page_context`, fixed 2026-04-13 in 462195f
+    #   - `smart`, shipped on both ends 2026-04-20 and dropped here until
+    #     BACK-135. Sixteen weeks of a toggle rendering as engaged
+    #     (aria-pressed) while every turn silently ran CHAT_MODEL.
+    #
+    # If you add a field to the chat request, add it here in the same PR.
     payload = {
         "message": message,
         "token": token,
@@ -132,6 +145,12 @@ def chat_proxy(request):
         "conversation_id": body.get("conversation_id", ""),
         "page_context": body.get("page_context"),
         "onboarding": body.get("onboarding"),
+        # Routes the turn through CHAT_SMART_MODEL (chat_server.py:799-802) and
+        # attributes the spend under trigger="chat_smart" (:1134-1144).
+        # Coerced rather than passed through: the client controls this value and
+        # it only ever reaches a truthiness check downstream, so normalizing it
+        # here keeps a stray string out of the spend attribution.
+        "smart": bool(body.get("smart")),
     }
     logger.info(
         "Chat proxy page_context: %s, onboarding present: %s",
