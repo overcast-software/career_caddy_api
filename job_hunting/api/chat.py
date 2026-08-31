@@ -1,14 +1,27 @@
 """
-Chat proxy — authenticates the user via JWT, then forwards the token
+Chat proxy — authenticates the caller, then forwards their credential
 to the internal chat service which runs the AI agent.
 
 Uses a raw Django view (not DRF @api_view) because StreamingHttpResponse
-must bypass DRF's content negotiation to stream SSE correctly.
+must bypass DRF's content negotiation to stream SSE correctly. That choice
+has a consequence worth stating up front: because this is not a DRF view,
+DEFAULT_AUTHENTICATION_CLASSES does not apply and this module does its OWN
+authentication. A credential the rest of the api accepts is not
+automatically accepted here — see _authenticate.
 
-Auth pattern (Option C — JWT pass-through):
-    Frontend sends JWT → Django validates it → forwards the same JWT to
-    the chat service → chat service uses it for /api/v1/me/ profile fetch
-    and all downstream tool calls. No temporary API keys created.
+Auth pattern (Option C — credential pass-through):
+    Client sends a credential → Django validates it → forwards the SAME
+    raw credential to the chat service → chat service uses it for
+    /api/v1/me/ and all downstream tool calls. No temporary keys minted.
+
+    Two credential shapes, one header (matching the rest of the api):
+      - a JWT, from the Ember SPA
+      - a `jh_*` API key, from the browser extension / cc_auto / any
+        non-SPA client
+
+    Both work downstream unchanged, because DRF lists ApiKeyAuthentication
+    first in DEFAULT_AUTHENTICATION_CLASSES, so the same key authenticates
+    every hop the chat service makes on the user's behalf.
 """
 
 import json
@@ -21,7 +34,10 @@ from urllib.parse import urlsplit
 import httpx
 from django.http import StreamingHttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
+
+from job_hunting.api.authentication import ApiKeyAuthentication
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +106,50 @@ def _chat_request_headers() -> dict[str, str]:
 
 
 def _authenticate(request):
-    """Authenticate via JWT. Returns (user, raw_token) or (None, None)."""
+    """Authenticate the caller. Returns (user, raw_token) or (None, None).
+
+    This view is raw Django, so DRF's DEFAULT_AUTHENTICATION_CLASSES never
+    runs and authentication is this function's job alone. Until BACK-134 it
+    tried JWTAuthentication and nothing else, which made /api/v1/chat/ the
+    only authenticated endpoint in the api that rejected a valid `jh_` key.
+
+    That was expensive to diagnose, because ApiKeyAuthenticationMiddleware
+    has ALREADY run by this point and already set request.user from the key,
+    and ApiKeyPermissionMiddleware has already checked its scopes. So
+    request.user.is_authenticated was True on the very line that returned
+    401, and from a client it read as a permissions problem.
+
+    The raw credential is returned, not just the user, because the chat
+    service replays it verbatim on Authorization: Bearer for /api/v1/me/ and
+    every downstream tool call.
+
+    NOTE the deliberate narrowing: an API key is accepted on the Bearer
+    header ONLY. ApiKeyAuthentication also honours X-API-Key and ?api_key=,
+    but those cannot be forwarded — the chat service needs a bearer-shaped
+    credential — and Bearer is the documented wire scheme (api/CLAUDE.md:
+    "Auth is Bearer, never Api-Key"). Widening this would mean accepting a
+    credential here that fails one hop later, which is worse than a 401.
+    """
     auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-    jwt_auth = JWTAuthentication()
-    try:
-        result = jwt_auth.authenticate(request)
+    raw_token = auth_header.split(" ", 1)[1] if " " in auth_header else ""
+
+    # API key first, mirroring DEFAULT_AUTHENTICATION_CLASSES ordering
+    # (settings.py) so the two paths cannot disagree about precedence.
+    if raw_token.startswith("jh_"):
+        try:
+            result = ApiKeyAuthentication().authenticate(request)
+        except AuthenticationFailed:
+            # Revoked, expired or unknown key. DRF raises here rather than
+            # returning None, and an uncaught DRF exception in a raw Django
+            # view is a 500, not a 401.
+            return None, None
         if result:
-            # Extract the raw token string from the Authorization header
-            raw_token = auth_header.split(" ", 1)[1] if " " in auth_header else ""
+            return result[0], raw_token
+        return None, None
+
+    try:
+        result = JWTAuthentication().authenticate(request)
+        if result:
             return result[0], raw_token
     except Exception:
         pass
