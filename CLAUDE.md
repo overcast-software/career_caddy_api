@@ -52,6 +52,30 @@ Viewsets do straightforward CRUD. Multi-lookup or composite operations
 (find-then-create, cross-model orchestration) belong in the MCP tool layer,
 not in a bespoke endpoint.
 
+### The chat proxy payload is a whitelist — a new field needs a line in it
+
+`chat_proxy` (`job_hunting/api/chat.py`) does not forward the request body. It
+rebuilds an **explicit dict** and sends that, so any key it does not name is
+dropped silently: no error, no log, a 200 response, and the feature simply
+absent. Adding a field to the chat request therefore takes **three commits in
+three repos** — the client sends it, `agents/mcp_servers/chat_server.py`
+consumes it, and this dict passes it between them. The middle one is the one
+nobody diffs, and it has been missed twice:
+
+- `page_context` — fixed 2026-04-13 (`462195f`).
+- `smart` (the "Smarter" model toggle) — shipped on both ends the same day,
+  2026-04-20, and dropped here until BACK-135. Sixteen weeks of a control
+  rendering as engaged while every turn ran the cheap model.
+
+The whitelist itself is correct and stays: the client must not be able to
+inject arbitrary keys into the chat service's request. The fix for a dropped
+field is to **name it**, never to splat the body.
+
+The same shape applies to auth on that view. It is a raw Django view (SSE
+can't go through DRF content negotiation), so it does its **own**
+authentication — and a credential the rest of the api accepts is not
+automatically accepted there. See BACK-134.
+
 ### An LLM schema that forbids "I don't know" will get you a lie
 
 If a model must return a value, it will invent one. `ParsedJobData.title` and
