@@ -11,9 +11,9 @@ Coverage:
 - staff + no successful scrape for hostname → 422
 - staff + valid source scrape → 202, async_task invoked, profile returned
 - CC-238 source selection (``ScrapeProfileSharpenSourceSelectionTests``):
-  DOM-less scrapes are never chosen, NULL ``scraped_at`` sorts last
-  rather than first, an all-DOM-less host gets its own 422 instead of a
-  false 202, and a caller-supplied ``source_scrape_id`` pins the page.
+  DOM-less scrapes are never chosen (NULL, ``""`` and whitespace-only
+  html alike), NULL ``scraped_at`` sorts last rather than first, and an
+  all-DOM-less host gets its own 422 instead of a false 202.
 
 The django-q enqueue is mocked at the view import site so tests don't
 require a live qcluster process.
@@ -308,13 +308,34 @@ class ScrapeProfileSharpenSourceSelectionTests(TestCase):
         )
 
     def test_ticket_repro_domless_null_row_loses_to_html_bearing_row(self):
-        """The literal CC-238 shape: an extension-ingested row with both
-        ``scraped_at`` and ``html`` NULL, created before a real browser
-        capture."""
-        Scrape.objects.create(
+        """The literal CC-238 shape, seeded so that *either* mechanism
+        failing alone breaks the assertion.
+
+        A single row with html=None AND scraped_at=None is not a real
+        repro: the html filter and the NULLS-LAST ordering each demote
+        it on their own, so reverting one leaves the other covering the
+        gap and the test still passes. Seed one distractor per
+        mechanism instead:
+
+        - ``domless_newer`` carries no html but the newest
+          ``scraped_at``, so only ``exclude(html…)`` can stop it.
+        - ``null_timestamp`` carries html but a NULL ``scraped_at``, so
+          only ``nulls_last=True`` can stop it (Postgres sorts NULLs
+          FIRST under a bare DESC).
+
+        Both must hold for ``captured`` — the real browser capture — to
+        win.
+        """
+        domless_newer = Scrape.objects.create(
             url="https://example.com/imp_id=x_digest_job_alert_y",
             status="completed",
             html=None,
+            scraped_at=timezone.now() + timedelta(hours=1),
+        )
+        null_timestamp = Scrape.objects.create(
+            url="https://example.com/jobs/extension-push",
+            status="completed",
+            html="<html><body>extension push</body></html>",
             scraped_at=None,
         )
         captured = Scrape.objects.create(
@@ -333,6 +354,61 @@ class ScrapeProfileSharpenSourceSelectionTests(TestCase):
         self.assertEqual(
             mock_enqueue.call_args.kwargs["source_scrape_id"], captured.id
         )
+        self.assertNotIn(
+            resp.json()["meta"]["source_scrape_id"],
+            {domless_newer.id, null_timestamp.id},
+        )
+
+    def test_whitespace_only_html_is_treated_as_no_dom(self):
+        """``html="\\n  "`` is as useless to the enhancer as "" or NULL.
+
+        ``exclude(html="")`` alone lets it through and re-creates the
+        silent no-op 202 the ticket is about.
+        """
+        with_html = Scrape.objects.create(
+            url="https://example.com/jobs/keeper",
+            status="completed",
+            html="<html><body>real page</body></html>",
+            scraped_at=timezone.now() - timedelta(hours=2),
+        )
+        Scrape.objects.create(
+            url="https://example.com/jobs/whitespace",
+            status="completed",
+            html="\n  \t\n",
+            scraped_at=timezone.now(),
+        )
+
+        resp, mock_enqueue = self._post()
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            resp.json()["meta"]["source_scrape_id"], with_html.id
+        )
+        self.assertEqual(
+            mock_enqueue.call_args.kwargs["source_scrape_id"], with_html.id
+        )
+
+    def test_whitespace_only_host_corpus_returns_422(self):
+        """A host whose every completed scrape is whitespace-only gets
+        the DOM-less 422, not a 202 with nothing to analyze."""
+        Scrape.objects.create(
+            url="https://example.com/jobs/whitespace",
+            status="completed",
+            html="   \n",
+            scraped_at=timezone.now(),
+        )
+
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(self._url(), {}, format="json")
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        self.assertIn(
+            "No captured DOM for this host",
+            resp.json()["errors"][0]["detail"],
+        )
+        mock_enqueue.assert_not_called()
 
     def test_all_candidates_dom_less_returns_422_not_false_202(self):
         """The operator-facing half of the bug: completed scrapes exist
@@ -374,92 +450,35 @@ class ScrapeProfileSharpenSourceSelectionTests(TestCase):
         self.assertIn("No successful scrape", detail)
         self.assertNotIn("No captured DOM", detail)
 
-    def test_explicit_source_scrape_id_overrides_host_lookup(self):
-        """A sharpen fired from a specific JobPost pins that post's
-        scrape, even though the host lookup would pick a newer one."""
-        pinned = Scrape.objects.create(
-            url="https://example.com/jobs/the-one-doug-clicked",
+    def test_unknown_body_keys_are_ignored_not_honoured(self):
+        """The endpoint takes no source selector.
+
+        An earlier CC-238 draft accepted ``source_scrape_id`` in the
+        body and looked it up with no host or status constraint, which
+        would have let a profile be sharpened from a foreign site's DOM.
+        That hunk is gone; a body carrying the key must be ignored and
+        the host-wide pick must stand.
+        """
+        foreign = Scrape.objects.create(
+            url="https://linkedin.com/jobs/not-this-host",
             status="completed",
-            html="<html><body>pinned</body></html>",
-            scraped_at=timezone.now() - timedelta(days=30),
-        )
-        Scrape.objects.create(
-            url="https://example.com/jobs/newer",
-            status="completed",
-            html="<html><body>newer</body></html>",
+            html="<html><body>foreign host</body></html>",
             scraped_at=timezone.now(),
         )
-
-        resp, mock_enqueue = self._post({"source_scrape_id": pinned.id})
-
-        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(resp.json()["meta"]["source_scrape_id"], pinned.id)
-        self.assertEqual(
-            mock_enqueue.call_args.kwargs["source_scrape_id"], pinned.id
-        )
-
-    def test_explicit_source_scrape_id_unknown_returns_422(self):
-        Scrape.objects.create(
-            url="https://example.com/jobs/1",
-            status="completed",
-            html="<html><body>x</body></html>",
-            scraped_at=timezone.now(),
-        )
-
-        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
-            resp = self.client.post(
-                self._url(),
-                {"source_scrape_id": "nope0nope0"},
-                format="json",
-            )
-
-        self.assertEqual(
-            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
-        )
-        self.assertIn(
-            "source_scrape_id not found",
-            resp.json()["errors"][0]["detail"],
-        )
-        mock_enqueue.assert_not_called()
-
-    def test_explicit_source_scrape_id_without_html_returns_422(self):
-        """Pinning does not bypass the DOM precondition — that is the
-        whole point of the ticket."""
-        empty = Scrape.objects.create(
-            url="https://example.com/jobs/empty",
-            status="completed",
-            html=None,
-            scraped_at=timezone.now(),
-        )
-
-        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
-            resp = self.client.post(
-                self._url(),
-                {"source_scrape_id": empty.id},
-                format="json",
-            )
-
-        self.assertEqual(
-            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
-        )
-        self.assertIn(
-            "no captured DOM", resp.json()["errors"][0]["detail"]
-        )
-        mock_enqueue.assert_not_called()
-
-    def test_non_scalar_source_scrape_id_falls_back_to_host_lookup(self):
-        """A malformed body must not 500 through the ORM filter."""
         keeper = Scrape.objects.create(
             url="https://example.com/jobs/1",
             status="completed",
             html="<html><body>x</body></html>",
-            scraped_at=timezone.now(),
+            scraped_at=timezone.now() - timedelta(hours=1),
         )
 
-        resp, _ = self._post({"source_scrape_id": ["a", "b"]})
+        resp, mock_enqueue = self._post({"source_scrape_id": foreign.id})
 
         self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
         self.assertEqual(resp.json()["meta"]["source_scrape_id"], keeper.id)
+        self.assertEqual(
+            mock_enqueue.call_args.kwargs["source_scrape_id"], keeper.id
+        )
 
 
 class SharpenTaskTests(TestCase):

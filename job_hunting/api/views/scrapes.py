@@ -2367,7 +2367,9 @@ class ScrapeProfileViewSet(BaseViewSet):
 
     @classmethod
     def _pick_sharpen_source(cls, target_host):
-        """Newest analyzable scrape for ``target_host``, or None.
+        """Scrape with the newest ``scraped_at`` for ``target_host``.
+
+        Returns None when the host has no analyzable scrape.
 
         CC-238: two bugs lived in the one-liner this replaces.
 
@@ -2384,11 +2386,32 @@ class ScrapeProfileViewSet(BaseViewSet):
            ties on ``created_at`` (the arrival-order key added in CC-77).
            The NanoID PK is random, so ``-id`` is a determinism
            tiebreaker only — never a recency signal.
+
+        ``scraped_at`` is the *only* recency signal here — deliberately.
+        Because ``created_at`` sits after it in the ORDER BY, it breaks
+        ties only among rows whose ``scraped_at`` is NULL; it never
+        floats a NULL-``scraped_at`` row above a timestamped one, so
+        this is "newest capture", not "newest row". That is not merely
+        an artifact: it matches the list-endpoint convention above (see
+        the default ordering ~line 160), and the mixed shape it would
+        mis-rank — NULL ``scraped_at`` but non-empty ``html`` — is not
+        produced by any ingest path today, since every path that leaves
+        ``scraped_at`` NULL (the extension-direct/from-text
+        ``create_kwargs`` earlier in this file, ~line 646) also leaves
+        ``html`` NULL, and the DOM filter drops those before the sort
+        ever sees them. If a capture
+        path ever lands HTML without a ``scraped_at``, switch to
+        ``Coalesce("scraped_at", "created_at").desc()``.
         """
         return (
             cls._host_scrape_candidates(target_host)
             .exclude(html__isnull=True)
-            .exclude(html="")
+            # Whitespace-only html gives the enhancer exactly as little
+            # to read as "" or NULL, and would re-create the silent
+            # no-op 202 this ticket is about. ``^\s*$`` subsumes the
+            # empty string; Postgres' regex is not newline-sensitive by
+            # default, so "\n  " matches too.
+            .exclude(html__regex=r"^\s*$")
             .order_by(
                 F("scraped_at").desc(nulls_last=True),
                 F("created_at").desc(nulls_last=True),
@@ -2409,8 +2432,9 @@ class ScrapeProfileViewSet(BaseViewSet):
         if cls._host_scrape_candidates(target_host).exists():
             return (
                 "No captured DOM for this host — every completed scrape "
-                "arrived without HTML (extension, from-text or email "
-                "ingest). Capture one via the browser scrape flow first."
+                "arrived without usable HTML (extension, from-text or "
+                "email ingest). Capture one via the browser scrape flow "
+                "first."
             )
         return (
             "No successful scrape found for hostname; capture one first."
@@ -2430,11 +2454,13 @@ class ScrapeProfileViewSet(BaseViewSet):
         Accepted with the profile JSON and a ``meta.job_id`` for client
         polling.
 
-        The caller may pin the source page by passing
-        ``{"source_scrape_id": "<nanoid>"}`` in the body — used when the
-        operator triggers sharpen from a specific JobPost and wants
-        *that* post's page analyzed rather than whatever the host-wide
-        lookup picks.
+        The request body carries no source selector: the page is always
+        chosen host-wide by ``_pick_sharpen_source``. (An earlier draft
+        of CC-238 accepted a caller-supplied ``source_scrape_id`` pin;
+        it was dropped because nothing in frontend/, agents/ or
+        automation/ sends one and an unconstrained pin would let a
+        profile be sharpened from a foreign host's DOM. If a per-JobPost
+        sharpen is wanted, it needs its own ticket and a host check.)
 
         422 when no analyzable scrape exists for the hostname — the
         enhancer needs a captured page to analyze; capture one via the
@@ -2450,67 +2476,21 @@ class ScrapeProfileViewSet(BaseViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        body = request.data if isinstance(request.data, dict) else {}
-        raw_explicit = body.get("source_scrape_id")
-        # Coerce defensively: the PK is a CharField, so a list/dict here
-        # would blow up the ORM filter with a 500 instead of a 422.
-        explicit_id = (
-            str(raw_explicit).strip()
-            if isinstance(raw_explicit, (str, int))
-            else ""
-        )
-        if explicit_id:
-            # Explicit pin: honour exactly what the operator named. Only
-            # the DOM precondition is enforced — not status, not host —
-            # because the point of the pin is to sharpen from a page the
-            # host-wide lookup would not have chosen.
-            source_scrape = Scrape.objects.filter(pk=explicit_id).first()
-            if source_scrape is None:
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": (
-                                    "source_scrape_id not found."
-                                ),
-                                "status": "422",
-                            }
-                        ]
-                    },
-                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                )
-            if not source_scrape.html:
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": (
-                                    "The requested source scrape has no "
-                                    "captured DOM; the enhancer has "
-                                    "nothing to analyze."
-                                ),
-                                "status": "422",
-                            }
-                        ]
-                    },
-                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                )
-        else:
-            source_scrape = self._pick_sharpen_source(profile.hostname)
-            if source_scrape is None:
-                return Response(
-                    {
-                        "errors": [
-                            {
-                                "detail": self._sharpen_source_error(
-                                    profile.hostname
-                                ),
-                                "status": "422",
-                            }
-                        ]
-                    },
-                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                )
+        source_scrape = self._pick_sharpen_source(profile.hostname)
+        if source_scrape is None:
+            return Response(
+                {
+                    "errors": [
+                        {
+                            "detail": self._sharpen_source_error(
+                                profile.hostname
+                            ),
+                            "status": "422",
+                        }
+                    ]
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
         # CC-207b: dispatch via the unified producer (Cloud Task on GCP /
         # Job row on self-host). Unlike django-q2 async_task, enqueue() returns
