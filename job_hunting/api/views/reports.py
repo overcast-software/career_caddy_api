@@ -2,7 +2,6 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.db.models import Q
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -23,8 +22,13 @@ from job_hunting.models import (
 # long enough that public traffic doesn't re-derive the sankey on
 # every load. Bust with `flush_demo_report_cache`.
 PUBLIC_DEMO_CACHE_SECONDS = 300
-PUBLIC_DEMO_FLOW_KEY = "reports:public_demo:application_flow:v1"
-PUBLIC_DEMO_SOURCES_KEY = "reports:public_demo:sources:v1"
+# :v2 — BACK-129 widened the guest scope by the `member` clause, so the
+# payload these keys hold means something different than it did at :v1.
+# Bumping makes the corrected counts land the moment the deploy is live
+# instead of after a TTL of stale, undercounted payload. Bump again
+# whenever the derivation changes, not merely when the numbers move.
+PUBLIC_DEMO_FLOW_KEY = "reports:public_demo:application_flow:v2"
+PUBLIC_DEMO_SOURCES_KEY = "reports:public_demo:sources:v2"
 
 
 def _guest_user_id():
@@ -41,6 +45,13 @@ def _build_public_demo_flow():
     Anonymous visitors see ONLY the guest user's pipeline — never
     other users' data — even if the caller tries to override scope.
     Result is cached; bust via `flush_demo_report_cache`.
+
+    BACK-129 widened this endpoint too: `_user_scoped_job_posts` gained the
+    `member` clause, so a post carrying a `UserJobPost` row for `guest` now
+    counts here. That stays within the contract — the scope is still "the
+    guest user's signals", and the payload is aggregate node/link counts,
+    never row content. If a future instance ever seeds guest memberships on
+    posts it does NOT want publicly aggregated, this is the line to revisit.
     """
     cached = cache.get(PUBLIC_DEMO_FLOW_KEY)
     if cached is not None:
@@ -82,16 +93,37 @@ KNOWN_SOURCES = ["manual", "email", "paste", "scrape", "chat", "import"]
 
 
 def _user_scoped_job_posts(user_id):
-    # Visibility mirrors JobPostViewSet.list — discovery + scrape signals
-    # included so reports don't undercount email-ingested or hold-poller
-    # posts.
-    return JobPost.objects.filter(
-        Q(created_by_id=user_id)
-        | Q(applications__user_id=user_id)
-        | Q(scores__user_id=user_id)
-        | Q(scrapes__created_by_id=user_id)
-        | Q(discoveries__user_id=user_id)
-    ).distinct()
+    """Posts visible to ``user_id`` — the canonical six-signal predicate.
+
+    Delegates to ``JobPostQuerySet.visible_to_user_id`` so this can never
+    drift from the one home again. It had been an inlined copy carrying only
+    five clauses; ``user_memberships`` was added to the canonical predicate
+    later and never reached here, so every report undercounted posts that
+    arrive through the multi-user forward@ ingest path (BACK-129). The same
+    post was counted on the job-posts list and the company page but not in
+    report totals.
+
+    Deliberately the id-based, staff-free entry point rather than
+    ``visible_to(user)``, which hands staff the whole table. Reports already
+    have an explicit everyone's-data door — ``?scope=all`` — and the staff
+    ``?user=<id>`` filter narrows THAT door to one person. Inheriting the
+    staff escape would make ``scope=mine`` silently mean "the entire
+    platform" for an admin, and would make ``?scope=all&user=<some staff
+    member>`` return everyone's posts instead of that person's, because the
+    escape keys off the TARGET. One cross-user door, gated where it is
+    already gated.
+
+    Known gap, pre-dating BACK-129 and NOT fixed here: ``?user=`` is only
+    consulted on the ``scope=all`` branch. Under the default ``scope=mine``
+    the views compute ``person_user_id`` and then scope to ``request.user.id``
+    anyway, so a staff ``?user=42`` without ``scope=all`` quietly returns the
+    CALLER's data. The frontend report routes send ``user`` with
+    ``scope = params.scope || 'mine'``, so the person dropdown is inert until
+    the operator also flips scope. Tracked separately; the ruling above is
+    unaffected either way, since it concerns which predicate the person
+    filter runs, not which branch reaches it.
+    """
+    return JobPost.objects.visible_to_user_id(user_id)
 
 
 def _parse_iso_date(val):
@@ -160,7 +192,8 @@ def application_flow_report(request):
     """GET /api/v1/reports/application-flow/?scope=mine|all&source=&from=&to=&user=
 
     Sankey funnel payload. Filters: source (provenance), date range
-    (JobPost.created_at), user (staff-only, scopes to that person).
+    (JobPost.created_at), user (staff-only; narrows ``scope=all`` to that
+    person — it is NOT consulted on the default ``scope=mine`` branch).
 
     Public: anonymous viewers get a precomputed payload derived from
     the guest user's demo pipeline (seeded via `seed_demo_pipeline`).
@@ -275,7 +308,8 @@ def activity_report(request):
     Daily application-creation counts over a date range for the
     calendar-heatmap report. Scope rules match application-flow:
     mine = your own applications; all = staff-only, everyone's;
-    ?user=<id> = staff-only, scope to that user.
+    ?user=<id> = staff-only, narrows `scope=all` to that user (like the
+    other reports, it is ignored on the default `scope=mine` branch).
     """
     scope = (request.query_params.get("scope") or "mine").lower()
     if scope not in ("mine", "all"):

@@ -89,6 +89,40 @@ def _default_source_instance():
 class JobPostQuerySet(models.QuerySet):
     """Queryset carrying the canonical JobPost visibility filter."""
 
+    def visible_to_user_id(self, user_id):
+        """Narrow to the posts user ``user_id`` may see, with NO staff escape.
+
+        This method IS the clause list — the single home for the six per-user
+        signals that make a shared JobPost row visible to someone:
+
+            created · applied · scored · scraped · discovered · member
+
+        ``visible_to`` layers the staff bypass on top of this and is what most
+        callers want. Call this one directly only when the caller must stay
+        person-scoped even for an admin — i.e. it has its own, explicit
+        everyone's-data door and must not acquire a second implicit one
+        (BACK-129: report endpoints, whose cross-user mode is ``?scope=all``).
+
+        Takes an id rather than a user object because the person being scoped
+        to is not always the caller and is not always loaded: the reports'
+        staff ``?user=<id>`` filter and the anonymous demo's guest lookup both
+        hold an id and nothing more.
+
+        A falsy ``user_id`` yields ``.none()``, never an unfiltered queryset —
+        ``Q(created_by_id=None)`` compiles to ``created_by_id IS NULL`` and
+        would quietly match every ownerless post.
+        """
+        if not user_id:
+            return self.none()
+        return self.filter(
+            Q(created_by_id=user_id)
+            | Q(applications__user_id=user_id)
+            | Q(scores__user_id=user_id)
+            | Q(scrapes__created_by_id=user_id)
+            | Q(discoveries__user_id=user_id)
+            | Q(user_memberships__user_id=user_id)
+        ).distinct()
+
     def visible_to(self, user):
         """Narrow to the posts ``user`` may see.
 
@@ -102,9 +136,8 @@ class JobPostQuerySet(models.QuerySet):
 
         Staff see everything. An anonymous or missing user sees nothing —
         note this is NOT the same as omitting the filter. Passing a user
-        with no ``id`` into the ``Q`` block below would compile to
-        ``created_by_id IS NULL`` and match every ownerless post, so the
-        empty case is short-circuited rather than left to fall through.
+        with no ``id`` into ``visible_to_user_id`` would be caught by its own
+        guard, but short-circuiting here keeps the empty case explicit.
 
         This lives on the queryset, not on a viewset, because both the view
         layer and the serializer layer need it and ``serializers`` must not
@@ -116,14 +149,7 @@ class JobPostQuerySet(models.QuerySet):
             return self.none()
         if getattr(user, "is_staff", False):
             return self
-        return self.filter(
-            Q(created_by_id=user.id)
-            | Q(applications__user_id=user.id)
-            | Q(scores__user_id=user.id)
-            | Q(scrapes__created_by_id=user.id)
-            | Q(discoveries__user_id=user.id)
-            | Q(user_memberships__user_id=user.id)
-        ).distinct()
+        return self.visible_to_user_id(user.id)
 
 
 class JobPost(GetMixin, NanoIDModel):
