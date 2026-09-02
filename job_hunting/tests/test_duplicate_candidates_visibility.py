@@ -12,8 +12,18 @@ would never propose.
 
 These tests pin the widened candidate set (the intended behaviour change)
 *and* the edges the swap must not move: posts with no per-user signal at
-all stay invisible, staff still see across users, an anonymous caller
-still gets ``[]``, and the self / duplicate_of exclusion set still bites.
+all stay invisible, a membership belonging to somebody else grants
+nothing, staff still see across users, an anonymous caller still gets
+``[]``, and the self / duplicate_of exclusion set still bites.
+
+They also pin the other half of "the gate and the candidate set must
+agree": the SUBJECT post is resolved through the same gate, so
+``/duplicate-candidates/`` 404s wherever ``GET /job-posts/<id>/`` does
+instead of answering 200 with an oracle on a post you cannot read.
+
+The report call site of the same predicate (``views/reports.py``, the
+other five-clause copy) is BACK-129's, fixed on its own branch — not
+duplicated here.
 """
 
 from django.contrib.auth import get_user_model
@@ -108,11 +118,19 @@ class TestDuplicateCandidatesMemberVisibility(TestCase):
 
     def test_post_with_no_user_signal_is_still_invisible(self):
         """Exonerating case: the fix widens by exactly the membership
-        clause. A fingerprint twin with no signal for this caller — no
-        membership, no application, no score, no scrape, no discovery —
-        must stay out."""
+        clause, and by MY membership specifically.
+
+        Two fingerprint twins must stay out. ``bare`` has no per-user row
+        of any kind. ``theirs`` carries a ``UserJobPost`` owned by someone
+        else — so a regression from
+        ``Q(user_memberships__user_id=me)`` to
+        ``Q(user_memberships__isnull=False)`` (any membership, not mine)
+        would leak every member-owned post on the platform, and only this
+        row catches it."""
         mine = self._post("https://ex.com/mine", created_by=self.user)
-        self._post("https://ex.com/stranger")  # authored by self.author
+        self._post("https://ex.com/bare")  # authored by self.author, no rows
+        theirs = self._post("https://ex.com/stranger")
+        UserJobPost.objects.create(job_post=theirs, user=self.author)
 
         items = compute_duplicate_candidates(mine, self._request())
 
@@ -144,6 +162,46 @@ class TestDuplicateCandidatesMemberVisibility(TestCase):
         self._member_post("https://ex.com/theirs")
 
         self.assertEqual(compute_duplicate_candidates(mine, None), [])
+
+    def test_subject_post_the_caller_cannot_see_is_404(self):
+        """The mirror of the ticket's thesis. ``duplicate_candidates``
+        used to resolve its SUBJECT with an unscoped
+        ``JobPost.objects.filter(pk=pk)``, unlike every other dedupe verb.
+        The rows it returns are all the caller's own, so nothing foreign
+        was disclosed directly — but empty-vs-non-empty is an oracle on
+        the subject's canonical_link / fingerprints / apply_url /
+        company+title. It now 404s exactly like ``GET /job-posts/<id>/``."""
+        stranger = self._post("https://ex.com/stranger")
+        self._post("https://ex.com/mine", created_by=self.user)
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+
+        detail = client.get(f"/api/v1/job-posts/{stranger.id}/")
+        self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
+
+        resp = client.get(
+            f"/api/v1/job-posts/{stranger.id}/duplicate-candidates/"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_member_visible_subject_post_is_still_reachable(self):
+        """...and the gate must not close on the row this ticket widened
+        access to: a subject the caller reaches only by membership still
+        answers 200."""
+        subject = self._member_post("https://ex.com/theirs")
+        mine = self._post("https://ex.com/mine", created_by=self.user)
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        resp = client.get(
+            f"/api/v1/job-posts/{subject.id}/duplicate-candidates/"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [row["id"] for row in resp.json()["data"]], [str(mine.id)]
+        )
 
     def test_exclusion_set_still_applies_to_member_visible_rows(self):
         """The widened candidate set must not smuggle the settled

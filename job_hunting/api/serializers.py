@@ -828,10 +828,11 @@ def compute_duplicate_candidates(post, request):
 
     Single source of truth for both the standalone /duplicate-candidates/
     action and the `?include=duplicate-candidates` sideload path. Visibility
-    delegates to ``JobPost.objects.visible_to`` — the one home for the
-    six-clause predicate (created / applied / scored / scraped / discovered
-    / member), shared with ``JobPostViewSet._visible_jobpost_qs`` so the
-    authz gate on the dedupe verbs and the candidate set it proposes agree.
+    delegates to ``JobPost.objects.visible_to`` — the canonical spelling of
+    the six-clause predicate (created / applied / scored / scraped /
+    discovered / member), shared with
+    ``JobPostViewSet._visible_jobpost_qs`` so the authz gate on the dedupe
+    verbs and the candidate set it proposes agree.
     BACK-130: this used to inline a five-clause copy that had lost the
     ``user_memberships`` clause, so a post reachable only by membership was
     never offered as a duplicate — the user could mark a post duplicate-of
@@ -841,6 +842,14 @@ def compute_duplicate_candidates(post, request):
     it hands back ``none()`` and every candidate lookup below is filtered
     off ``visible``, so an anonymous caller still gets ``[]``. Excludes
     self and the duplicate_of chain in either direction.
+
+    Not yet universal: ``JobPostViewSet.list`` and ``JobPostViewSet.retrieve``
+    still hand-inline an equivalent of the predicate rather than calling
+    ``visible_to``. They agree with it clause for clause today — there is no
+    live drift — but a seventh clause added here would not reach them, so
+    they are the remaining copies to collapse. ``views/reports.py`` held a
+    third copy that HAD drifted to five clauses; that one is BACK-129, fixed
+    on its own branch.
     """
     user = getattr(request, "user", None) if request else None
     visible = JobPost.objects.visible_to(user)

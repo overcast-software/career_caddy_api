@@ -208,7 +208,7 @@ class JobPostViewSet(BaseViewSet):
         see all. Delegates to ``JobPost.objects.visible_to`` — the single
         home for this predicate, so the serializer layer can apply the same
         rule without importing from ``views``. Kept as a named method
-        because five call sites below read better for it."""
+        because the six call sites below read better for it."""
         return JobPost.objects.visible_to(request.user)
 
     def pre_save_payload(self, request, attrs, creating):
@@ -542,10 +542,13 @@ class JobPostViewSet(BaseViewSet):
         obj = JobPost.objects.filter(pk=pk).first()
         if not obj:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        # Visibility mirrors JobPostViewSet.list: any of the five per-user
-        # signals grants access. Discovery is the canonical email-ingest
-        # signal — without this clause GET /job-posts/<id>/ 404s for a
-        # post the user just received via cc_auto.
+        # Visibility mirrors JobPostViewSet.list: any of the six per-user
+        # signals (created / applied / scored / scraped / discovered /
+        # member) grants access. Discovery is the canonical email-ingest
+        # signal — without that clause GET /job-posts/<id>/ 404s for a
+        # post the user just received via cc_auto; membership is the
+        # BACK-105 owner join. Kept clause-for-clause in step with
+        # JobPost.objects.visible_to — see compute_duplicate_candidates.
         has_access = (
             request.user.is_staff or
             obj.created_by_id == request.user.id or
@@ -1723,14 +1726,22 @@ class JobPostViewSet(BaseViewSet):
             "  - title_similarity: same company + one title is a prefix/suffix of the other,\n"
             "    catching the suffix-drift case fingerprint can't (e.g. 'X' vs 'X 75-100% FTE').\n\n"
             "Excludes self and any post in this jp's duplicate_of chain.\n"
-            "Visibility-scoped: regular users only see candidates they themselves can see\n"
+            "Visibility-scoped both ways: 404 unless the caller can see the subject post,\n"
+            "and regular users only see candidates they themselves can see\n"
             "(staff sees all). Empty list when nothing surfaces.\n"
         ),
-        responses={200: _JSONAPI_LIST},
+        responses={200: _JSONAPI_LIST, 404: _JSONAPI_ITEM},
     )
     @action(detail=True, methods=["get"], url_path="duplicate-candidates")
     def duplicate_candidates(self, request, pk=None):
-        post = JobPost.objects.filter(pk=pk).first()
+        # Resolve the SUBJECT through the same visibility gate as every
+        # other dedupe verb (mark / unlink / promote / duplicates) and as
+        # `retrieve`. An unscoped lookup here answered 200 for a post the
+        # caller cannot read: the rows returned are all the caller's own,
+        # but empty-vs-non-empty leaks whether that post's canonical_link /
+        # fingerprints / apply_url / company+title match anything in the
+        # caller's library. Same 404 as GET /job-posts/<id>/ instead.
+        post = self._visible_jobpost_qs(request).filter(pk=pk).first()
         if not post:
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
 
