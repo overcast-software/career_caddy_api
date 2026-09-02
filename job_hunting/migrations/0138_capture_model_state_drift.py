@@ -39,30 +39,71 @@ for those two renames a relation that isn't there and dies with
 ``SeparateDatabaseAndState`` instead: state takes the ``RenameIndex`` it
 expects, while the database renames the index it actually has. That converges
 state and schema rather than papering over the gap.
+
+**What this does not fix.** The nanoid PK swaps (0119–0124) rebuilt roughly
+forty-five FK columns in raw SQL and gave each one a single hand-named
+``<table>_<column>_idx``, so the Django-hashed ``<table>_<column>_<hash>``
+index and its ``varchar_pattern_ops`` ``_like`` sibling are absent almost
+everywhere — state believes in names the database has never had. That is a
+much larger repair than this migration, and it is untouched here. The one
+consequence worth naming: after the two renames above,
+``company_alias.company_id`` and ``federation_followers.company_id`` are down
+to a *single* index apiece and it now carries a ``Meta.indexes`` name, so
+dropping that index by name would leave the FK with no index at all.
+``test_indexed_columns_have_a_backing_index`` fails the build if that ever
+happens.
 """
 
 import django.db.models.deletion
 from django.db import migrations, models
 
-# 0124 left these two indexes under its own raw-SQL names. ``IF EXISTS`` keeps
-# the statement a no-op on any database that somehow lacks them; the target
-# names are freshly derived Django hashes, so they cannot already be taken.
-RENAME_COMPANY_ALIAS_IDX = (
-    "ALTER INDEX IF EXISTS company_alias_company_id_idx "
-    "RENAME TO company_ali_company_3cd3ce_idx;"
-)
-UNRENAME_COMPANY_ALIAS_IDX = (
-    "ALTER INDEX IF EXISTS company_ali_company_3cd3ce_idx "
-    "RENAME TO company_alias_company_id_idx;"
-)
-RENAME_FED_FOLLOWER_IDX = (
-    "ALTER INDEX IF EXISTS federation_followers_company_id_idx "
-    "RENAME TO federation__company_1916d2_idx;"
-)
-UNRENAME_FED_FOLLOWER_IDX = (
-    "ALTER INDEX IF EXISTS federation__company_1916d2_idx "
-    "RENAME TO federation_followers_company_id_idx;"
-)
+# 0124 left these two indexes under its own raw-SQL names. Renaming them with
+# a bare ``ALTER INDEX IF EXISTS`` would be worse than useless: if the source
+# is missing the statement no-ops, the migration reports OK, and state records
+# a rename that never happened — which is exactly the state/schema divergence
+# this migration exists to close, re-armed on the one path (prod) where the
+# test gate never runs. So: rename when the source is there, accept the target
+# already being there (a re-run, or a database built after this migration),
+# and raise when neither is.
+
+
+def _rename_index(source, target):
+    # No format placeholders in the RAISE message on purpose: ``RunSQL`` hands
+    # the statement to the cursor with ``params=None``, so a ``%`` would reach
+    # PL/pgSQL unchanged and mean something there.
+    return (
+        "DO $$\n"
+        "BEGIN\n"
+        f"    IF to_regclass('{source}') IS NOT NULL THEN\n"
+        f"        ALTER INDEX {source} RENAME TO {target};\n"
+        f"    ELSIF to_regclass('{target}') IS NULL THEN\n"
+        f"        RAISE EXCEPTION 'CC-221 (0138): neither {source} nor "
+        f"{target} exists; migration state and this schema have diverged "
+        "further than 0138 can repair.';\n"
+        "    END IF;\n"
+        "END $$;"
+    )
+
+
+# Each is wrapped in a list so ``RunSQL`` hands it to the cursor whole rather
+# than running it through ``prepare_sql_script``'s statement splitter, which
+# has no business inside a dollar-quoted block.
+RENAME_COMPANY_ALIAS_IDX = [
+    _rename_index("company_alias_company_id_idx", "company_ali_company_3cd3ce_idx")
+]
+UNRENAME_COMPANY_ALIAS_IDX = [
+    _rename_index("company_ali_company_3cd3ce_idx", "company_alias_company_id_idx")
+]
+RENAME_FED_FOLLOWER_IDX = [
+    _rename_index(
+        "federation_followers_company_id_idx", "federation__company_1916d2_idx"
+    )
+]
+UNRENAME_FED_FOLLOWER_IDX = [
+    _rename_index(
+        "federation__company_1916d2_idx", "federation_followers_company_id_idx"
+    )
+]
 
 
 class Migration(migrations.Migration):
