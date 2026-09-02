@@ -46,20 +46,102 @@ USERNAME_MIN_LENGTH = 3
 USERNAME_MAX_LENGTH = 150
 
 
+# --- Reserved usernames (CC-123) -------------------------------------
+#
+# The username shares a namespace with three real surfaces, so a name
+# that matches one of them is not merely ugly — it breaks something:
+#
+# 1. **Frontend routes.** `frontend/app/router.js` registers the public
+#    profile page as `this.route('profile', { path: '/:username' })` —
+#    a single dynamic segment sitting beside every static top-level
+#    route. route-recognizer ranks static above dynamic, so a user
+#    named `settings` does not hijack `/settings`; they simply have no
+#    reachable profile page.
+# 2. **Mail.** `<username>@careercaddy.online` is a catchall mailbox.
+#    `forwarding` is the live catchall *sink* local-part
+#    (`automation/src/email_source/mime.py`), and the ingest pipeline
+#    discards any recipient equal to it — so a user named `forwarding`
+#    would have every message addressed to them silently dropped.
+# 3. **Same-origin API/actor paths.** Production nginx path-routes
+#    `/api`, `/api/v1/events` and `/mcp` on the apex, and Django serves
+#    `/admin/`, `/actors/<username>/`, `/companies/<slug>/` and
+#    `/job-posts/<pk>` at the root (`job_hunting/urls.py`).
+#
+# Each group below is the literal set of names taken from those
+# surfaces. **To extend: add the new frontend route / API resource to
+# its group.** Hyphenated entries are already unreachable under the
+# `[a-z0-9_]` charset; they are kept so the list stays complete and
+# mechanical to maintain if the charset is ever retuned (the module
+# docstring notes re-admitting `-` is a one-line change).
+
+# Every top-level route registered in frontend/app/router.js Router.map.
+_FRONTEND_TOP_LEVEL_ROUTES = frozenset({
+    "about", "accept-invite", "admin", "answers", "caddy", "career-data",
+    "companies", "cover-letters", "docs", "extension", "favorites",
+    "forgot-password", "get-started", "job-applications", "job-posts",
+    "login", "logout", "not-found", "profile", "questions", "reports",
+    "reset-password", "resumes", "scores", "scrapes", "settings",
+    "setup", "signup", "summaries", "users", "waitlist", "wizard",
+})
+
+# Every JSON:API resource registered on the DRF router in
+# job_hunting/urls.py (the `/api/v1/<name>` collection names).
+_API_RESOURCES = frozenset({
+    "ai-usages", "answers", "api-keys", "certifications", "companies",
+    "cover-letters", "descriptions", "educations", "experiences",
+    "invitations", "job-application-statuses", "job-applications",
+    "job-posts", "projects", "questions", "resumes", "scores",
+    "scrape-profiles", "scrapes", "statuses", "summaries", "users",
+    "waitlists",
+})
+
+# Root-level (non-`/api/v1`) paths served beside the profile route:
+# Django's admin + the ActivityPub actor endpoints in urls.py, plus the
+# same-origin nginx path-routes on the apex (deploy/terraform).
+_ROOT_PATHS = frozenset({
+    "actors", "admin", "api", "events", "mcp", "well-known",
+})
+
+# Service mailboxes. `forwarding` is the live catchall sink and
+# `noreply` is the live DEFAULT_FROM_EMAIL (settings.py); the rest are
+# the role addresses RFC 2142 requires a domain to keep answerable.
+_SERVICE_MAILBOXES = frozenset({
+    "abuse", "admin", "forwarding", "hostmaster", "mailer-daemon",
+    "noreply", "no-reply", "postmaster", "security", "support",
+    "webmaster",
+})
+
+# Infrastructure hostnames under careercaddy.online — reserved so an
+# actor handle can never read as a service host.
+_INFRA_HOSTNAMES = frozenset({
+    "api", "mail", "mcp", "smtp", "www", "wiki",
+})
+
+#: The single importable constant. Enforced by :func:`validate_username`
+#: and therefore by every signup write path that already calls it.
+RESERVED_USERNAMES = frozenset(
+    _FRONTEND_TOP_LEVEL_ROUTES
+    | _API_RESOURCES
+    | _ROOT_PATHS
+    | _SERVICE_MAILBOXES
+    | _INFRA_HOSTNAMES
+)
+
+
 class UsernamePolicyError(ValueError):
     """Raised when a username violates the policy."""
 
 
-def is_valid_username(username: str) -> bool:
+def is_valid_username(username: str, *, allow_reserved: bool = False) -> bool:
     """Cheap predicate. Use validate_username when you also want a reason."""
     try:
-        validate_username(username)
+        validate_username(username, allow_reserved=allow_reserved)
     except UsernamePolicyError:
         return False
     return True
 
 
-def validate_username(username: str) -> str:
+def validate_username(username: str, *, allow_reserved: bool = False) -> str:
     """Return the username if valid; raise UsernamePolicyError otherwise.
 
     The returned string is the input unchanged — this validator does
@@ -67,6 +149,14 @@ def validate_username(username: str) -> str:
     (e.g. the signup form lowercases before submit per the frontend
     half of the spec). Silent coercion here would let a typo slip
     through ("FooBar" -> "foobar" -> mismatched login on next sign-in).
+
+    `allow_reserved` skips the RESERVED_USERNAMES check (CC-123) and is
+    for callers that are not registering a name a person chose: the
+    zero-argument bootstrap in `POST /api/v1/initialize/`, whose
+    documented default username is the reserved name `admin`, and the
+    read-only `audit_usernames` command, whose contract is charset +
+    length only. An explicitly *requested* reserved name is rejected on
+    every path, including initialize.
     """
     if not isinstance(username, str):
         raise UsernamePolicyError("Username must be a string")
@@ -84,5 +174,14 @@ def validate_username(username: str) -> str:
         raise UsernamePolicyError(
             "Username must contain only lowercase letters, digits, "
             "or underscore"
+        )
+    # Last, so a name that is both malformed and reserved reports the
+    # more specific charset/length reason. The charset gate above has
+    # already guaranteed `username` is lowercase, so a plain membership
+    # test is case-correct without coercing.
+    if not allow_reserved and username in RESERVED_USERNAMES:
+        raise UsernamePolicyError(
+            f"Username '{username}' is reserved — it collides with a "
+            "site route, an API resource, or a service address"
         )
     return username

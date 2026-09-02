@@ -26,6 +26,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from job_hunting.lib.username_policy import (
+    RESERVED_USERNAMES,
     UsernamePolicyError,
     is_valid_username,
     validate_username,
@@ -99,6 +100,207 @@ class UsernamePolicyValidatorTests(TestCase):
         # the input unchanged or raises — never alters.
         with self.assertRaises(UsernamePolicyError):
             validate_username("FooBar")
+
+
+class ReservedUsernameTests(TestCase):
+    """CC-123 — a username may not be a site route, an API resource, or
+    a service address. The list is one importable constant
+    (`RESERVED_USERNAMES`) enforced inside `validate_username`, so every
+    signup path that already calls the validator gets it for free."""
+
+    def test_rejects_reserved_names(self):
+        # One per derivation group, all charset-legal so the reserved
+        # rule (not the charset rule) is what rejects them:
+        #   frontend routes / API resources: login, setup, docs, users,
+        #     companies, scores, profile, caddy, settings, admin
+        #   same-origin root paths: api, mcp, events, actors
+        #   service mailboxes: forwarding, noreply, postmaster, support
+        #   infra hostnames: www, wiki, mail
+        for bad in (
+            "login", "setup", "docs", "users", "companies", "scores",
+            "profile", "caddy", "settings", "admin", "api", "mcp",
+            "events", "actors", "forwarding", "noreply", "postmaster",
+            "support", "www", "wiki", "mail",
+        ):
+            self.assertFalse(
+                is_valid_username(bad), f"expected {bad!r} to be reserved"
+            )
+            with self.assertRaises(UsernamePolicyError):
+                validate_username(bad)
+
+    def test_reserved_error_message_says_reserved(self):
+        with self.assertRaises(UsernamePolicyError) as ctx:
+            validate_username("forwarding")
+        msg = str(ctx.exception).lower()
+        self.assertIn("reserved", msg)
+        self.assertIn("forwarding", msg)
+
+    def test_ordinary_usernames_still_pass(self):
+        # The list must not swallow normal names — including ones that
+        # merely contain a reserved word as a substring.
+        for ok in ("dough", "foobar", "api_dude", "admins", "mailman"):
+            self.assertTrue(is_valid_username(ok), f"expected {ok!r} to pass")
+            self.assertEqual(validate_username(ok), ok)
+
+    def test_allow_reserved_bypasses_only_the_reserved_rule(self):
+        # The escape hatch used by the zero-arg bootstrap + the audit
+        # command lets a reserved name through...
+        self.assertEqual(
+            validate_username("admin", allow_reserved=True), "admin"
+        )
+        self.assertTrue(is_valid_username("api", allow_reserved=True))
+        # ...but does NOT weaken charset or length.
+        with self.assertRaises(UsernamePolicyError):
+            validate_username("Admin", allow_reserved=True)
+        with self.assertRaises(UsernamePolicyError):
+            validate_username("ab", allow_reserved=True)
+
+    def test_charset_error_wins_over_reserved(self):
+        # `Login` is both malformed and reserved; the more specific
+        # charset reason is the one the user is told.
+        with self.assertRaises(UsernamePolicyError) as ctx:
+            validate_username("Login")
+        self.assertIn("lowercase", str(ctx.exception).lower())
+
+    def test_list_covers_every_frontend_top_level_route(self):
+        # Derived from frontend/app/router.js — the public profile page
+        # is `this.route('profile', { path: '/:username' })`, so every
+        # static top-level route beside it is a collision.
+        for route in (
+            "login", "logout", "setup", "waitlist", "signup", "about",
+            "docs", "extension", "questions", "answers", "admin",
+            "reports", "settings", "favorites", "caddy", "profile",
+            "wizard", "users", "resumes", "scores", "scrapes",
+            "companies", "summaries",
+        ):
+            self.assertIn(route, RESERVED_USERNAMES, f"route {route!r}")
+
+    def test_list_covers_hyphenated_routes_and_resources(self):
+        # Unreachable under the current `[a-z0-9_]` charset, but kept so
+        # the list stays complete if the charset is ever retuned.
+        for name in (
+            "job-posts", "job-applications", "cover-letters",
+            "career-data", "api-keys", "scrape-profiles",
+            "accept-invite", "get-started",
+        ):
+            self.assertIn(name, RESERVED_USERNAMES, f"name {name!r}")
+
+
+@override_settings(REGISTRATION_OPEN=True)
+class ReservedUsernameOnSignupAPITests(TestCase):
+    """The reserved list is enforced on the real signup surface —
+    `DjangoUserViewSet.create`, which backs both `POST /api/v1/users/`
+    and `POST /api/v1/auth/register/`."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _post_create(self, username):
+        return self.client.post(
+            "/api/v1/users/",
+            {
+                "data": {
+                    "type": "user",
+                    "attributes": {
+                        "username": username,
+                        "email": f"{username}@example.com",
+                        "password": "Abcd1234!Abcd",
+                    },
+                }
+            },
+            format="json",
+        )
+
+    def test_reserved_username_rejected_with_clear_error(self):
+        resp = self._post_create("api")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("reserved", resp.json()["errors"][0]["detail"].lower())
+        self.assertFalse(User.objects.filter(username="api").exists())
+
+    def test_catchall_sink_username_rejected(self):
+        # `forwarding` is the live catchall sink local-part; a user with
+        # this name would have their mail discarded by the ingest filter.
+        resp = self._post_create("forwarding")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(User.objects.filter(username="forwarding").exists())
+
+    def test_register_endpoint_also_rejects(self):
+        resp = self.client.post(
+            "/api/v1/auth/register/",
+            {
+                "data": {
+                    "type": "user",
+                    "attributes": {
+                        "username": "admin",
+                        "email": "a@example.com",
+                        "password": "Abcd1234!Abcd",
+                    },
+                }
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("reserved", resp.json()["errors"][0]["detail"].lower())
+
+    def test_non_reserved_username_still_creates(self):
+        resp = self._post_create("dough")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+
+class ReservedUsernameOnInitializeTests(TestCase):
+    """`POST /api/v1/initialize/` grandfathers only its own zero-arg
+    default (`admin`) — an explicitly requested reserved name still
+    400s. Initialize requires an empty user table, so each case runs
+    against a fresh DB."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_explicit_reserved_username_rejected(self):
+        resp = self.client.post(
+            "/api/v1/initialize/",
+            {
+                "username": "forwarding",
+                "email": "founder@example.com",
+                "password": "Abcd1234!Abcd",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("reserved", resp.json()["errors"][0]["detail"].lower())
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_explicitly_requested_admin_rejected(self):
+        # Asking for `admin` by name is a choice, and it is refused...
+        resp = self.client.post(
+            "/api/v1/initialize/",
+            {"username": "admin", "password": "Abcd1234!Abcd"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(User.objects.count(), 0)
+
+    def test_default_admin_bootstrap_still_works(self):
+        # ...while the documented no-argument bootstrap, which falls back
+        # to the same name, keeps working. This is the acceptance
+        # criterion "existing tests for initialize still pass".
+        resp = self.client.post(
+            "/api/v1/initialize/",
+            {"password": "Abcd1234!Abcd"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(User.objects.get(username="admin").is_superuser)
+
+    def test_blank_username_still_falls_back_to_default(self):
+        # An empty string is "not supplied", not "asked for admin".
+        resp = self.client.post(
+            "/api/v1/initialize/",
+            {"username": "", "password": "Abcd1234!Abcd"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(User.objects.get(username="admin").is_superuser)
 
 
 @override_settings(REGISTRATION_OPEN=True)

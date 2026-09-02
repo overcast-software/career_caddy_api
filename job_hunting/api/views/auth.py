@@ -210,7 +210,8 @@ def initialize(request):
             attrs = data or {}
 
         # Extract user creation parameters
-        username = attrs.get("username") or attrs.get("name") or "admin"
+        requested_username = attrs.get("username") or attrs.get("name")
+        username = requested_username or "admin"
         email = (attrs.get("email") or None) or None
         password = attrs.get("password") or "admin"
         first_name = attrs.get("first_name") or attrs.get("name") or ""
@@ -228,12 +229,21 @@ def initialize(request):
         # must clear the same policy as every other signup path. This was
         # the one user-create path that skipped the validator (CC-56
         # #58/#59). Shared rule lives in lib/username_policy.py.
+        #
+        # CC-123: reserved names are rejected here too, but only when the
+        # operator actually asked for one. The documented zero-argument
+        # bootstrap falls back to the username "admin", which is itself
+        # reserved — enforcing the list against that default would brick
+        # the no-config first-run path, so the fallback is grandfathered
+        # while an explicit {"username": "admin"} still 400s.
         from job_hunting.lib.username_policy import (
             UsernamePolicyError,
             validate_username,
         )
         try:
-            validate_username(username)
+            validate_username(
+                username, allow_reserved=not requested_username
+            )
         except UsernamePolicyError as e:
             return JsonResponse(
                 {"errors": [{"detail": str(e)}]}, status=400

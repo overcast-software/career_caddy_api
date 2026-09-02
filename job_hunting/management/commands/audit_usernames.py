@@ -43,7 +43,13 @@ class Command(BaseCommand):
         violators = []
         for u in User.objects.order_by("id").only("id", "username", "email"):
             try:
-                validate_username(u.username or "")
+                # allow_reserved: this audit's contract is charset +
+                # length (CC-56 #58/#59). The CC-123 reserved list is a
+                # registration-time rule, and every install's bootstrap
+                # superuser is legitimately named `admin` — flagging it
+                # here would put a permanent false violation in front of
+                # every operator and dull the "OK" signal.
+                validate_username(u.username or "", allow_reserved=True)
             except UsernamePolicyError as exc:
                 violators.append((u.id, u.username, u.email or "", str(exc)))
 
