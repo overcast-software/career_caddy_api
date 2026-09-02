@@ -48,7 +48,7 @@ USERNAME_MAX_LENGTH = 150
 
 # --- Reserved usernames (CC-123) -------------------------------------
 #
-# The username shares a namespace with three real surfaces, so a name
+# The username shares a namespace with four real surfaces, so a name
 # that matches one of them is not merely ugly — it breaks something:
 #
 # 1. **Frontend routes.** `frontend/app/router.js` registers the public
@@ -66,6 +66,18 @@ USERNAME_MAX_LENGTH = 150
 #    `/api`, `/api/v1/events` and `/mcp` on the apex, and Django serves
 #    `/admin/`, `/actors/<username>/`, `/companies/<slug>/` and
 #    `/job-posts/<pk>` at the root (`job_hunting/urls.py`).
+# 4. **Internal accounts resolved by literal username.** Some server
+#    code looks a user up *by name* and grants that row special
+#    standing. `guest` is the worst case: `_guest_user_id()`
+#    (`api/views/reports.py`) resolves `username="guest"` and
+#    `application_flow_report` — `@permission_classes([AllowAny])` —
+#    serves that user's whole job-post + application pipeline to
+#    unauthenticated callers. On an install where the demo account has
+#    not been seeded yet, whoever registers `guest` first has their
+#    real pipeline published anonymously. It also bricks demo mode:
+#    `seed_guest` skips creation when the row exists, so
+#    `/api/v1/guest-session/` then 400s "Guest account not configured"
+#    forever with no way to reclaim the name.
 #
 # Each group below is the literal set of names taken from those
 # surfaces. **To extend: add the new frontend route / API resource to
@@ -117,6 +129,23 @@ _INFRA_HOSTNAMES = frozenset({
     "api", "mail", "mcp", "smtp", "www", "wiki",
 })
 
+# Names the server resolves as a literal to find a privileged row. These
+# are not cosmetic collisions — registering one takes over an identity
+# the code already trusts:
+#   guest    — `api/views/reports.py` `_guest_user_id()` +
+#              `api/views/auth.py` `guest_session`; the AllowAny
+#              application-flow report publishes this user's pipeline to
+#              anonymous callers, and `seed_guest` will not reclaim the
+#              name once a row exists.
+#   instance — the server-level ActivityPub Actor
+#              (`management/commands/bootstrap_instance_actor.py`
+#              INSTANCE_USERNAME). `generate_federation_actors` already
+#              has to *skip* users with this name, which is the tell
+#              that the collision is real.
+_INTERNAL_ACCOUNTS = frozenset({
+    "guest", "instance",
+})
+
 #: The single importable constant. Enforced by :func:`validate_username`
 #: and therefore by every signup write path that already calls it.
 RESERVED_USERNAMES = frozenset(
@@ -125,6 +154,7 @@ RESERVED_USERNAMES = frozenset(
     | _ROOT_PATHS
     | _SERVICE_MAILBOXES
     | _INFRA_HOSTNAMES
+    | _INTERNAL_ACCOUNTS
 )
 
 
@@ -150,13 +180,13 @@ def validate_username(username: str, *, allow_reserved: bool = False) -> str:
     half of the spec). Silent coercion here would let a typo slip
     through ("FooBar" -> "foobar" -> mismatched login on next sign-in).
 
-    `allow_reserved` skips the RESERVED_USERNAMES check (CC-123) and is
-    for callers that are not registering a name a person chose: the
-    zero-argument bootstrap in `POST /api/v1/initialize/`, whose
-    documented default username is the reserved name `admin`, and the
-    read-only `audit_usernames` command, whose contract is charset +
-    length only. An explicitly *requested* reserved name is rejected on
-    every path, including initialize.
+    `allow_reserved` skips the RESERVED_USERNAMES check (CC-123). It has
+    exactly one caller — the read-only `audit_usernames` command, whose
+    contract is charset + length only (CC-56 #58/#59) and which must not
+    report every install's pre-existing `admin` superuser as a
+    violation. **No write path sets it**: every surface that creates a
+    user, `POST /api/v1/initialize/` included, enforces the reserved
+    list.
     """
     if not isinstance(username, str):
         raise UsernamePolicyError("Username must be a string")
