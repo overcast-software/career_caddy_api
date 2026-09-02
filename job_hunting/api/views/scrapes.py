@@ -2348,6 +2348,74 @@ class ScrapeProfileViewSet(BaseViewSet):
             }
         )
 
+    @staticmethod
+    def _host_scrape_candidates(target_host):
+        """Completed scrapes whose URL belongs to ``target_host``.
+
+        The Scrape model carries a ``host`` property derived from
+        urlparse(url).netloc; match on the same normalized form used
+        elsewhere in the codebase (strip leading www.).
+        """
+        return Scrape.objects.filter(
+            status="completed",
+        ).filter(
+            Q(url__icontains=f"//{target_host}/")
+            | Q(url__icontains=f".{target_host}/")
+            | Q(url__icontains=f"//{target_host}")
+            | Q(url__icontains=f".{target_host}")
+        )
+
+    @classmethod
+    def _pick_sharpen_source(cls, target_host):
+        """Newest analyzable scrape for ``target_host``, or None.
+
+        CC-238: two bugs lived in the one-liner this replaces.
+
+        1. No DOM filter. ``scraped_at`` and ``html`` are both NULL for
+           exactly the ingest paths that dominate these hosts —
+           extension-direct, from-text and paste/email never reach the
+           scrape-graph Capture node. The endpoint docstring already
+           promised the enhancer "needs a captured page to analyze";
+           enforce it rather than enqueueing a pass with nothing to read.
+
+        2. ``order_by("-scraped_at")`` puts NULLs FIRST on PostgreSQL, so
+           ``.first()`` returned an effectively arbitrary DOM-less row
+           instead of the most recent scrape. Sort NULLs last, then break
+           ties on ``created_at`` (the arrival-order key added in CC-77).
+           The NanoID PK is random, so ``-id`` is a determinism
+           tiebreaker only — never a recency signal.
+        """
+        return (
+            cls._host_scrape_candidates(target_host)
+            .exclude(html__isnull=True)
+            .exclude(html="")
+            .order_by(
+                F("scraped_at").desc(nulls_last=True),
+                F("created_at").desc(nulls_last=True),
+                "-id",
+            )
+            .first()
+        )
+
+    @classmethod
+    def _sharpen_source_error(cls, target_host):
+        """Detail for the 422 when no analyzable scrape exists.
+
+        Split in two because the remedies differ: "scrape this host at
+        all" versus "this host's corpus is entirely DOM-less, go capture
+        one through the browser". The old single message reported the
+        first when the truth was the second.
+        """
+        if cls._host_scrape_candidates(target_host).exists():
+            return (
+                "No captured DOM for this host — every completed scrape "
+                "arrived without HTML (extension, from-text or email "
+                "ingest). Capture one via the browser scrape flow first."
+            )
+        return (
+            "No successful scrape found for hostname; capture one first."
+        )
+
     @action(
         detail=True,
         methods=["post"],
@@ -2362,9 +2430,18 @@ class ScrapeProfileViewSet(BaseViewSet):
         Accepted with the profile JSON and a ``meta.job_id`` for client
         polling.
 
-        422 when no successful scrape exists for the hostname — the
+        The caller may pin the source page by passing
+        ``{"source_scrape_id": "<nanoid>"}`` in the body — used when the
+        operator triggers sharpen from a specific JobPost and wants
+        *that* post's page analyzed rather than whatever the host-wide
+        lookup picks.
+
+        422 when no analyzable scrape exists for the hostname — the
         enhancer needs a captured page to analyze; capture one via the
-        normal scrape flow first.
+        normal scrape flow first. The message distinguishes "no
+        completed scrape at all" from "completed scrapes exist but none
+        carries a DOM", because the second is what extension- and
+        email-ingested hosts actually hit and the remedy differs.
         """
         profile = ScrapeProfile.objects.filter(pk=pk).first()
         if not profile:
@@ -2373,39 +2450,67 @@ class ScrapeProfileViewSet(BaseViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Find the most-recent successful scrape for the profile's
-        # hostname. The Scrape model carries a `host` property derived
-        # from urlparse(url).netloc; match on the same normalized form
-        # used elsewhere in the codebase (strip leading www.).
-        # Note: Scrape has no created_at — order by scraped_at (the
-        # completion timestamp) per the convention at the top of this
-        # file (see line ~115).
-        target_host = profile.hostname
-        candidates = Scrape.objects.filter(
-            status="completed",
-        ).filter(
-            Q(url__icontains=f"//{target_host}/")
-            | Q(url__icontains=f".{target_host}/")
-            | Q(url__icontains=f"//{target_host}")
-            | Q(url__icontains=f".{target_host}")
-        ).order_by("-scraped_at")
-
-        source_scrape = candidates.first()
-        if source_scrape is None:
-            return Response(
-                {
-                    "errors": [
-                        {
-                            "detail": (
-                                "No successful scrape found for hostname; "
-                                "capture one first."
-                            ),
-                            "status": "422",
-                        }
-                    ]
-                },
-                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            )
+        body = request.data if isinstance(request.data, dict) else {}
+        raw_explicit = body.get("source_scrape_id")
+        # Coerce defensively: the PK is a CharField, so a list/dict here
+        # would blow up the ORM filter with a 500 instead of a 422.
+        explicit_id = (
+            str(raw_explicit).strip()
+            if isinstance(raw_explicit, (str, int))
+            else ""
+        )
+        if explicit_id:
+            # Explicit pin: honour exactly what the operator named. Only
+            # the DOM precondition is enforced — not status, not host —
+            # because the point of the pin is to sharpen from a page the
+            # host-wide lookup would not have chosen.
+            source_scrape = Scrape.objects.filter(pk=explicit_id).first()
+            if source_scrape is None:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": (
+                                    "source_scrape_id not found."
+                                ),
+                                "status": "422",
+                            }
+                        ]
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            if not source_scrape.html:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": (
+                                    "The requested source scrape has no "
+                                    "captured DOM; the enhancer has "
+                                    "nothing to analyze."
+                                ),
+                                "status": "422",
+                            }
+                        ]
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+        else:
+            source_scrape = self._pick_sharpen_source(profile.hostname)
+            if source_scrape is None:
+                return Response(
+                    {
+                        "errors": [
+                            {
+                                "detail": self._sharpen_source_error(
+                                    profile.hostname
+                                ),
+                                "status": "422",
+                            }
+                        ]
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
 
         # CC-207b: dispatch via the unified producer (Cloud Task on GCP /
         # Job row on self-host). Unlike django-q2 async_task, enqueue() returns

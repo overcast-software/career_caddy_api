@@ -10,6 +10,10 @@ Coverage:
 - authenticated non-staff → 403
 - staff + no successful scrape for hostname → 422
 - staff + valid source scrape → 202, async_task invoked, profile returned
+- CC-238 source selection (``ScrapeProfileSharpenSourceSelectionTests``):
+  DOM-less scrapes are never chosen, NULL ``scraped_at`` sorts last
+  rather than first, an all-DOM-less host gets its own 422 instead of a
+  false 202, and a caller-supplied ``source_scrape_id`` pins the page.
 
 The django-q enqueue is mocked at the view import site so tests don't
 require a live qcluster process.
@@ -18,6 +22,7 @@ This file also covers GET /api/v1/scrape-profiles/:id/sharpen-status/
 — the polling target frontend uses to check on an enqueued sharpen
 task. See ``ScrapeProfileSharpenStatusTests`` below.
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -97,6 +102,7 @@ class ScrapeProfileSharpenTests(TestCase):
         source = Scrape.objects.create(
             url="https://example.com/jobs/1",
             status="completed",
+            html="<html><body>job</body></html>",
         )
 
         with patch("job_hunting.api.views.scrapes.enqueue") as mock_async:
@@ -128,10 +134,12 @@ class ScrapeProfileSharpenTests(TestCase):
         older = Scrape.objects.create(
             url="https://example.com/jobs/1",
             status="completed",
+            html="<html><body>older</body></html>",
         )
         newer = Scrape.objects.create(
             url="https://example.com/jobs/2",
             status="completed",
+            html="<html><body>newer</body></html>",
         )
         # Sanity check ordering — Scrape uses scraped_at as completion
         # timestamp; set explicitly under TestCase so the newer row is
@@ -166,6 +174,7 @@ class ScrapeProfileSharpenTests(TestCase):
         sub = Scrape.objects.create(
             url="https://jobs.example.com/posts/abc",
             status="completed",
+            html="<html><body>sub</body></html>",
         )
 
         with patch("job_hunting.api.views.scrapes.enqueue"):
@@ -182,6 +191,275 @@ class ScrapeProfileSharpenTests(TestCase):
         client.force_authenticate(user=user)
         resp = client.post(self._url(profile_id=999999), {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ScrapeProfileSharpenSourceSelectionTests(TestCase):
+    """CC-238 — the source scrape must actually carry a DOM, and NULL
+    ``scraped_at`` must not win the recency sort.
+
+    Production symptom: on hosts whose corpus arrives via the extension /
+    from-text / email paths, ``scraped_at`` and ``html`` are both NULL.
+    ``ORDER BY scraped_at DESC`` puts NULLs FIRST on PostgreSQL, so
+    ``.first()`` handed the enhancer an arbitrary DOM-less row — on
+    jobright.ai, the same unrelated ClassDojo posting on two sharpen
+    passes a month apart, with ~200 newer scrapes in between.
+
+    These assertions are Postgres-specific by design: NULL ordering is
+    exactly the behaviour under test.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.profile = ScrapeProfile.objects.create(
+            hostname="example.com",
+            enabled=True,
+        )
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="staff", password="pw", is_staff=True
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def _url(self):
+        return f"/api/v1/scrape-profiles/{self.profile.id}/sharpen/"
+
+    def _post(self, body=None):
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(self._url(), body or {}, format="json")
+        return resp, mock_enqueue
+
+    def test_html_less_scrape_loses_even_when_it_is_the_newest(self):
+        """Isolates the missing DOM filter: the DOM-less row is
+        unambiguously the most recent, so only ``exclude(html…)`` can
+        keep it from being chosen."""
+        with_html = Scrape.objects.create(
+            url="https://example.com/jobs/keeper",
+            status="completed",
+            html="<html><body>real page</body></html>",
+            scraped_at=timezone.now() - timedelta(hours=2),
+        )
+        Scrape.objects.create(
+            url="https://example.com/jobs/newer-but-empty",
+            status="completed",
+            html=None,
+            scraped_at=timezone.now(),
+        )
+
+        resp, mock_enqueue = self._post()
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            resp.json()["meta"]["source_scrape_id"], with_html.id
+        )
+        self.assertEqual(
+            mock_enqueue.call_args.kwargs["source_scrape_id"], with_html.id
+        )
+
+    def test_empty_string_html_is_treated_as_no_dom(self):
+        """``html=""`` is as useless to the enhancer as NULL."""
+        with_html = Scrape.objects.create(
+            url="https://example.com/jobs/keeper",
+            status="completed",
+            html="<html><body>real page</body></html>",
+            scraped_at=timezone.now() - timedelta(hours=2),
+        )
+        Scrape.objects.create(
+            url="https://example.com/jobs/blank",
+            status="completed",
+            html="",
+            scraped_at=timezone.now(),
+        )
+
+        resp, _ = self._post()
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            resp.json()["meta"]["source_scrape_id"], with_html.id
+        )
+
+    def test_null_scraped_at_sorts_last_not_first(self):
+        """Isolates the NULLS-FIRST bug: both rows carry a DOM, so the
+        html filter cannot rescue this one — only ``nulls_last=True``
+        can. Under ``ORDER BY scraped_at DESC`` on PostgreSQL the NULL
+        row comes back first."""
+        timestamped = Scrape.objects.create(
+            url="https://example.com/jobs/timestamped",
+            status="completed",
+            html="<html><body>timestamped</body></html>",
+            scraped_at=timezone.now(),
+        )
+        Scrape.objects.create(
+            url="https://example.com/jobs/no-timestamp",
+            status="completed",
+            html="<html><body>no timestamp</body></html>",
+            scraped_at=None,
+        )
+
+        resp, mock_enqueue = self._post()
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            resp.json()["meta"]["source_scrape_id"], timestamped.id
+        )
+        self.assertEqual(
+            mock_enqueue.call_args.kwargs["source_scrape_id"], timestamped.id
+        )
+
+    def test_ticket_repro_domless_null_row_loses_to_html_bearing_row(self):
+        """The literal CC-238 shape: an extension-ingested row with both
+        ``scraped_at`` and ``html`` NULL, created before a real browser
+        capture."""
+        Scrape.objects.create(
+            url="https://example.com/imp_id=x_digest_job_alert_y",
+            status="completed",
+            html=None,
+            scraped_at=None,
+        )
+        captured = Scrape.objects.create(
+            url="https://example.com/jobs/golden-analytics",
+            status="completed",
+            html="<html><body>Security Engineer</body></html>",
+            scraped_at=timezone.now(),
+        )
+
+        resp, mock_enqueue = self._post()
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(
+            resp.json()["meta"]["source_scrape_id"], captured.id
+        )
+        self.assertEqual(
+            mock_enqueue.call_args.kwargs["source_scrape_id"], captured.id
+        )
+
+    def test_all_candidates_dom_less_returns_422_not_false_202(self):
+        """The operator-facing half of the bug: completed scrapes exist
+        for the host but none has a DOM. Before CC-238 this returned a
+        202 and a no-op pass; now it says so."""
+        Scrape.objects.create(
+            url="https://example.com/jobs/1",
+            status="completed",
+            html=None,
+            scraped_at=None,
+        )
+        Scrape.objects.create(
+            url="https://example.com/jobs/2",
+            status="completed",
+            html="",
+            scraped_at=timezone.now(),
+        )
+
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(self._url(), {}, format="json")
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        detail = resp.json()["errors"][0]["detail"]
+        self.assertIn("No captured DOM for this host", detail)
+        mock_enqueue.assert_not_called()
+
+    def test_no_scrape_at_all_keeps_the_original_422_message(self):
+        """The two 422s are distinct: nothing scraped is a different
+        remedy from scraped-but-DOM-less."""
+        with patch("job_hunting.api.views.scrapes.enqueue"):
+            resp = self.client.post(self._url(), {}, format="json")
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        detail = resp.json()["errors"][0]["detail"]
+        self.assertIn("No successful scrape", detail)
+        self.assertNotIn("No captured DOM", detail)
+
+    def test_explicit_source_scrape_id_overrides_host_lookup(self):
+        """A sharpen fired from a specific JobPost pins that post's
+        scrape, even though the host lookup would pick a newer one."""
+        pinned = Scrape.objects.create(
+            url="https://example.com/jobs/the-one-doug-clicked",
+            status="completed",
+            html="<html><body>pinned</body></html>",
+            scraped_at=timezone.now() - timedelta(days=30),
+        )
+        Scrape.objects.create(
+            url="https://example.com/jobs/newer",
+            status="completed",
+            html="<html><body>newer</body></html>",
+            scraped_at=timezone.now(),
+        )
+
+        resp, mock_enqueue = self._post({"source_scrape_id": pinned.id})
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(resp.json()["meta"]["source_scrape_id"], pinned.id)
+        self.assertEqual(
+            mock_enqueue.call_args.kwargs["source_scrape_id"], pinned.id
+        )
+
+    def test_explicit_source_scrape_id_unknown_returns_422(self):
+        Scrape.objects.create(
+            url="https://example.com/jobs/1",
+            status="completed",
+            html="<html><body>x</body></html>",
+            scraped_at=timezone.now(),
+        )
+
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(
+                self._url(),
+                {"source_scrape_id": "nope0nope0"},
+                format="json",
+            )
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        self.assertIn(
+            "source_scrape_id not found",
+            resp.json()["errors"][0]["detail"],
+        )
+        mock_enqueue.assert_not_called()
+
+    def test_explicit_source_scrape_id_without_html_returns_422(self):
+        """Pinning does not bypass the DOM precondition — that is the
+        whole point of the ticket."""
+        empty = Scrape.objects.create(
+            url="https://example.com/jobs/empty",
+            status="completed",
+            html=None,
+            scraped_at=timezone.now(),
+        )
+
+        with patch("job_hunting.api.views.scrapes.enqueue") as mock_enqueue:
+            resp = self.client.post(
+                self._url(),
+                {"source_scrape_id": empty.id},
+                format="json",
+            )
+
+        self.assertEqual(
+            resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        self.assertIn(
+            "no captured DOM", resp.json()["errors"][0]["detail"]
+        )
+        mock_enqueue.assert_not_called()
+
+    def test_non_scalar_source_scrape_id_falls_back_to_host_lookup(self):
+        """A malformed body must not 500 through the ORM filter."""
+        keeper = Scrape.objects.create(
+            url="https://example.com/jobs/1",
+            status="completed",
+            html="<html><body>x</body></html>",
+            scraped_at=timezone.now(),
+        )
+
+        resp, _ = self._post({"source_scrape_id": ["a", "b"]})
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(resp.json()["meta"]["source_scrape_id"], keeper.id)
 
 
 class SharpenTaskTests(TestCase):
