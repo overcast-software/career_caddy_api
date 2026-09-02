@@ -86,10 +86,18 @@ class ResumeViewSet(BaseViewSet):
         responses={200: _JSONAPI_LIST},
     )
     def list(self, request):
-        items = list(self.model.objects.filter(user_id=request.user.id))
-        items = self.paginate(items)
         slim = self._is_slim_request(request)
         ser = self.get_serializer(slim=slim)
+        qs = self.model.objects.filter(user_id=request.user.id)
+        # BACK-115: `meta.counts` (requested by the legacy `?slim=true` or
+        # the forward-compat `?meta=counts`) used to cost four COUNTs per
+        # serialized resume. Annotate them onto the queryset so the whole
+        # page resolves in one statement.
+        if slim or ser._meta_counts_requested():
+            qs = ser.annotate_counts(qs)
+        # ...and slice in the DB rather than materializing every resume the
+        # user owns just to throw all but one page away.
+        items = list(self.paginate(qs))
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
         if not slim:
