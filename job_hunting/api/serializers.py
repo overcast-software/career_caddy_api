@@ -714,17 +714,72 @@ class ResumeSerializer(BaseSerializer):
             return False
         return "counts" in {s.strip() for s in str(raw).split(",") if s.strip()}
 
-    def _build_counts(self, obj):
-        from job_hunting.models import ResumeExperience, ResumeSkill
-        from job_hunting.models.job_application import JobApplication
-        from job_hunting.models.score import Score
+    # BACK-115: the four models behind `meta.counts`, keyed by the meta
+    # field they populate. Both `annotate_counts()` (the O(1) list path)
+    # and `_build_counts()` (the single-row fallback) read this map, so
+    # the two can never drift apart.
+    COUNT_SOURCES = {
+        "job_application_count": JobApplication,
+        "score_count": Score,
+        "experience_count": ResumeExperience,
+        "skill_count": ResumeSkill,
+    }
 
+    @classmethod
+    def annotate_counts(cls, qs):
+        """Attach the `meta.counts` values to a Resume queryset as
+        annotations so a whole page costs ONE query instead of 4 per row.
+
+        BACK-115: `_build_counts()` used to issue four filtered COUNTs for
+        every resume it serialized, so a list with `?slim=true` /
+        `?meta=counts` cost 1 + 4N queries over the user's *entire* resume
+        table. Correlated COUNT subqueries keep it at a single statement
+        without the 4-way cartesian join a multi-`Count()` `.annotate()`
+        would produce (each resume's applications x scores x experiences x
+        skills rows, deduplicated after the fact by `distinct=True`).
+
+        Callers that skip this still get correct counts — `_build_counts()`
+        falls back to the per-row queries when the annotations are absent.
+
+        Scope: only `ResumeViewSet.list()` pre-annotates. A resume reached
+        as a *sideload* still pays the 4-COUNT fallback per row, because
+        `BaseViewSet._build_included()` hands the related serializer the
+        request object, so `_meta_counts_requested()` sees the global
+        `?meta=` param: `GET /scores/?include=resume&meta=counts` (likewise
+        job-applications and cover-letters) is still 4 COUNTs per included
+        resume. Pre-existing and unexercised today — no frontend caller
+        sends `meta=counts` — but not fixed here. Closing it means letting
+        `_build_included()` pre-annotate its target querysets per type,
+        which is a change to the shared include machinery, not to resumes.
+        """
+        from django.db.models import Count, IntegerField, OuterRef, Subquery
+        from django.db.models.functions import Coalesce
+
+        def _count_of(model):
+            sub = (
+                model.objects.filter(resume=OuterRef("pk"))
+                .order_by()
+                .values("resume")
+                .annotate(n=Count("pk"))
+                .values("n")[:1]
+            )
+            return Coalesce(Subquery(sub, output_field=IntegerField()), 0)
+
+        return qs.annotate(
+            **{name: _count_of(model) for name, model in cls.COUNT_SOURCES.items()}
+        )
+
+    def _build_counts(self, obj):
+        annotated = {name: getattr(obj, name, None) for name in self.COUNT_SOURCES}
+        if all(v is not None for v in annotated.values()):
+            # Pre-annotated by annotate_counts() on the list queryset.
+            return {name: int(v) for name, v in annotated.items()}
+        # Unannotated row (retrieve, or any caller that did not pre-annotate):
+        # fall back to the per-row counts. O(1) for a single object.
         rid = obj.id
         return {
-            "job_application_count": JobApplication.objects.filter(resume_id=rid).count(),
-            "score_count": Score.objects.filter(resume_id=rid).count(),
-            "experience_count": ResumeExperience.objects.filter(resume_id=rid).count(),
-            "skill_count": ResumeSkill.objects.filter(resume_id=rid).count(),
+            name: model.objects.filter(resume_id=rid).count()
+            for name, model in self.COUNT_SOURCES.items()
         }
 
     def get_related(self, obj, rel_name):
