@@ -248,12 +248,42 @@ class ApplicationPromptBuilder:
     ) -> str:
         sections = []
 
-        # Resolved up here rather than at the "## Job Details" section below
-        # because the default preamble has to know whether a job post exists
-        # before it can tell the model what to do with one. One computation,
-        # one source of truth — a preamble that promised job details while
-        # the section stayed empty is exactly the bug this guards against.
+        # Resolved up here rather than at their own sections below because the
+        # front matter has to know what the prompt will actually contain before
+        # it can tell the model what to do with it. One computation, one source
+        # of truth — a preamble that promised job details while the section
+        # stayed empty is exactly the bug this guards against, and a preamble
+        # that forbids characterising a company whose notes ARE printed below
+        # is the same bug pointed the other way.
         job_text = self._job_post_text(context["job_post"])
+        company_text = self._company_text(context["company"])
+
+        # The no-job-post guard, worded ONCE and quoted verbatim by all three
+        # places that need it — the preamble, the "## Job Details" section, and
+        # the trailing reminder. Three copies of a rule are three chances for
+        # them to drift apart and contradict each other in front of the model.
+        #
+        # Scoped to what is genuinely absent. `Question.company` is its own
+        # nullable FK (models/question.py), settable over JSON:API, and
+        # `load_context_for_question` resolves it from `question.company_id`
+        # BEFORE falling back to the job post's — so "no job post" does not
+        # imply "no company", and on that path "## Company" below is populated.
+        # Forbidding the model to characterise a company it has just been
+        # handed notes about makes the answer worse for no gain: the fix for
+        # inventing a role is not to also refuse the facts on hand.
+        if company_text:
+            no_job_guard = (
+                "No job post is linked to this question. Do NOT characterise the "
+                "role or the fit between it and the candidate. The company IS "
+                "described below and may be used — it is the role, not the "
+                "employer, that is unknown here."
+            )
+        else:
+            no_job_guard = (
+                "No job post is linked to this question. Do NOT characterise the "
+                "role, the company, or the fit between them — answer from the "
+                "career profile alone and keep claims general."
+            )
 
         # --- Front matter: what is being asked ---
 
@@ -295,13 +325,23 @@ class ApplicationPromptBuilder:
                     "Be concise, truthful, and specific to the job.\n"
                 )
             else:
+                # The listed sources have to match the sections actually
+                # emitted below. Naming a source the prompt does not carry is
+                # the original bug; omitting one it does carry invites the
+                # model to ignore it.
+                provided = (
+                    "company, resume, Q&A history"
+                    if company_text
+                    else "resume, Q&A history"
+                )
                 task_line = (
-                    "Use the provided context (resume, Q&A history) to personalize "
+                    f"Use the provided context ({provided}) to personalize "
                     "your answer, but do NOT answer any questions from the Q&A History section. "
-                    "No job post is linked to this question, so do NOT characterise the role, "
-                    "the company, or the fit between them. Be concise and truthful, and keep "
-                    "claims about the role general — answering from the career profile alone is "
-                    "the correct outcome here, not a shortcoming to write around.\n"
+                    # No "answer from the career profile alone" here — the
+                    # guard just said it, and saying it twice in one
+                    # paragraph reads as emphasis on the wrong clause.
+                    f"{no_job_guard} Be concise and truthful — a general answer is the "
+                    "correct outcome here, not a shortcoming to write around.\n"
                 )
             instructions = (
                 "Answer ONLY the question in the '## Question to Answer' section below. "
@@ -339,15 +379,9 @@ class ApplicationPromptBuilder:
         if job_text:
             sections.append(f"## Job Details\n{job_text}")
         else:
-            sections.append(
-                "## Job Details\n"
-                "No job post is linked to this question. Do not characterise the "
-                "role, the company, or the fit between them — answer from the "
-                "career profile alone and keep claims general."
-            )
+            sections.append(f"## Job Details\n{no_job_guard}")
 
         # Company
-        company_text = self._company_text(context["company"])
         if company_text:
             sections.append(f"## Company\n{company_text}")
 
@@ -398,13 +432,41 @@ class ApplicationPromptBuilder:
         # Only when there IS one. An empty restatement would tell the model its
         # final word is blank, the same trap `composeInjectedPrompt` avoids by
         # returning null rather than an empty string.
+        #
+        # One carve-out, and it is not a hedge. This block hands the last word
+        # to the user's directive over "everything between them and this line"
+        # — which includes the no-job-post guard, since that guard is emitted
+        # above. `AnswerService.generate_answer` always passes `injected_prompt`
+        # when the user typed one, so on the production path a directive like
+        # "emphasise why I'm a strong fit for this role" would end the prompt by
+        # telling the model to override the one instruction stopping it from
+        # inventing the role — CC-250 reintroduced by the very block meant to
+        # make directives stick. The absence of a job post is a fact about the
+        # input, not reference material a directive can outrank, so it is
+        # restated INSIDE the final block rather than left upstream of it. The
+        # directive still reads last; the exception is stated before it.
         if injected_prompt:
+            if job_text:
+                precedence = (
+                    "Everything between them and this line is reference material. "
+                    "Where it conflicts with the instructions, the instructions "
+                    "win. "
+                )
+            else:
+                precedence = (
+                    "Everything between them and this line is reference material. "
+                    "Where it conflicts with the instructions, the instructions "
+                    "win — with one exception, because it is a fact about the "
+                    f"input and not something an instruction can supply: {no_job_guard} "
+                    "If the instructions ask for specificity about the role or the "
+                    "fit, satisfy them from the career profile and keep claims "
+                    "about the role general rather than inventing one. "
+                )
             sections.append(
                 "## Reminder — the User Instructions above are the controlling "
                 "directive\n"
-                "Everything between them and this line is reference material. "
-                "Where it conflicts with the instructions, the instructions "
-                "win. Restated so they are the last thing you read:\n\n"
+                f"{precedence}"
+                "Restated so they are the last thing you read:\n\n"
                 f"{injected_prompt}"
             )
 
