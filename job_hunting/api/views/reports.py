@@ -2,7 +2,6 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.db.models import Q
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -82,16 +81,25 @@ KNOWN_SOURCES = ["manual", "email", "paste", "scrape", "chat", "import"]
 
 
 def _user_scoped_job_posts(user_id):
-    # Visibility mirrors JobPostViewSet.list — discovery + scrape signals
-    # included so reports don't undercount email-ingested or hold-poller
-    # posts.
-    return JobPost.objects.filter(
-        Q(created_by_id=user_id)
-        | Q(applications__user_id=user_id)
-        | Q(scores__user_id=user_id)
-        | Q(scrapes__created_by_id=user_id)
-        | Q(discoveries__user_id=user_id)
-    ).distinct()
+    """Posts visible to ``user_id`` — the canonical six-signal predicate.
+
+    Delegates to ``JobPostQuerySet.visible_to_user_id`` so this can never
+    drift from the one home again. It had been an inlined copy carrying only
+    five clauses; ``user_memberships`` was added to the canonical predicate
+    later and never reached here, so every report undercounted posts that
+    arrive through the multi-user forward@ ingest path (BACK-129). The same
+    post was counted on the job-posts list and the company page but not in
+    report totals.
+
+    Deliberately the id-based, staff-free entry point rather than
+    ``visible_to(user)``, which hands staff the whole table. Reports already
+    have an explicit everyone's-data door — ``?scope=all`` — and ``?user=<id>``
+    is documented as scoping TO THAT PERSON. Inheriting the staff escape would
+    make ``scope=mine`` silently mean "the entire platform" for an admin, and
+    would make ``?user=<some staff member>`` return everyone's posts instead of
+    that person's. One cross-user door, gated where it is already gated.
+    """
+    return JobPost.objects.visible_to_user_id(user_id)
 
 
 def _parse_iso_date(val):
