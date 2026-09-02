@@ -22,19 +22,29 @@ of that delegation:
    wearing this fix's clothes.
 3. Reports do NOT inherit `visible_to`'s staff escape. That is a deliberate
    ruling, not an omission: reports already have an explicit everyone's-data
-   door in `?scope=all`, and `?user=<id>` is documented as scoping TO THAT
-   PERSON. Had the helper been pointed at `visible_to(user)`, `scope=mine`
-   would silently mean "the entire platform" for an admin and `?user=<a
-   staff member>` would return everyone's posts instead of that person's.
-   Hence the id-based, staff-free entry point `visible_to_user_id`, which
-   is where the clause list itself now lives.
+   door in `?scope=all`, and the staff `?user=<id>` filter narrows THAT door
+   to one person. Had the helper been pointed at `visible_to(user)`,
+   `scope=mine` would silently mean "the entire platform" for an admin and
+   `?scope=all&user=<a staff member>` would return everyone's posts instead
+   of that person's. Hence the id-based, staff-free entry point
+   `visible_to_user_id`, which is where the clause list itself now lives.
+
+Note on what `?user=` does today: the views read it only on the `scope=all`
+branch, so a staff `?user=42` under the default `scope=mine` returns the
+CALLER's data. That gap pre-dates BACK-129 and is untouched here; it is why
+every test below spells the person filter `?scope=all&user=<id>` rather than
+`?user=<id>` alone. See `_user_scoped_job_posts` for the full note.
 """
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from job_hunting.api.views.reports import _user_scoped_job_posts
+from job_hunting.api.views.reports import (
+    PUBLIC_DEMO_FLOW_KEY,
+    _user_scoped_job_posts,
+)
 from job_hunting.models import (
     Company,
     JobApplication,
@@ -176,10 +186,20 @@ class TestReportsDoNotInheritTheStaffEscape(_ReportsBase):
         self.admin = User.objects.create_user(
             username="admin129", password="pw", is_staff=True,
         )
+        # Each post carries TWO signals: the member row and a Score. The
+        # second one is what makes these assertions diagnostic. Built on the
+        # member clause alone, every test here also went red when the member
+        # clause was removed, so a failure could not tell "member clause
+        # missing" apart from "staff escape inherited" — the two falsifications
+        # this module exists to separate. With a non-member signal present the
+        # posts stay visible under either predicate, and a red bar in this
+        # class can only mean the staff escape leaked in.
         self.jp_admin = self._post("Admin's Own")
         UserJobPost.objects.create(job_post=self.jp_admin, user=self.admin)
+        Score.objects.create(job_post=self.jp_admin, user=self.admin, score=11)
         self.jp_dough = self._post("Dough's Own")
         UserJobPost.objects.create(job_post=self.jp_dough, user=self.dough)
+        Score.objects.create(job_post=self.jp_dough, user=self.dough, score=22)
 
     def test_helper_is_person_scoped_even_for_staff(self):
         self.assertEqual(self._scoped_ids(self.admin.id), {self.jp_admin.id})
@@ -196,9 +216,11 @@ class TestReportsDoNotInheritTheStaffEscape(_ReportsBase):
         )
 
     def test_person_filter_scopes_to_that_person_not_the_whole_table(self):
-        """`?user=<id>` is documented as scoping TO THAT PERSON. Under the
-        staff escape it would depend on whether the TARGET is staff — the
-        admin here asks for Dough and must get Dough's one post."""
+        """The staff `?user=<id>` filter narrows `scope=all` to one person.
+        Under the staff escape the result would depend on whether the TARGET
+        is staff — the admin here asks for Dough and must get Dough's one
+        post. (`?user=` is only read on the `scope=all` branch; see the note
+        in `_user_scoped_job_posts` about the `scope=mine` gap.)"""
         self.assertEqual(
             self._flow_total(
                 self._client(self.admin), f"?scope=all&user={self.dough.id}"
@@ -234,10 +256,82 @@ class TestNullUserIdIsEmptyNotUnfiltered(_ReportsBase):
     """A falsy user id must yield nothing, never the unfiltered table.
     `Q(created_by_id=None)` compiles to `created_by_id IS NULL` and would
     match every ownerless post — the exact footgun the canonical predicate
-    short-circuits. The anonymous demo path reaches this helper with an id
-    resolved from a `guest` user that need not exist on every instance.
+    short-circuits.
+
+    The guard is defensive, and deliberately so; no current call site hands
+    it `None`. The authenticated branches pass `request.user.id`, the person
+    filter passes an int that `_person_filter_effective_user_id` already
+    proved parseable, and the anonymous demo returns a zeroed payload at
+    `reports.py` before calling the helper when no `guest` user exists. The
+    one falsy value that does reach it from production is `?scope=all&user=0`
+    — which lands on `.none()` rather than on `created_by_id = 0`, but would
+    also be empty without the guard, so it is not asserted below. The
+    assertion that bites is the `None` one: remove the short-circuit and the
+    ownerless post appears.
     """
 
     def test_none_user_id_scopes_to_nothing(self):
         JobPost.objects.create(title="Ownerless", company=self.company)
         self.assertEqual(self._scoped_ids(None), set())
+
+
+class TestAnonymousDemoWidensToo(_ReportsBase):
+    """The one PUBLIC surface this fix moves.
+
+    `application_flow_report` is AllowAny: unauthenticated callers get a
+    cached payload derived from the `guest` user's pipeline, built through
+    the same `_user_scoped_job_posts`. Gaining the member clause therefore
+    changes what anonymous visitors see, so it is asserted rather than left
+    to inference. The contract is unchanged — the scope is still "the guest
+    user's signals", and the payload is aggregate counts, never row content.
+
+    `_build_public_demo_sources` widened identically but has no caller
+    anywhere in the repo, so there is no reachable behavior to pin.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # LocMem cache is process-wide and outlives a TestCase, and this
+        # endpoint memoizes its payload for PUBLIC_DEMO_CACHE_SECONDS.
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.guest = User.objects.create_user(username="guest", password="pw")
+        self.jp_guest_member = self._post("Guest Member Post")
+        UserJobPost.objects.create(
+            job_post=self.jp_guest_member, user=self.guest
+        )
+
+    def _anon_flow(self):
+        resp = APIClient().get("/api/v1/reports/application-flow/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.json()["data"]["attributes"]
+
+    def test_anonymous_demo_counts_guest_member_only_post(self):
+        attrs = self._anon_flow()
+        self.assertEqual(attrs["scope"], "public_demo")
+        self.assertEqual(attrs["total_job_posts"], 1)
+
+    def test_anonymous_demo_still_shows_only_the_guest_user(self):
+        """The widening is by clause, not by scope. A post signalled for a
+        real user stays out of the anonymous aggregate."""
+        UserJobPost.objects.create(job_post=self._post("Dough's"), user=self.dough)
+        self.assertEqual(self._anon_flow()["total_job_posts"], 1)
+
+    def test_stale_v1_payload_is_not_served(self):
+        """The cache key moved to :v2 because the payload's derivation
+        changed. Left at :v1, every anonymous visitor would keep being served
+        the pre-fix undercount for the rest of the TTL after deploy."""
+        cache.set(
+            "reports:public_demo:application_flow:v1",
+            {
+                "nodes": [], "links": [],
+                "total_job_posts": 999, "total_applications": 999,
+            },
+            300,
+        )
+        self.assertEqual(self._anon_flow()["total_job_posts"], 1)
+
+    def test_payload_is_cached_under_the_current_key(self):
+        self.assertIsNone(cache.get(PUBLIC_DEMO_FLOW_KEY))
+        self._anon_flow()
+        self.assertEqual(cache.get(PUBLIC_DEMO_FLOW_KEY)["total_job_posts"], 1)
