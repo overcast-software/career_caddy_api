@@ -56,7 +56,7 @@ class ExperienceViewSet(BaseViewSet):
         if request.user.is_staff:
             return Experience.objects.all()
         return Experience.objects.filter(
-            resumeexperience__resume__user_id=request.user.id
+            resume_experiences__resume__user_id=request.user.id
         ).distinct()
 
     def list(self, request):
@@ -312,7 +312,7 @@ class EducationViewSet(BaseViewSet):
         if request.user.is_staff:
             return Education.objects.all()
         return Education.objects.filter(
-            resumeeducation__resume__user_id=request.user.id
+            resume_educations__resume__user_id=request.user.id
         ).distinct()
 
     def list(self, request):
@@ -424,7 +424,7 @@ class CertificationViewSet(BaseViewSet):
         if request.user.is_staff:
             return Certification.objects.all()
         return Certification.objects.filter(
-            resumecertification__resume__user_id=request.user.id
+            resume_certifications__resume__user_id=request.user.id
         ).distinct()
 
     def list(self, request):
@@ -546,10 +546,10 @@ class DescriptionViewSet(BaseViewSet):
         if request.user.is_staff:
             return Description.objects.all()
         via_experience = Description.objects.filter(
-            experiencedescription__experience__resumeexperience__resume__user_id=request.user.id
+            experience_descriptions__experience__resume_experiences__resume__user_id=request.user.id
         )
         via_project = Description.objects.filter(
-            projectdescription__project__user_id=request.user.id
+            project_descriptions__project__user_id=request.user.id
         )
         return (via_experience | via_project).distinct()
 
