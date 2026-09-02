@@ -248,6 +248,13 @@ class ApplicationPromptBuilder:
     ) -> str:
         sections = []
 
+        # Resolved up here rather than at the "## Job Details" section below
+        # because the default preamble has to know whether a job post exists
+        # before it can tell the model what to do with one. One computation,
+        # one source of truth — a preamble that promised job details while
+        # the section stayed empty is exactly the bug this guards against.
+        job_text = self._job_post_text(context["job_post"])
+
         # --- Front matter: what is being asked ---
 
         # 1. User Override (caller-supplied instructions, take priority).
@@ -263,12 +270,42 @@ class ApplicationPromptBuilder:
             )
 
         # 2. Instructions (default preamble)
+        #
+        # The preamble is CONDITIONAL on there actually being a job post,
+        # because the unconditional version was a standing instruction to
+        # hallucinate. It used to close with "Be concise, truthful, and
+        # specific to the job" and to name "job details" as available
+        # context — both untrue when `context["job_post"]` is None. Told to
+        # be specific about a job it had never seen, with only the résumé in
+        # front of it, the model manufactured specificity out of the résumé
+        # and asserted it about the role: one observed answer confidently
+        # discussed AWS event-driven fraud pipelines for a question carrying
+        # no job post at all, saying "this role" three times.
+        #
+        # "Truthful" and "specific to the job" are in direct conflict with no
+        # job post, and the prompt never said which wins. Same class as the
+        # rule in api/CLAUDE.md — "an LLM schema that forbids 'I don't know'
+        # will get you a lie" — one layer up, on the prose path whose output
+        # a human pastes into an employer's form.
         if instructions is None:
+            if job_text:
+                task_line = (
+                    "Use the provided context (job details, resume, Q&A history) to personalize "
+                    "your answer, but do NOT answer any questions from the Q&A History section. "
+                    "Be concise, truthful, and specific to the job.\n"
+                )
+            else:
+                task_line = (
+                    "Use the provided context (resume, Q&A history) to personalize "
+                    "your answer, but do NOT answer any questions from the Q&A History section. "
+                    "No job post is linked to this question, so do NOT characterise the role, "
+                    "the company, or the fit between them. Be concise and truthful, and keep "
+                    "claims about the role general — answering from the career profile alone is "
+                    "the correct outcome here, not a shortcoming to write around.\n"
+                )
             instructions = (
                 "Answer ONLY the question in the '## Question to Answer' section below. "
-                "Use the provided context (job details, resume, Q&A history) to personalize "
-                "your answer, but do NOT answer any questions from the Q&A History section. "
-                "Be concise, truthful, and specific to the job.\n"
+                f"{task_line}"
                 "\n"
                 "OUTPUT FORMAT — strictly plain text (unless the User Instructions above say otherwise):\n"
                 "- No markdown, no headings (do NOT prefix with '## Answer' or any header).\n"
@@ -291,9 +328,23 @@ class ApplicationPromptBuilder:
             sections.append(f"## Career Profile\n{career_markdown}")
 
         # Job Details
-        job_text = self._job_post_text(context["job_post"])
+        #
+        # When there is none, SAY SO. Silently omitting the section leaves the
+        # model with an unmarked gap, and an unmarked gap reads as "nothing
+        # worth mentioning" rather than "nothing known" — it fills it from the
+        # only material present, the résumé. An absent section is invisible;
+        # an explicit line is not. Same reasoning as the refusal-path rule:
+        # state the constraint in the artifact instead of hoping omission
+        # implies it.
         if job_text:
             sections.append(f"## Job Details\n{job_text}")
+        else:
+            sections.append(
+                "## Job Details\n"
+                "No job post is linked to this question. Do not characterise the "
+                "role, the company, or the fit between them — answer from the "
+                "career profile alone and keep claims general."
+            )
 
         # Company
         company_text = self._company_text(context["company"])
