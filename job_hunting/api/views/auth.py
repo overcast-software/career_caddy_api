@@ -209,8 +209,22 @@ def initialize(request):
         else:
             attrs = data or {}
 
-        # Extract user creation parameters
-        username = attrs.get("username") or attrs.get("name") or "admin"
+        # Extract user creation parameters.
+        #
+        # `name` has long doubled as a username source here (it is also
+        # the first_name source two lines down). That overload is
+        # pre-existing and kept for compatibility, but it means a `name`
+        # that reaches this line IS the username and is policed as one.
+        #
+        # CC-123: the zero-argument fallback used to be "admin", which
+        # this very ticket reserves — Django serves /admin/, the SPA has
+        # a top-level /admin route (so the operator's public profile
+        # would be unreachable), and admin@ is an RFC 2142 role mailbox.
+        # Grandfathering it would have shipped the defect on the default
+        # path of every no-config install, so the default moved to a name
+        # that is not reserved instead. The no-config bootstrap still
+        # works; the first superuser is just called `owner`.
+        username = attrs.get("username") or attrs.get("name") or "owner"
         email = (attrs.get("email") or None) or None
         password = attrs.get("password") or "admin"
         first_name = attrs.get("first_name") or attrs.get("name") or ""
@@ -228,6 +242,11 @@ def initialize(request):
         # must clear the same policy as every other signup path. This was
         # the one user-create path that skipped the validator (CC-56
         # #58/#59). Shared rule lives in lib/username_policy.py.
+        #
+        # CC-123: unconditional — no `allow_reserved` escape hatch. The
+        # default above is deliberately a non-reserved name so this gate
+        # has nothing to grandfather, whether the username was requested
+        # or defaulted.
         from job_hunting.lib.username_policy import (
             UsernamePolicyError,
             validate_username,
