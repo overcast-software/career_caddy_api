@@ -383,3 +383,137 @@ class TestExportIsolatesUsers(TestCase):
         text = self._export_text(staff)
         for leaked in ("MY ROLE", "THEIR ROLE", "MY PRIVATE NOTE", "THEIR PRIVATE NOTE"):
             self.assertNotIn(leaked, text, f"staff export leaked {leaked}")
+
+
+class TestCareerDataExportIllegalCharacters(TestCase):
+    """BACK-137: one control character anywhere 500s the whole export.
+
+    openpyxl raises IllegalCharacterError for the control chars its own
+    ``ILLEGAL_CHARACTERS_RE`` matches (0x00-0x08, 0x0B-0x0C, 0x0E-0x1F), so a
+    single bad byte in one row killed ``GET /api/v1/career-data/export/``
+    outright. It was found in prod in an email-sourced JobPost.description,
+    where a \\x0b arrived via the cc_auto triage path's quoted-printable /
+    HTML-to-text conversion.
+
+    The old fixtures could not catch this: none of them contained a control
+    character. These do -- and setUp deliberately keeps them OUT, so each
+    per-sheet test dirties only the column it asserts on. Otherwise a control
+    char in the first sheet written 500s the export and every test in the
+    class fails together, which would make the per-sheet names a lie.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username="ctrlcharuser", password="pass")
+        self.client.force_authenticate(user=self.user)
+        self.company = Company.objects.create(name="Acme")
+        self.jp = JobPost.objects.create(
+            title="Engineer Role",
+            company=self.company,
+            link="https://acme.com/1",
+            description="Source: direct email from A Recruiter See JD below",
+            created_by=self.user,
+        )
+        self.ja = JobApplication.objects.create(
+            user=self.user,
+            job_post=self.jp,
+            company=self.company,
+            status="Applied",
+            notes="Phone screen went well",
+        )
+        self.q = Question.objects.create(
+            application=self.ja,
+            company=self.company,
+            created_by=self.user,
+            content="Why Acme?",
+            favorite=True,
+        )
+        self.a = Answer.objects.create(
+            question=self.q,
+            content="Great culture",
+            favorite=False,
+            status="draft",
+        )
+
+    def _workbook(self):
+        resp = self.client.get("/api/v1/career-data/export/")
+        self.assertEqual(
+            resp.status_code,
+            status.HTTP_200_OK,
+            "export must not 500 on control characters in the data",
+        )
+        return load_workbook(BytesIO(resp.content))
+
+    def _row(self, sheet):
+        return list(self._workbook()[sheet].iter_rows(values_only=True))[1]
+
+    def test_export_survives_control_characters(self):
+        # The one test that dirties every sheet at once: the bare fact that
+        # this returns a readable workbook is the regression -- before the fix
+        # the view raised IllegalCharacterError on the first bad cell.
+        self.jp.title = "Engineer\x0cRole"
+        self.jp.description = "Source: direct email from A Recruiter\x0bSee JD below"
+        self.jp.save(update_fields=["title", "description"])
+        self.ja.notes = "Phone screen\x01 went well"
+        self.ja.save(update_fields=["notes"])
+        self.q.content = "Why Acme?\x1f"
+        self.q.save(update_fields=["content"])
+        self.a.content = "Great\x08 culture"
+        self.a.save(update_fields=["content"])
+
+        wb = self._workbook()
+        self.assertEqual(
+            set(wb.sheetnames),
+            {"job-posts", "job-applications", "questions", "answers"},
+        )
+
+    def test_job_posts_sheet_is_scrubbed(self):
+        # Shaped like the row that actually blew up in prod.
+        self.jp.title = "Engineer\x0cRole"
+        self.jp.description = "Source: direct email from A Recruiter\x0bSee JD below"
+        self.jp.save(update_fields=["title", "description"])
+        row = self._row("job-posts")
+        self.assertEqual(row[1], "Engineer\nRole")
+        self.assertEqual(row[3], "Source: direct email from A Recruiter\nSee JD below")
+
+    def test_vertical_tab_and_form_feed_become_newlines(self):
+        """VT/FF are line and page breaks in the source, not noise.
+
+        Deleting them jams the words on either side together
+        ("...A RecruiterSee JD below"), silently destroying a word boundary in
+        the exported cell. They map to "\\n" instead, which openpyxl accepts.
+        """
+        self.jp.description = "before\x0bafter\x0cend"
+        self.jp.save(update_fields=["description"])
+        row = self._row("job-posts")
+        self.assertEqual(row[3], "before\nafter\nend")
+        self.assertNotIn("beforeafter", row[3])
+
+    def test_job_applications_sheet_is_scrubbed(self):
+        self.ja.notes = "Phone screen\x01 went well"
+        self.ja.save(update_fields=["notes"])
+        self.assertEqual(self._row("job-applications")[6], "Phone screen went well")
+
+    def test_questions_sheet_is_scrubbed(self):
+        self.q.content = "Why Acme?\x1f"
+        self.q.save(update_fields=["content"])
+        self.assertEqual(self._row("questions")[4], "Why Acme?")
+
+    def test_answers_sheet_is_scrubbed(self):
+        self.a.content = "Great\x08 culture"
+        self.a.save(update_fields=["content"])
+        self.assertEqual(self._row("answers")[2], "Great culture")
+
+    def test_legal_whitespace_is_preserved(self):
+        """Tab / newline / CR are legal and carry real meaning in a pasted job
+        description -- over-scrubbing would silently mangle every multi-line
+        cell in the export. CR is asserted too: openpyxl writes it as the
+        numeric reference ``&#13;``, which is exempt from the XML line-ending
+        normalisation that would otherwise collapse it into the "\\n"."""
+        self.jp.description = "Line one\nLine two\tindented\r\nLine three"
+        self.jp.save(update_fields=["description"])
+        row = self._row("job-posts")
+        self.assertEqual(row[3], "Line one\nLine two\tindented\r\nLine three")
+        self.assertIn("\n", row[3])
+        self.assertIn("\t", row[3])
+        self.assertIn("\r", row[3])

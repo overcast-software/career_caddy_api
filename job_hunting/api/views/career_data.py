@@ -236,6 +236,38 @@ def generate_prompt(request):
 @permission_classes([IsAuthenticated])
 def career_data_export(request):
     from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+
+    # SANITIZING (BACK-137). openpyxl refuses to write the control characters
+    # its own ILLEGAL_CHARACTERS_RE matches -- 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F
+    # -- and raises IllegalCharacterError, so a single bad byte anywhere in the
+    # user's data 500s the whole export. Real rows carry them: email-sourced
+    # JobPost descriptions pick up \x0b / \x0c from quoted-printable and
+    # HTML-to-text conversion in the cc_auto triage path. Scrub on write
+    # rather than chasing individual rows -- more will keep arriving.
+    #
+    # That regex is openpyxl's write guard, NOT an XML 1.0 validity check: it
+    # does not match U+FFFE / U+FFFF, which Postgres stores happily, openpyxl
+    # writes without complaint, and Excel then refuses to open. Same failure
+    # class, different byte; widening the guard belongs at the cc_auto ingest
+    # boundary, tracked separately.
+    #
+    # \x0b (VT) and \x0c (FF) are line and page breaks in the source text, not
+    # noise -- deleting them jams words together ("...A RecruiterSee JD
+    # below"). They map to "\n", which is legal, so the break survives. Only
+    # the genuine controls are dropped.
+    #
+    # This is applied per ROW, not per hand-picked cell, so a column added
+    # to any of the four blocks later is covered without a second thought.
+    breaks = str.maketrans({"\x0b": "\n", "\x0c": "\n"})
+
+    def _clean(row):
+        return [
+            ILLEGAL_CHARACTERS_RE.sub("", v.translate(breaks))
+            if isinstance(v, str)
+            else v
+            for v in row
+        ]
 
     # SCOPING (BACK-133). Every queryset below MUST be narrowed to the
     # requesting user. These four were previously unfiltered, so any
@@ -278,7 +310,7 @@ def career_data_export(request):
         .order_by("id")
     )
     for jp in my_job_posts:
-        ws.append([
+        ws.append(_clean([
             jp.id, jp.title,
             jp.company.name if jp.company else None,
             jp.description, jp.link,
@@ -289,7 +321,7 @@ def career_data_export(request):
             jp.location,
             jp.remote,
             jp.created_at.isoformat() if jp.created_at else None,
-        ])
+        ]))
 
     # -- job-applications --
     ws2 = wb.create_sheet("job-applications")
@@ -301,13 +333,13 @@ def career_data_export(request):
     for ja in JobApplication.objects.filter(user_id=me).select_related(
         "company"
     ).order_by("id"):
-        ws2.append([
+        ws2.append(_clean([
             ja.id, ja.job_post_id,
             ja.company.name if ja.company else None,
             ja.status,
             ja.applied_at.isoformat() if ja.applied_at else None,
             ja.tracking_url, ja.notes,
-        ])
+        ]))
 
     # -- questions --
     ws3 = wb.create_sheet("questions")
@@ -316,12 +348,12 @@ def career_data_export(request):
     for q in Question.objects.filter(created_by_id=me).select_related(
         "company"
     ).order_by("id"):
-        ws3.append([
+        ws3.append(_clean([
             q.id, q.application_id,
             q.company.name if q.company else None,
             q.job_post_id, q.content, q.favorite,
             q.created_at.isoformat() if q.created_at else None,
-        ])
+        ]))
 
     # -- answers --
     ws4 = wb.create_sheet("answers")
@@ -330,10 +362,10 @@ def career_data_export(request):
     # Answer has no user column of its own; ownership runs through its
     # Question, which is the same path CareerData.favorite_answers uses.
     for a in Answer.objects.filter(question__created_by_id=me).order_by("id"):
-        ws4.append([
+        ws4.append(_clean([
             a.id, a.question_id, a.content, a.favorite, a.status,
             a.created_at.isoformat() if a.created_at else None,
-        ])
+        ]))
 
     from io import BytesIO
 
