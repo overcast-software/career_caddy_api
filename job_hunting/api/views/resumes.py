@@ -96,8 +96,16 @@ class ResumeViewSet(BaseViewSet):
         if slim or ser._meta_counts_requested():
             qs = ser.annotate_counts(qs)
         # ...and slice in the DB rather than materializing every resume the
-        # user owns just to throw all but one page away.
-        items = list(self.paginate(qs))
+        # user owns just to throw all but one page away. The LIMIT/OFFSET
+        # needs a total order to be meaningful — Postgres is free to hand
+        # back a different row order for `OFFSET 0` than for `OFFSET 50`
+        # (different plan, or a seq scan restarted mid-heap under
+        # synchronize_seqscans), which would repeat rows on page 2 and drop
+        # others entirely. `Resume.Meta` declares no `ordering` and the
+        # table has no created_at, so the NanoID PK is the stable key
+        # available; every other DB-paginated list here orders first too
+        # (scores.py, questions.py, summaries.py, scrapes.py).
+        items = list(self.paginate(qs.order_by("id")))
         data = [ser.to_resource(o) for o in items]
         payload = {"data": data}
         if not slim:

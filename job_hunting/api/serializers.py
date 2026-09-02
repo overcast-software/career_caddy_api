@@ -740,6 +740,17 @@ class ResumeSerializer(BaseSerializer):
 
         Callers that skip this still get correct counts — `_build_counts()`
         falls back to the per-row queries when the annotations are absent.
+
+        Scope: only `ResumeViewSet.list()` pre-annotates. A resume reached
+        as a *sideload* still pays the 4-COUNT fallback per row, because
+        `BaseViewSet._build_included()` hands the related serializer the
+        request object, so `_meta_counts_requested()` sees the global
+        `?meta=` param: `GET /scores/?include=resume&meta=counts` (likewise
+        job-applications and cover-letters) is still 4 COUNTs per included
+        resume. Pre-existing and unexercised today — no frontend caller
+        sends `meta=counts` — but not fixed here. Closing it means letting
+        `_build_included()` pre-annotate its target querysets per type,
+        which is a change to the shared include machinery, not to resumes.
         """
         from django.db.models import Count, IntegerField, OuterRef, Subquery
         from django.db.models.functions import Coalesce

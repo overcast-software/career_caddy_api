@@ -6,9 +6,11 @@ materialized the user's entire resume table before slicing a page out of
 it in Python. A list request with counts therefore cost 1 + 4N queries
 over N = the user's total resume count.
 
-These tests pin the two halves of the fix:
-  * the query count for a counts-bearing list does not grow with N, and
-  * the page is sliced by the database (LIMIT), not in Python.
+These tests pin the fix:
+  * the query count for a counts-bearing list does not grow with N,
+  * the page is sliced by the database (LIMIT), not in Python, and
+  * that slice is taken over an ordered queryset, so walking the pages
+    returns every resume exactly once.
 """
 
 from django.contrib.auth import get_user_model
@@ -199,24 +201,67 @@ class TestResumeCountsValuesUnchanged(BackCountsBase):
 
 class TestResumeListPaginatesInDatabase(BackCountsBase):
     def test_page_is_sliced_by_the_database(self):
-        for i in range(3):
+        for i in range(5):
             self._make_resume(f"page-{i}")
 
         with CaptureQueriesContext(connection) as ctx:
-            response = self.client.get("/api/v1/resumes/?slim=true&page[size]=1")
+            response = self.client.get("/api/v1/resumes/?slim=true&page[size]=2")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.json()["data"]), 1)
-        # The outer statement must carry the LIMIT. (The correlated count
-        # subqueries each end in `LIMIT 1` too, so anchor on the tail of
-        # the whole statement rather than a substring search.)
-        limited = [
-            q["sql"]
-            for q in ctx.captured_queries
-            if 'FROM "resume"' in q["sql"] and q["sql"].rstrip().endswith("LIMIT 1")
-        ]
+        self.assertEqual(len(response.json()["data"]), 2)
+        sqls = [q["sql"] for q in ctx.captured_queries if 'FROM "resume"' in q["sql"]]
+        # The outer statement must carry the LIMIT, and carry the *page's*
+        # limit: the correlated count subqueries all end in `LIMIT 1`, so a
+        # page size of 1 plus a bare `endswith("LIMIT 1")` would pass on a
+        # statement that never had an outer LIMIT at all.
+        limited = [s for s in sqls if s.rstrip().endswith("LIMIT 2")]
         self.assertTrue(
             limited,
             "the resume page was materialized in Python, not LIMITed in SQL: "
-            + repr([q["sql"] for q in ctx.captured_queries]),
+            + repr(sqls),
+        )
+        # A LIMIT/OFFSET over an unordered queryset lets the planner return
+        # a different slice per page — rows repeated on page 2, others never
+        # returned. Resume declares no Meta.ordering, so the view must order
+        # explicitly before it slices.
+        self.assertIn(
+            " ORDER BY ",
+            limited[0],
+            "the resume page is LIMITed without a total order: " + limited[0],
+        )
+
+    def test_pages_are_ordered_and_disjoint(self):
+        """Walking every page must yield each resume exactly once.
+
+        This is the behavioural half of the ORDER BY assertion above: with
+        an unordered LIMIT/OFFSET the three requests are three independent
+        planner decisions, and the concatenation stops being the full set
+        in a stable order.
+        """
+        for i in range(5):
+            self._make_resume(f"paged-{i}")
+        # The expected sequence is the database's own `ORDER BY id`, not
+        # Python's `sorted()`: NanoID ids are mixed-case and Postgres orders
+        # them by the database collation (case-insensitive on en_US.UTF-8),
+        # where Python sorts by codepoint (all uppercase first).
+        expected = [
+            str(pk)
+            for pk in Resume.objects.filter(user=self.user)
+            .order_by("id")
+            .values_list("id", flat=True)
+        ]
+        self.assertEqual(len(expected), 5)
+
+        seen = []
+        for page in (1, 2, 3):
+            body = self.client.get(
+                f"/api/v1/resumes/?slim=true&page[size]=2&page[number]={page}"
+            ).json()
+            seen.extend(r["id"] for r in body["data"])
+
+        self.assertEqual(
+            seen,
+            expected,
+            "paging over the resume list did not return every resume exactly "
+            "once in id order",
         )
