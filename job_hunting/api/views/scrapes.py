@@ -2348,6 +2348,98 @@ class ScrapeProfileViewSet(BaseViewSet):
             }
         )
 
+    @staticmethod
+    def _host_scrape_candidates(target_host):
+        """Completed scrapes whose URL belongs to ``target_host``.
+
+        The Scrape model carries a ``host`` property derived from
+        urlparse(url).netloc; match on the same normalized form used
+        elsewhere in the codebase (strip leading www.).
+        """
+        return Scrape.objects.filter(
+            status="completed",
+        ).filter(
+            Q(url__icontains=f"//{target_host}/")
+            | Q(url__icontains=f".{target_host}/")
+            | Q(url__icontains=f"//{target_host}")
+            | Q(url__icontains=f".{target_host}")
+        )
+
+    @classmethod
+    def _pick_sharpen_source(cls, target_host):
+        """Scrape with the newest ``scraped_at`` for ``target_host``.
+
+        Returns None when the host has no analyzable scrape.
+
+        CC-238: two bugs lived in the one-liner this replaces.
+
+        1. No DOM filter. ``scraped_at`` and ``html`` are both NULL for
+           exactly the ingest paths that dominate these hosts —
+           extension-direct, from-text and paste/email never reach the
+           scrape-graph Capture node. The endpoint docstring already
+           promised the enhancer "needs a captured page to analyze";
+           enforce it rather than enqueueing a pass with nothing to read.
+
+        2. ``order_by("-scraped_at")`` puts NULLs FIRST on PostgreSQL, so
+           ``.first()`` returned an effectively arbitrary DOM-less row
+           instead of the most recent scrape. Sort NULLs last, then break
+           ties on ``created_at`` (the arrival-order key added in CC-77).
+           The NanoID PK is random, so ``-id`` is a determinism
+           tiebreaker only — never a recency signal.
+
+        ``scraped_at`` is the *only* recency signal here — deliberately.
+        Because ``created_at`` sits after it in the ORDER BY, it breaks
+        ties only among rows whose ``scraped_at`` is NULL; it never
+        floats a NULL-``scraped_at`` row above a timestamped one, so
+        this is "newest capture", not "newest row". That is not merely
+        an artifact: it matches the list-endpoint convention above (see
+        the default ordering ~line 160), and the mixed shape it would
+        mis-rank — NULL ``scraped_at`` but non-empty ``html`` — is not
+        produced by any ingest path today, since every path that leaves
+        ``scraped_at`` NULL (the extension-direct/from-text
+        ``create_kwargs`` earlier in this file, ~line 646) also leaves
+        ``html`` NULL, and the DOM filter drops those before the sort
+        ever sees them. If a capture
+        path ever lands HTML without a ``scraped_at``, switch to
+        ``Coalesce("scraped_at", "created_at").desc()``.
+        """
+        return (
+            cls._host_scrape_candidates(target_host)
+            .exclude(html__isnull=True)
+            # Whitespace-only html gives the enhancer exactly as little
+            # to read as "" or NULL, and would re-create the silent
+            # no-op 202 this ticket is about. ``^\s*$`` subsumes the
+            # empty string; Postgres' regex is not newline-sensitive by
+            # default, so "\n  " matches too.
+            .exclude(html__regex=r"^\s*$")
+            .order_by(
+                F("scraped_at").desc(nulls_last=True),
+                F("created_at").desc(nulls_last=True),
+                "-id",
+            )
+            .first()
+        )
+
+    @classmethod
+    def _sharpen_source_error(cls, target_host):
+        """Detail for the 422 when no analyzable scrape exists.
+
+        Split in two because the remedies differ: "scrape this host at
+        all" versus "this host's corpus is entirely DOM-less, go capture
+        one through the browser". The old single message reported the
+        first when the truth was the second.
+        """
+        if cls._host_scrape_candidates(target_host).exists():
+            return (
+                "No captured DOM for this host — every completed scrape "
+                "arrived without usable HTML (extension, from-text or "
+                "email ingest). Capture one via the browser scrape flow "
+                "first."
+            )
+        return (
+            "No successful scrape found for hostname; capture one first."
+        )
+
     @action(
         detail=True,
         methods=["post"],
@@ -2362,9 +2454,20 @@ class ScrapeProfileViewSet(BaseViewSet):
         Accepted with the profile JSON and a ``meta.job_id`` for client
         polling.
 
-        422 when no successful scrape exists for the hostname — the
+        The request body carries no source selector: the page is always
+        chosen host-wide by ``_pick_sharpen_source``. (An earlier draft
+        of CC-238 accepted a caller-supplied ``source_scrape_id`` pin;
+        it was dropped because nothing in frontend/, agents/ or
+        automation/ sends one and an unconstrained pin would let a
+        profile be sharpened from a foreign host's DOM. If a per-JobPost
+        sharpen is wanted, it needs its own ticket and a host check.)
+
+        422 when no analyzable scrape exists for the hostname — the
         enhancer needs a captured page to analyze; capture one via the
-        normal scrape flow first.
+        normal scrape flow first. The message distinguishes "no
+        completed scrape at all" from "completed scrapes exist but none
+        carries a DOM", because the second is what extension- and
+        email-ingested hosts actually hit and the remedy differs.
         """
         profile = ScrapeProfile.objects.filter(pk=pk).first()
         if not profile:
@@ -2373,32 +2476,14 @@ class ScrapeProfileViewSet(BaseViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Find the most-recent successful scrape for the profile's
-        # hostname. The Scrape model carries a `host` property derived
-        # from urlparse(url).netloc; match on the same normalized form
-        # used elsewhere in the codebase (strip leading www.).
-        # Note: Scrape has no created_at — order by scraped_at (the
-        # completion timestamp) per the convention at the top of this
-        # file (see line ~115).
-        target_host = profile.hostname
-        candidates = Scrape.objects.filter(
-            status="completed",
-        ).filter(
-            Q(url__icontains=f"//{target_host}/")
-            | Q(url__icontains=f".{target_host}/")
-            | Q(url__icontains=f"//{target_host}")
-            | Q(url__icontains=f".{target_host}")
-        ).order_by("-scraped_at")
-
-        source_scrape = candidates.first()
+        source_scrape = self._pick_sharpen_source(profile.hostname)
         if source_scrape is None:
             return Response(
                 {
                     "errors": [
                         {
-                            "detail": (
-                                "No successful scrape found for hostname; "
-                                "capture one first."
+                            "detail": self._sharpen_source_error(
+                                profile.hostname
                             ),
                             "status": "422",
                         }
