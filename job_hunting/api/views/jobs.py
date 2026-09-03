@@ -10,9 +10,11 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
+    OpenApiParameter,
     OpenApiResponse,
 )
 
@@ -46,6 +48,7 @@ from ..serializers import (
     QuestionSerializer,
     StatusSerializer,
     JobApplicationStatusSerializer,
+    build_candidate_probe,
     compute_duplicate_candidates,
 )
 from job_hunting.api.permissions import IsGuestReadOnly
@@ -1839,6 +1842,105 @@ class JobPostViewSet(BaseViewSet):
         # ?include=duplicate-candidates sideload path on jp.show fetches the
         # exact same set in the same shape — one source of truth.
         items = compute_duplicate_candidates(post, request)
+        ser = JobPostDuplicateCandidateSerializer()
+        return Response({"data": [ser.to_resource(it) for it in items]})
+
+    @extend_schema(
+        tags=["Job Posts"],
+        summary="List likely-matching JobPosts for a PAGE that has no post yet",
+        description=(
+            "Second entry point onto the same engine as\n"
+            "`/job-posts/{id}/duplicate-candidates/`, for a page the caller is\n"
+            "looking at rather than a post already stored.\n\n"
+            "Send the RAW page URL — the api canonicalizes it. Add `title` and\n"
+            "`company` when you can read them off the DOM: without them only\n"
+            "the identity-free signals (canonical_link, apply_hint,\n"
+            "referrer_hint) can fire; with them the fingerprint and\n"
+            "title_similarity signals come into play too.\n\n"
+            "Read-only: creates nothing, links nothing, dedupes nothing.\n"
+            "Visibility-scoped exactly like the per-post route — unlike\n"
+            "`filter[link]`, there is NO global bypass here.\n"
+            "Empty list when nothing surfaces; 400 on a missing or\n"
+            "policy-blocked `url`.\n"
+        ),
+        parameters=[
+            OpenApiParameter(
+                "url",
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
+                required=True,
+                description="Raw page URL. Canonicalized server-side.",
+            ),
+            OpenApiParameter(
+                "title",
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
+                required=False,
+                description="Job title read off the page, if available.",
+            ),
+            OpenApiParameter(
+                "company",
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
+                required=False,
+                description="Company name read off the page, if available.",
+            ),
+        ],
+        responses={200: _JSONAPI_LIST, 400: _JSONAPI_ITEM},
+    )
+    @action(detail=False, methods=["get"], url_path="candidates-for-page")
+    def candidates_for_page(self, request):
+        """Candidates for a page, not for a stored post (CC-249).
+
+        Deliberately thin. It validates and canonicalizes the URL, builds
+        an unsaved probe, and hands it to ``compute_duplicate_candidates``
+        — the same function the per-post action and the
+        ``?include=duplicate-candidates`` sideload call. No signal is
+        added, no ranking is changed; if these two routes can ever
+        disagree about what looks like what, this one is wrong.
+
+        Visibility: no bypass, re-derived rather than inherited. The
+        ``filter[link]`` route (`views/jobs.py`, list) deliberately
+        bypasses the per-user filter, and that is justified there — it
+        answers yes/no about ONE exact URL the caller already possesses,
+        via four equality legs. This is a different disclosure shape: up
+        to ten ranked rows, including ``title_similarity``, a fuzzy
+        prefix/suffix match scoped only to a company. Bypassing here
+        would turn "a URL plus a company name" into an enumeration
+        surface over other users' libraries. Sharing the engine also
+        means this route inherits any future correction to the predicate
+        for free.
+        """
+        raw_url = (request.query_params.get("url") or "").strip()
+        if not raw_url:
+            return Response(
+                {"errors": [{
+                    "code": "missing_url",
+                    "detail": "A `url` query parameter is required.",
+                }]},
+                status=400,
+            )
+
+        from job_hunting.lib.url_policy import UrlPolicyError, validate_submission_url
+
+        try:
+            link = validate_submission_url(raw_url)
+        except UrlPolicyError as exc:
+            # 400 rather than a silent drop: unlike the extension's
+            # advisory hints (`_clean_hint_url` in views/scrapes.py), the
+            # URL IS the question here. Answering "no candidates" for a
+            # URL we refused to look at would be a lie.
+            return Response(
+                {"errors": [{"code": exc.code, "detail": str(exc)}]},
+                status=400,
+            )
+
+        probe = build_candidate_probe(
+            link=link,
+            title=request.query_params.get("title"),
+            company_name=request.query_params.get("company"),
+        )
+        items = compute_duplicate_candidates(probe, request)
         ser = JobPostDuplicateCandidateSerializer()
         return Response({"data": [ser.to_resource(it) for it in items]})
 
