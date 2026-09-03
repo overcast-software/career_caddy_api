@@ -1020,6 +1020,25 @@ class JobPostViewSet(BaseViewSet):
         if "apply_url" in attrs:
             from job_hunting.models.job_post_dedupe import canonicalize_apply_url
             attrs["apply_url"] = canonicalize_apply_url(attrs["apply_url"])
+        # Canonicalize an inbound canonical_link for the same reason, and one
+        # more: JobPost.save() only DERIVES canonical_link when it is empty, so
+        # a value supplied on the wire lands verbatim. The scrape graph PATCHes
+        # this column directly (_propagate_canonical_to_parent_jp and
+        # _persist_declared_canonical, both in agents/scrape_graph/), and it
+        # canonicalizes with its OWN rules — a disjoint param set from this
+        # one, no trailing-slash strip, no ScrapeProfile url_rewrites. The
+        # result was that the primary dedupe key could hold a value this api's
+        # own matcher would never reproduce for the same input URL.
+        #
+        # Normalizing here means one owner. Callers send the raw URL and stay
+        # ignorant of these rules — which is what the browser extension already
+        # does, and is the pattern the other writers are being moved onto.
+        # None-safe and idempotent: canonicalizing an already-canonical value
+        # is a no-op, so this is safe while the agents side still sends
+        # pre-canonicalized URLs.
+        if attrs.get("canonical_link"):
+            from job_hunting.models.job_post_dedupe import canonicalize_link
+            attrs["canonical_link"] = canonicalize_link(attrs["canonical_link"])
         date_errors = self._parse_date_attrs(attrs)
         if date_errors:
             return Response(

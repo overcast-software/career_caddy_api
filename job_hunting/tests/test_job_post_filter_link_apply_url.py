@@ -191,6 +191,63 @@ class TestJobPostFilterLinkMatchesApplyUrl(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self._ids(resp), {str(post.id)})
 
+    def test_inbound_canonical_link_is_canonicalized_at_write(self):
+        """The scrape graph PATCHes canonical_link directly, with its own rules.
+
+        `JobPost.save()` only DERIVES canonical_link when it is empty, so a
+        value supplied on the wire lands verbatim. Two writers in
+        agents/scrape_graph/ (`_propagate_canonical_to_parent_jp` and
+        `_persist_declared_canonical`) send one — canonicalized by the AGENTS
+        canonicalizer, whose param set is disjoint from this one and which
+        applies no ScrapeProfile url_rewrites and no trailing-slash strip.
+
+        The consequence this pins: the primary dedupe key could hold a value
+        that this api's own `canonicalize_link` would never produce for the
+        same input, so `find_duplicate`'s canonical stage and the
+        `canonical_link` candidate signal could not match it back.
+
+        Normalizing inbound means one owner, and lets those callers send the
+        raw URL — the pattern the browser extension already follows.
+        """
+        post = JobPost.objects.create(
+            title="Graph Job",
+            company=self.company,
+            link="https://boards.example.com/jobs/graph-1",
+            created_by=self.user,
+        )
+        # A raw, tracking-laden, trailing-slashed URL of the shape an
+        # un-normalized caller would send.
+        resp = self.client.patch(
+            f"/api/v1/job-posts/{post.id}/",
+            {
+                "data": {
+                    "type": "job-post",
+                    "id": str(post.id),
+                    "attributes": {
+                        "canonical_link": (
+                            "https://ats.example.com/jobs/9/?utm_source=x#frag"
+                        ),
+                    },
+                }
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.json())
+
+        post.refresh_from_db()
+        # utm stripped, fragment dropped, trailing slash removed — i.e. the
+        # value this api would have derived itself.
+        self.assertEqual(post.canonical_link, "https://ats.example.com/jobs/9")
+
+        # And it is now findable by the same input URL, which is the whole
+        # point: the stored key round-trips through canonicalize_link.
+        resp = self.client.get(
+            "/api/v1/job-posts/",
+            {"filter[link]": "https://ats.example.com/jobs/9/?utm_source=y"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._ids(resp), {str(post.id)})
+
     def test_null_apply_url_does_not_match_empty_query(self):
         """Edge: a JP with apply_url=NULL must not match an empty filter.
 
