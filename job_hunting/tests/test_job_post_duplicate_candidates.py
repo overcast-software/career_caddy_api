@@ -1,10 +1,16 @@
-"""Tests for GET /api/v1/job-posts/:id/duplicate-candidates/."""
+"""Tests for the two entry points onto ``compute_duplicate_candidates``:
+
+- ``GET /api/v1/job-posts/:id/duplicate-candidates/`` — a stored post.
+- ``GET /api/v1/job-posts/candidates-for-page/`` — a page with no row
+  yet (CC-249), via an unsaved probe handed to the same engine.
+"""
 
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework import status
 
+from job_hunting.api.serializers import build_candidate_probe
 from job_hunting.models import Company, JobPost, Scrape
 
 
@@ -341,3 +347,251 @@ class TestDuplicateCandidatesExtensionHints(TestCase):
             url=self.LINKEDIN, job_post=linkedin_jp, created_by=self.user
         )
         self.assertEqual(self._candidates(ats_jp), [])
+
+
+class TestCandidatesForPage(TestCase):
+    """CC-249 — GET /api/v1/job-posts/candidates-for-page/.
+
+    The second entry point onto ``compute_duplicate_candidates``: a URL
+    (plus optionally the title and company the caller read off the DOM)
+    instead of a stored JobPost id. The extension asks "is this exact URL
+    a JobPost?" and accepts a yes/no; under the ruling that duplicate rows
+    are acceptable, the useful question is "what do I already have that
+    looks like this page?" — recall, not identity.
+
+    What these tests guard is that it is an ENTRY POINT and not a second
+    engine. ``test_entry_point_matches_the_stored_post_route`` is the one
+    that matters: same ranker, same signals, same order.
+    """
+
+    URL = "/api/v1/job-posts/candidates-for-page/"
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            username="page", password="pw", is_staff=True
+        )
+        self.client.force_authenticate(user=self.user)
+        self.company = Company.objects.create(name="SNBL USA")
+
+    def _get(self, **params):
+        return self.client.get(self.URL, params)
+
+    def _ids(self, resp):
+        return [row["id"] for row in resp.json()["data"]]
+
+    def test_an_unsaved_probe_carries_a_real_id(self):
+        """The load-bearing precondition, asserted rather than assumed.
+
+        ``JobPost`` has a NanoID CharField PK with a callable default, so
+        Django fills it in ``__init__`` and an unsaved instance already
+        carries an id. If it were ``None``, the engine's
+        ``filter(duplicate_of_id=post.id)`` exclusion would compile to an
+        ``IS NULL`` predicate matching every non-duplicate post, and this
+        endpoint would return empty forever — silently, with nothing to
+        chase.
+        """
+        probe = build_candidate_probe(link="https://example.com/jobs/1")
+        self.assertIsNotNone(probe.id)
+        self.assertFalse(
+            JobPost.objects.filter(pk=probe.id).exists(), "probe is unsaved"
+        )
+
+    def test_url_only_finds_the_page_itself(self):
+        jp = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=self.user,
+            link="https://example.com/jobs/eng-42",
+        )
+        resp = self._get(url="https://example.com/jobs/eng-42")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._ids(resp), [str(jp.id)])
+        self.assertIn(
+            "canonical_link", resp.json()["data"][0]["attributes"]["match_signals"]
+        )
+
+    def test_the_api_canonicalizes_the_inbound_url(self):
+        """Callers send raw URLs. Two strip-lists diverge by construction,
+        so the tracking-param strip runs here, not in the extension."""
+        jp = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=self.user,
+            link="https://example.com/jobs/eng-42",
+        )
+        resp = self._get(
+            url=(
+                "https://example.com/jobs/eng-42"
+                "?utm_source=newsletter&utm_medium=email"
+            )
+        )
+        self.assertEqual(self._ids(resp), [str(jp.id)])
+
+    def test_title_and_company_unlock_the_fingerprint_signal(self):
+        """URL-only reaches the identity-free signals only. The title and
+        company read off the DOM are what let the fingerprint leg fire on
+        a row stored under a different URL."""
+        other = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=self.user,
+            link="https://elsewhere.example.org/postings/9",
+        )
+
+        bare = self._get(url="https://example.com/jobs/eng-42")
+        self.assertEqual(self._ids(bare), [], "no URL signal reaches it")
+
+        hinted = self._get(
+            url="https://example.com/jobs/eng-42",
+            title="Engineer",
+            company="SNBL USA",
+        )
+        self.assertEqual(self._ids(hinted), [str(other.id)])
+        self.assertIn(
+            "fingerprint", hinted.json()["data"][0]["attributes"]["match_signals"]
+        )
+
+    def test_exact_match_outranks_a_title_similarity_only_candidate(self):
+        """Acceptance: the post at this exact URL comes first.
+
+        Stated against a lower-confidence rival, because that is what the
+        existing ranker actually promises — confidence first, then
+        recency. Ordering WITHIN the high band is untouched here by
+        design (CC-257 Stage 6, gated on a prod measurement).
+        """
+        exact = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=self.user,
+            link="https://example.com/jobs/eng-42",
+        )
+        JobPost.objects.create(
+            title="Engineer II",
+            company=self.company,
+            created_by=self.user,
+            link="https://example.com/jobs/eng-99",
+        )
+        resp = self._get(
+            url="https://example.com/jobs/eng-42",
+            title="Engineer",
+            company="SNBL USA",
+        )
+        rows = resp.json()["data"]
+        self.assertEqual(rows[0]["id"], str(exact.id))
+        self.assertEqual(rows[0]["attributes"]["confidence"], "high")
+
+    def test_no_match_is_an_empty_list_not_an_error(self):
+        resp = self._get(url="https://example.com/jobs/never-seen")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json(), {"data": []})
+
+    def test_unknown_company_name_degrades_instead_of_failing(self):
+        """A company with no row has no posts to match against, so a miss
+        is the correct answer — not a 500, and not a newly minted Company.
+        This route is read-only."""
+        before = Company.objects.count()
+        resp = self._get(
+            url="https://example.com/jobs/eng-42",
+            title="Engineer",
+            company="A Company That Does Not Exist Anywhere",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json(), {"data": []})
+        self.assertEqual(Company.objects.count(), before, "created nothing")
+
+    def test_missing_url_is_a_400(self):
+        resp = self.client.get(self.URL)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.json()["errors"][0]["code"], "missing_url")
+
+    def test_policy_blocked_url_is_a_400_not_an_empty_result(self):
+        """Answering "no candidates" for a URL we refused to look at is
+        indistinguishable from a real miss."""
+        resp = self._get(url="http://127.0.0.1:8000/jobs/1")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(resp.json()["errors"][0]["code"].startswith("blocked"))
+
+    def test_anonymous_callers_are_refused(self):
+        self.client.force_authenticate(user=None)
+        resp = self._get(url="https://example.com/jobs/eng-42")
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_visibility_is_scoped_with_no_filter_link_style_bypass(self):
+        """``filter[link]`` bypasses the per-user filter deliberately: it
+        answers yes/no about one exact URL the caller already holds. This
+        route returns up to ten ranked rows including a fuzzy same-company
+        title match, so the same bypass would turn "a URL plus a company
+        name" into an enumeration surface over other users' libraries."""
+        self.user = User.objects.create_user(username="reg", password="pw")
+        self.client.force_authenticate(user=self.user)
+        other_user = User.objects.create_user(username="stranger", password="pw")
+        JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=other_user,
+            link="https://example.com/jobs/eng-42",
+        )
+        resp = self._get(
+            url="https://example.com/jobs/eng-42",
+            title="Engineer",
+            company="SNBL USA",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.json()["data"], [])
+
+    def test_entry_point_matches_the_stored_post_route(self):
+        """The ticket's premise, as an assertion.
+
+        Given a stored post P, asking this route about P's own page must
+        return exactly what ``/job-posts/P/duplicate-candidates/`` returns
+        — same rows, same order, same signals — plus P itself, which the
+        per-post route excludes as "self" and this one cannot (and should
+        not: the row for the page you are standing on is the most useful
+        answer there is).
+
+        If these two ever disagree about anything else, a second ranker
+        has been born and the ticket's premise is lost.
+        """
+        subject = JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=self.user,
+            link="https://example.com/jobs/eng-42",
+        )
+        # A fingerprint twin, a title-similarity neighbour, and an
+        # unrelated row, so the comparison spans more than one signal and
+        # more than one confidence band.
+        JobPost.objects.create(
+            title="Engineer",
+            company=self.company,
+            created_by=self.user,
+            link="https://elsewhere.example.org/postings/9",
+        )
+        JobPost.objects.create(
+            title="Engineer II",
+            company=self.company,
+            created_by=self.user,
+            link="https://example.com/jobs/eng-99",
+        )
+        JobPost.objects.create(
+            title="Chef",
+            company=Company.objects.create(name="Unrelated Inc"),
+            created_by=self.user,
+            link="https://example.com/jobs/chef",
+        )
+
+        stored = self.client.get(
+            f"/api/v1/job-posts/{subject.id}/duplicate-candidates/"
+        ).json()["data"]
+        page = self._get(
+            url=subject.link, title=subject.title, company=self.company.name
+        ).json()["data"]
+
+        self.assertTrue(stored, "fixture must produce candidates to compare")
+        self.assertIn(str(subject.id), [row["id"] for row in page])
+        self.assertEqual(
+            [row for row in page if row["id"] != str(subject.id)],
+            stored,
+            "the page route is an entry point, not a second ranker",
+        )

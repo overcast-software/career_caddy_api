@@ -13,7 +13,12 @@ from job_hunting.models import (
     Project, ResumeProject, ResumeExperience, ResumeEducation, ResumeCertification,
     AiUsage, Waitlist, Invitation, ScrapeProfile,
 )
-from job_hunting.models.job_post_dedupe import find_apply_url_matches
+from job_hunting.models.job_post_dedupe import (
+    canonicalize_link,
+    find_apply_url_matches,
+    fingerprint,
+    normalized_fingerprint,
+)
 
 
 def _to_primitive(val):
@@ -873,6 +878,68 @@ class ScoreSerializer(BaseSerializer):
             # Non-fatal; omit statuses on error
             pass
         return res
+
+
+def build_candidate_probe(*, link, title=None, company_name=None):
+    """An UNSAVED JobPost shaped like a page the caller is looking at.
+
+    CC-249. ``compute_duplicate_candidates`` takes a stored JobPost, so
+    nothing could ask it about a page that has no row yet. Rather than
+    fork the engine — the failure the CC-247 cluster exists to stop —
+    this synthesises a probe and hands it to the existing function
+    unchanged. The engine's signal set is not extended, its ranking is
+    not touched, and drift is impossible by construction rather than by
+    discipline.
+
+    It works because ``JobPost`` extends ``NanoIDModel``, whose ``id`` is
+    a ``CharField(primary_key=True, default=generate_nanoid)``. Django
+    applies field defaults in ``Model.__init__``, so an unsaved instance
+    already carries a real random id rather than ``None``. That defuses
+    the two places the engine touches identity — ``{post.id}`` becomes an
+    id matching no row, and ``filter(duplicate_of_id=post.id)`` matches
+    nothing. Had the PK been an autoincrement int, both would have
+    compiled to ``IS NULL`` predicates and the second would have excluded
+    every non-duplicate post, i.e. always-empty results. Pinned by
+    ``test_an_unsaved_probe_carries_a_real_id``.
+
+    Three columns are stamped by hand, mirroring ``JobPost.from_json``:
+    ``canonical_link``, ``content_fingerprint``, ``normalized_fingerprint``.
+    The link is canonicalized HERE, server-side — callers send raw URLs
+    (``api/CLAUDE.md``: the api owns canonicalization; two strip-lists
+    diverge by construction).
+
+    One deliberate difference from ``from_json``: that path ends in
+    ``Company.objects.get_or_create``; this one must not, because this is
+    a read-only question. The two lookup stages are the same ones
+    ``JobPostExtractor._resolve_company`` uses — exact ``CompanyAlias``
+    slug first, then literal ``name`` — with the create lopped off the
+    end, so this route resolves a company name exactly the way the write
+    path would have. A miss leaves ``company_id`` null, which is correct
+    rather than degraded: a company with no row has no posts to match
+    against. The engine's own null-skips do the rest —
+    ``fingerprint`` / ``normalized_fingerprint`` return ``None`` without
+    ``company_id and title``, and the ``title_similarity`` block is gated
+    on the same pair. So a URL-only probe degrades to the three signals
+    that need no identity (``canonical_link``, ``apply_hint``,
+    ``referrer_hint``) with no extra branching anywhere.
+    """
+    from job_hunting.models.company import Company
+
+    clean_title = (title or "").strip() or None
+    clean_company = (company_name or "").strip() or None
+
+    company = None
+    if clean_company:
+        company = (
+            Company.find_by_alias(clean_company)
+            or Company.objects.filter(name=clean_company).first()
+        )
+
+    probe = JobPost(title=clean_title, company=company, link=link)
+    probe.canonical_link = canonicalize_link(link)
+    probe.content_fingerprint = fingerprint(probe)
+    probe.normalized_fingerprint = normalized_fingerprint(probe)
+    return probe
 
 
 def compute_duplicate_candidates(post, request):
