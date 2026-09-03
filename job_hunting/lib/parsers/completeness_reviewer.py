@@ -192,6 +192,34 @@ def is_not_captured_sentinel(description: Optional[str]) -> bool:
     return bool(_NOT_CAPTURED_SENTINEL.match(description or ""))
 
 
+def description_is_refusal(description: Optional[str]) -> bool:
+    """True when a description cannot honestly carry ``complete=True``.
+
+    Two shapes, both decided deterministically — no LLM, no network:
+
+    - nothing at all (empty or whitespace-only);
+    - a labelled "not captured" placeholder, which is a refusal *in
+      writing* and must never be read as content.
+
+    This is exactly the cheap pre-gate ``maybe_review_and_persist``
+    already ran, lifted out into a predicate so the persistence path can
+    apply the same verdict at the moment it writes the row (CC-237).
+    Until now the verdict only existed downstream of an LLM call that
+    several ingest paths never make: ``ScrapeViewSet._persist_extension
+    _direct`` calls ``process_evaluation`` and marks the scrape completed
+    without ever reviewing, so a description-less capture minted a
+    ``complete=True`` row that nothing would afterwards correct.
+
+    What this does NOT cover, on purpose: semantic junk — a plausible
+    description synthesised from an application form's own questions.
+    That needs a reader and stays the LLM reviewer's job. This predicate
+    only covers the cases where the pipeline has already said, in the
+    data it persisted, that it found nothing.
+    """
+    text = (description or "").strip()
+    return not text or is_not_captured_sentinel(text)
+
+
 def maybe_review_and_persist(
     job_post,
     *,
@@ -220,7 +248,7 @@ def maybe_review_and_persist(
 
     desc = (job_post.description or "").strip()
     sentinel = is_not_captured_sentinel(desc)
-    if not desc or sentinel:
+    if description_is_refusal(desc):
         # Empty descriptions don't need an LLM judgement — there's
         # literally nothing to evaluate. Neither does a bare "not
         # captured" marker: the extractor has already told us, in
