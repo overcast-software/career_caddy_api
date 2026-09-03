@@ -116,7 +116,7 @@ def prefer_extension_direct_link(
 
 _TRACKING_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "gh_src", "gh_jid",
+    "gh_src",
     "lever-source", "lever-origin",
     "trk", "refid", "trackingid",
     "lk", "lvk", "tsid",
@@ -131,6 +131,22 @@ _TRACKING_PARAMS = {
 # query param (worksourcewa.com encodes part of the job identifier
 # there). Without them in the strip list, /jobview/?source=A and
 # /jobview/?source=B canonicalize to distinct URLs as intended.
+#
+# =gh_jid= was removed for the same reason, and it had been here since
+# the original 7135bf6. On an *embedded* Greenhouse board the listing
+# lives at company.com/careers and the job is identified ONLY by
+# ?gh_jid=<id> — so stripping it canonicalized every job on that board
+# to the same URL. That is not a duplicate, it is an over-merge: two
+# different jobs matched on canonical_link, and the create path merged
+# the second into the first and returned 200 with the wrong post, while
+# the extractor's link-hit branch overwrote the first one's title,
+# company and description in place. =gh_src= stays — that one really is
+# source tracking, and it does not identify the job.
+#
+# The rule this whole block encodes: a param may only be stripped if it
+# is provably NOT part of the destination's identity on EVERY host that
+# uses it. "Looks like tracking" is not enough. Over-eager matching
+# merges distinct jobs, which is worse than a duplicate.
 
 _WS = re.compile(r"\s+")
 

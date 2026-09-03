@@ -147,6 +147,26 @@ class TestCanonicalizeLink(TestCase):
         self.assertNotIn("tsid=", got)
         self.assertIn("keep=1", got)
 
+    def test_distinct_gh_jid_values_do_not_collapse(self):
+        # gh_jid is the Greenhouse JOB ID, not a tracker. On an embedded
+        # board the listing lives at company.com/careers and gh_jid is the
+        # ONLY thing distinguishing one job from another, so stripping it
+        # canonicalized every job on the board to the same URL — an
+        # over-merge, not a duplicate. It sat in _TRACKING_PARAMS from the
+        # original dedupe commit until this test.
+        a = canonicalize_link("https://acme.com/careers?gh_jid=1001")
+        b = canonicalize_link("https://acme.com/careers?gh_jid=2002")
+        self.assertNotEqual(a, b)
+        self.assertIn("gh_jid=1001", a)
+
+    def test_gh_src_is_still_stripped(self):
+        # The removal must not overshoot: gh_src IS source tracking and
+        # does not identify the job, so it must keep being stripped.
+        self.assertEqual(
+            canonicalize_link("https://acme.com/careers?gh_jid=1&gh_src=abc"),
+            canonicalize_link("https://acme.com/careers?gh_jid=1"),
+        )
+
 
 class TestCanonicalizeLinkProfileRewrites(TestCase):
     """Host-scoped path rewrites from ScrapeProfile.url_rewrites should
