@@ -194,3 +194,48 @@ class JobPostCreateCanonicalizeTests(TestCase):
         self.assertEqual(JobPost.objects.count(), before)
         existing.refresh_from_db()
         self.assertEqual(existing.title, "Now we know the title")
+
+    def test_distinct_gh_jid_jobs_create_two_rows(self):
+        """Two different jobs on one embedded Greenhouse board must stay
+        two rows.
+
+        This is the DAMAGE test for the gh_jid over-merge, and it is the
+        one the suite was missing. A unit test on canonicalize_link pins
+        the *rule*; only this pins the *consequence* — and the consequence
+        is what actually hurt: with gh_jid in _TRACKING_PARAMS both URLs
+        canonicalized to https://acme.example.com/careers, the create
+        path's canonical leg matched, and the second job was merged into
+        the first and returned 200 with the wrong post's id. The user's
+        second job silently never existed.
+
+        Note there is no ScrapeProfile rewrite for this host — the
+        collision came purely from the param strip, so this test needs no
+        setup beyond setUp's users.
+        """
+        before = JobPost.objects.count()
+
+        first = self._post(
+            self.alice,
+            "https://acme.example.com/careers?gh_jid=1001",
+            title="Staff Engineer",
+        )
+        self.assertEqual(first.status_code, 201, first.json())
+
+        second = self._post(
+            self.alice,
+            "https://acme.example.com/careers?gh_jid=2002",
+            title="Product Designer",
+        )
+        # 201, NOT 200-with-the-first-post's-id.
+        self.assertEqual(second.status_code, 201, second.json())
+
+        self.assertEqual(JobPost.objects.count(), before + 2)
+        self.assertNotEqual(
+            first.json()["data"]["id"], second.json()["data"]["id"]
+        )
+        titles = set(
+            JobPost.objects.filter(
+                link__startswith="https://acme.example.com/careers"
+            ).values_list("title", flat=True)
+        )
+        self.assertEqual(titles, {"Staff Engineer", "Product Designer"})
