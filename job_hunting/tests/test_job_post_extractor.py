@@ -284,31 +284,37 @@ class TestProcessEvaluation(TestCase):
         extractor.process_evaluation(self.scrape, self.parsed_data, user=self.user)
         self.assertEqual(extractor.last_outcome, "created")
 
-    def test_canonical_link_hit_upgrades_email_stub_at_redirected_url(self):
-        """jp 1918 / jp 1922 incident regression: an extension push at the
-        canonical /jobs/view/<id>/ URL must dedup against an email-stub
-        whose raw link is /comm/jobs/view/<id>/ (the form LinkedIn email
-        delivers and then redirects). Pre-fix link_hit lookup only
-        compared `link` for equality, missing the canonical_link match,
-        so the upgrade-the-stub branch was bypassed and parse_scrape
-        forked a new JobPost via the (title, company) get_or_create
-        cold path. With the canonical_link OR-leg in place the existing
-        stub gets upgraded in place — no fork."""
+    def test_canonical_variant_forks_a_row_and_never_touches_the_stub(self):
+        """TEST CHANGED DELIBERATELY (2026-09, CC-257 Stage 5c.1) — not
+        adjusted to pass. Its predecessor
+        (test_canonical_link_hit_upgrades_email_stub_at_redirected_url)
+        pinned the canonical_link OR-leg in the link_hit lookup: an
+        extension push at /jobs/view/<id>/ upgraded a /comm/jobs/view/<id>/
+        email stub in place (jp 1918/1922, 2026-05-08). That leg is now
+        removed on purpose: it made _trust_aware_overwrite reachable from a
+        GUESSED identity, and two distinct jobs whose URLs merely
+        canonicalized alike could have one destroyed in place — the
+        failure worse than a duplicate.
+
+        Under the reconciliation ruling the write path promises exact-link
+        idempotency only. The old concern is served elsewhere: an
+        extension push carrying scrape.job_post_id still upgrades THAT row
+        (the FK leg, BACK-104), and an unlinked canonical twin surfaces in
+        duplicate-candidates for a human verb instead of an automatic
+        merge. This test pins the new contract: the variant URL FORKS a
+        second row and the stub is byte-for-byte untouched."""
         stub = JobPost.objects.create(
             title="Senior Software Engineer, Security",
             company=None,  # email stub: title only, no company yet
             link="https://www.linkedin.com/comm/jobs/view/4370923838/",
-            # Canonical form post-2026-05-27 strips the trailing slash so
-            # stage-1 dedup matches /jobs/view/<id> with or without the
-            # slash; setting it explicitly here to match what
-            # canonicalize_link would have produced on save().
             canonical_link="https://www.linkedin.com/jobs/view/4370923838",
             source="email",
             complete=False,
             created_by=self.user,
         )
 
-        # Extension's resent scrape lands at the redirected canonical URL.
+        # Extension's scrape lands at the redirected canonical URL — a
+        # DIFFERENT link string, same canonical. No job_post_id FK.
         self.scrape.url = "https://www.linkedin.com/jobs/view/4370923838/"
         self.scrape.source = "extension"
         self.scrape.save()
@@ -325,16 +331,91 @@ class TestProcessEvaluation(TestCase):
         )
 
         self.assertEqual(
-            JobPost.objects.count(), 1,
-            "must upgrade the email stub in place, not fork a new JP",
+            JobPost.objects.count(), 2,
+            "variant URL mints a second row under reconciliation",
         )
         stub.refresh_from_db()
-        self.assertTrue(stub.complete, "upgrade flips complete=True")
-        self.assertIn("Unified Identity", stub.description or "")
-        self.assertIsNotNone(stub.company_id, "company linked on upgrade")
-        self.assertEqual(stub.company.name, "Teleport")
+        self.assertFalse(stub.complete, "stub is not upgraded")
+        self.assertIsNone(stub.company_id, "stub is untouched")
+        self.assertEqual(stub.source, "email")
+        new_row = JobPost.objects.exclude(pk=stub.pk).get()
+        self.assertEqual(new_row.company.name, "Teleport")
         self.scrape.refresh_from_db()
-        self.assertEqual(self.scrape.job_post_id, stub.id)
+        self.assertEqual(self.scrape.job_post_id, new_row.id)
+
+    def test_fk_linked_scrape_still_upgrades_across_url_variants(self):
+        """The half of the old canonical-leg behaviour that SURVIVES: when
+        the scrape explicitly names its JobPost (job_post_id FK — the
+        BACK-104 authoritative link, and what resolve-apply-url child
+        scrapes carry), a URL variant still upgrades that row in place.
+        Explicit binding, not a guess — allowed to write."""
+        stub = JobPost.objects.create(
+            title="Senior Software Engineer, Security",
+            company=None,
+            link="https://www.linkedin.com/comm/jobs/view/4370923838/",
+            canonical_link="https://www.linkedin.com/jobs/view/4370923838",
+            source="email",
+            complete=False,
+            created_by=self.user,
+        )
+        self.scrape.url = "https://www.linkedin.com/jobs/view/4370923838/"
+        self.scrape.source = "extension"
+        self.scrape.job_post = stub
+        self.scrape.save()
+        self.parsed_data.title = "Senior Software Engineer, Security"
+        self.parsed_data.company_name = "Teleport"
+        self.parsed_data.company_display_name = "Teleport"
+        self.parsed_data.description = (
+            "Unified Identity Securing Classic and AI Infrastructure. " * 20
+        )
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(
+            self.scrape, self.parsed_data, user=self.user,
+        )
+
+        self.assertEqual(JobPost.objects.count(), 1, "no fork on FK link")
+        stub.refresh_from_db()
+        self.assertIsNotNone(stub.company_id, "FK-linked upgrade landed")
+
+    def test_trust_overwrite_refreshes_fingerprints(self):
+        """CC-257 Stage 5d.2: _trust_aware_overwrite changes title/company
+        but save() only derives fingerprints when empty — before the fix
+        both stayed frozen at the OLD content, so the candidates
+        fingerprint signal kept matching text the row no longer said."""
+        from job_hunting.models import Company
+        existing = JobPost.objects.create(
+            title="Hallucinated Title",
+            # A company is required for fingerprints to derive at all —
+            # fingerprint() returns None without one, which would make
+            # this test vacuously compare (None, None).
+            company=Company.objects.create(name="Wrong Corp"),
+            link=self.scrape.url,  # exact link — the only overwrite route
+            source="email",
+            complete=True,
+            description="old " * 100,
+            created_by=self.user,
+        )
+        before = (existing.content_fingerprint, existing.normalized_fingerprint)
+        self.assertTrue(all(before))
+
+        self.scrape.source = "extension"  # outranks email
+        self.scrape.save()
+        self.parsed_data.title = "Real Title From The Page"
+        self.parsed_data.company_name = "Teleport"
+        self.parsed_data.company_display_name = "Teleport"
+        self.parsed_data.description = "real description " * 30
+
+        extractor = JobPostExtractor()
+        extractor.process_evaluation(
+            self.scrape, self.parsed_data, user=self.user,
+        )
+        self.assertEqual(extractor.last_outcome, "overwritten")
+        existing.refresh_from_db()
+        self.assertEqual(existing.title, "Real Title From The Page")
+        after = (existing.content_fingerprint, existing.normalized_fingerprint)
+        self.assertTrue(all(after))
+        self.assertNotEqual(before, after)
 
     def test_duplicate_full_description_merges_empty_company(self):
         """Hold-poller scrape lands on existing full-description post with

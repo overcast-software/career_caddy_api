@@ -832,15 +832,14 @@ class JobPostExtractor:
         # ("upgrade the stub"); a complete hit is a duplicate and
         # should keep its existing data intact.
         #
-        # Match on raw link OR canonical_link, mirroring the from-text
-        # endpoint's dedup query (scrapes.py). Without the canonical
-        # leg, a /comm/jobs/view/ email-stub is invisible to a
-        # /jobs/view/ extension push (LinkedIn redirects the email
-        # form to the canonical), and the upgrade-the-stub branch
-        # is bypassed — extractor falls through to get_or_create on
-        # (title, company), which forks a new JobPost when the
-        # extractor finds the company but the existing stub had
-        # company=NULL. jp 1918 / jp 1922 incident (2026-05-08).
+        # HISTORY: this lookup matched raw link OR canonical_link from
+        # 2026-05 (jp 1918/1922 — a /comm/ email-stub invisible to the
+        # /jobs/view/ extension push forked a row) until 2026-09, when
+        # the canonical leg was removed under the reconciliation ruling:
+        # the same leg that healed that fork also let
+        # _trust_aware_overwrite destroy a distinct job whose URL merely
+        # canonicalized alike. The fork is now the accepted outcome and
+        # surfaces in duplicate-candidates instead.
         # BACK-104: a scrape that is explicitly linked to a JobPost
         # (``job_post_id`` set) augments THAT post — authoritative over the
         # URL-based dedupe below. ``force=True`` is already handled above
@@ -864,16 +863,26 @@ class JobPostExtractor:
             link_hit = JobPost.objects.filter(pk=scrape.job_post_id).first()
             link_hit_via_fk = link_hit is not None
         if link_hit is None and job is None and link:
-            canonical = canonicalize_link(link)
-            # Order complete=True first when multiple JPs share the
-            # canonical_link (link is unique, but canonical_link isn't):
-            # the complete row is the post the user cares about, and an
-            # unordered .first() picking the stub would route through
-            # the "updated_stub" path and silently smear into the wrong
-            # JP. Mirrors the same defensive ordering in from-text.
+            # Exact-link only, deliberately. This lookup used to carry a
+            # Q(canonical_link=...) OR-leg, which made _trust_aware_overwrite
+            # below reachable from a *guessed* identity: two distinct jobs
+            # whose URLs merely canonicalize alike would have one row's
+            # title/company/description overwritten in place — the one
+            # failure mode worse than a duplicate (see api/CLAUDE.md).
+            # Under the reconciliation ruling (duplicate rows are
+            # acceptable; identity is answered after the fact by
+            # compute_duplicate_candidates + duplicate_of) an overwrite
+            # may only fire on a definitively-same URL: byte-equal link,
+            # or the scrape's explicit job_post_id FK handled above.
+            # Cost: a /comm/ rescrape of an existing /jobs/view/ row mints
+            # a second row instead of updating the first — which is the
+            # ruling, and the pair surfaces in duplicate-candidates.
+            # Keep -complete ordering: link is unique today, but Stage 5b
+            # drops that constraint, after which same-link rows can
+            # coexist and the complete one is the row the user cares about.
             link_hit = (
                 JobPost.objects
-                .filter(Q(link=link) | Q(canonical_link=canonical))
+                .filter(Q(link=link))
                 .order_by("-complete", "id")
                 .first()
             )
@@ -1163,6 +1172,15 @@ class JobPostExtractor:
         if not job.complete:
             diff["complete"] = {"before": False, "after": True}
             job.complete = True
+
+        # Fingerprints are derived from title/company/location but save()
+        # only computes them when empty — an overwrite that changes those
+        # fields would leave both frozen at the OLD content, so the
+        # duplicate-candidates fingerprint signal keeps matching a post
+        # that no longer says that. Clear on change; save() re-derives.
+        if any(k in diff for k in ("title", "company_id", "location")):
+            job.content_fingerprint = None
+            job.normalized_fingerprint = None
 
         job.save()
 

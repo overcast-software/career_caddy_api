@@ -22,14 +22,39 @@ There is **no `Api-Key` wire scheme.** Sending one returns a 401 whose body
 reads like an empty result set — people have chased that for an hour. If a
 request mysteriously returns nothing, check the HTTP status before the query.
 
-### Dedupe first on every JobPost write path
+### JobPost identity: exact-`link` idempotency at write, reconciliation after
 
-The same role posted to LinkedIn, Greenhouse and Lever must collapse into one
-canonical record. Any new way to create a JobPost goes through
-`job_hunting/models/job_post_dedupe.py` — no exceptions, including endpoints
-that feel like a special case. Link normalization is subtle (see the
-`canonical_link` handling); over-eager matching merges distinct jobs, which is
-worse than a duplicate.
+The ruling (Doug, 2026-09-02): **duplicate JobPost rows are acceptable.**
+Write paths must not guess identity; they promise exactly one thing —
+POSTing the same `link` string twice is idempotent (`Q(link=link)`, the
+contract `automation/src/client/api_client.py` documents). Whether two
+*different* URLs are the same job is answered after the fact by
+`compute_duplicate_candidates` + the non-destructive `duplicate_of` /
+`reposted_from` pointers and their verbs (mark / unlink / promote).
+
+The clause that governs every change here: **over-eager matching merges
+distinct jobs, which is worse than a duplicate** (`gh_jid` was stripped as
+a "tracking param" for months and silently merged distinct Greenhouse
+jobs — commit history of `job_post_dedupe.py` has the post-mortem). A
+param may only be stripped, and a match may only trigger a write, when it
+is provably safe on EVERY host it touches. When in doubt, mint the row;
+the candidates surface exists to reconcile it.
+
+Do not re-add write-time guessing: no new canonical/fingerprint OR-legs in
+lookups, no new 409 gates, no write-path calls into `find_duplicate`
+beyond what exists. (This section used to say the opposite — "any new way
+to create a JobPost goes through `job_post_dedupe.py`, no exceptions."
+That was false in fact — the main scrape-ingest path never called it —
+and is now false by design. The 2026-09 reconciliation work in the
+CC-257 plan is the paper trail.)
+
+The api owns URL canonicalization. Callers — the scrape graph, the
+extension, automation — send **raw** URLs; `canonicalize_link` /
+`canonicalize_apply_url` run at the api write boundary only. Never
+pre-canonicalize on the client side: two strip-lists diverge by
+construction, and the divergence class has already produced one
+over-merge incident (`src` on worksourcewa) and one identity loss
+(`gh_jid`).
 
 ### JSON:API, snake_case
 
@@ -195,9 +220,10 @@ fabricates failures that look like real ones.
 Django commands run **inside the container** (`make shell-api`); don't
 `uv run` on the host.
 
-For scrape-ingestion or JobPost write-path work, recall the
-dedupe-first convention before adding the endpoint — it is a hard rule
-on every JobPost write path.
+For scrape-ingestion or JobPost write-path work, re-read "JobPost
+identity" at the top of this file before adding the endpoint: exact-link
+idempotency is the only write-time promise; do not add identity guessing
+to a write path.
 
 ### RETIRED for agents — do not use
 
@@ -219,9 +245,11 @@ agents and automation.
 
 - Python 3.13+, Django (current LTS), DRF, drf-json-api
 - PostgreSQL via Docker (`db` service in parent compose)
-- SQLAlchemy on the side for some dedupe queries (legacy)
 - `uv` for dependency management
 - `pytest` for tests; `ruff` for lint
+
+(An earlier version of this list claimed SQLAlchemy ran "some dedupe
+queries" — verified false 2026-09: all dedupe queries are Django ORM.)
 
 ## Conventions
 
