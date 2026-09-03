@@ -2,6 +2,7 @@ from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db.models import Count
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -379,6 +380,19 @@ def dedupe_feedback_report(request):
     if not request.user.is_staff:
         return Response({"errors": [{"detail": "Staff only"}]}, status=403)
 
+    # Per-action counts over the WHOLE corpus (historical included, so the
+    # denominator of every ratio is visible). The bucket loop below only
+    # walks mark/unlink/promote — without these totals, mark_repost rows
+    # were invisible to this report entirely, and silent_marks÷marks /
+    # canonical_unlinks÷unlinks could not be computed from the endpoint.
+    # This is also the number that decides the reconciliation plan's
+    # Stage 2 gate ("<20 mark/unlink rows total → nobody uses the verbs").
+    action_totals = dict(
+        DuplicateAnnotation.objects.values("action")
+        .annotate(n=Count("id"))
+        .values_list("action", "n")
+    )
+
     rows = DuplicateAnnotation.objects.exclude(
         action=DuplicateAnnotation.HISTORICAL
     ).select_related("from_jp", "to_jp", "previous_to").order_by("-set_at")
@@ -454,6 +468,11 @@ def dedupe_feedback_report(request):
                     "silent_marks": len(silent_marks),
                     "canonical_unlinks": len(canonical_unlinks),
                     "promote_pairs": len(promote_pairs),
+                    # Denominators: every action's raw row count, so
+                    # silent_marks÷marks and canonical_unlinks÷unlinks are
+                    # computable from this response alone, and mark_repost /
+                    # historical usage is no longer invisible here.
+                    "actions": action_totals,
                 },
             },
         }

@@ -918,14 +918,27 @@ class ExtensionDirectMergeBiasTests(TestCase):
     def test_trust_overwrite_writes_extension_direct_link_to_jpod(
         self, mock_analyze
     ):
-        """Integration: end-to-end through parse_scrape.
+        """TEST CHANGED DELIBERATELY (2026-09, CC-257 Stage 5c.1) — not
+        adjusted to pass. This test used to assert that an
+        extension-direct push at a CLEANER url (same canonical, different
+        string) found the utm-dirty existing row via the canonical_link
+        OR-leg and trust-overwrote it in place, flipping its link and
+        writing a JPOD audit row. That reachability is exactly what
+        Stage 5c.1 removed: an overwrite may only fire on a byte-equal
+        link or the scrape's explicit job_post_id FK, because the same
+        guess that healed a utm-dirty twin also destroyed distinct jobs
+        whose URLs merely canonicalized alike.
 
-        Existing JP came from a low-trust source ("scrape") via a
-        browser-mode scrape and points at the URL that scrape captured.
-        Incoming extension scrape with source_mode='extension-direct'
-        and a different (cleaner) URL hits the same canonical_link.
-        Trust-aware overwrite fires (extension > scrape); link flips
-        to the extension-direct URL and JPOD records the change.
+        New contract, pinned here: the variant-URL push FORKS a second
+        row (the ruling — duplicates are acceptable), the existing row is
+        untouched, and no overwrite audit row is written. The self-heal
+        concern moves to the read side: the extension's filter[link]
+        popup lookup still four-leg matches, so the user SEES the
+        existing post and the human verbs reconcile the pair. When the
+        extension push is FK-bound to the post (scrape.job_post_id), the
+        overwrite still fires — that path is covered by
+        test_fk_linked_scrape_still_upgrades_across_url_variants in
+        test_job_post_extractor.py.
         """
         # Both URLs canonicalize to the same form (utm params stripped).
         old_link = (
@@ -971,17 +984,24 @@ class ExtensionDirectMergeBiasTests(TestCase):
 
         parse_scrape(incoming_scrape.id, user_id=self.user.id, sync=True)
 
+        # The existing row is byte-for-byte untouched — no overwrite
+        # through a canonical guess, no link flip, no audit row.
         existing_jp.refresh_from_db()
-        # Link flipped to the extension-direct URL.
-        self.assertEqual(existing_jp.link, new_link)
-        # Audit row records the flip.
-        decision = JobPostOverwriteDecision.objects.filter(
-            job_post=existing_jp
-        ).first()
-        self.assertIsNotNone(decision)
-        self.assertIn("link", decision.changed_fields)
-        self.assertEqual(decision.changed_fields["link"]["before"], old_link)
-        self.assertEqual(decision.changed_fields["link"]["after"], new_link)
+        self.assertEqual(existing_jp.link, old_link)
+        self.assertEqual(existing_jp.title, "Stale Title")
+        self.assertEqual(existing_jp.source, "scrape")
+        self.assertIsNone(
+            JobPostOverwriteDecision.objects.filter(
+                job_post=existing_jp
+            ).first()
+        )
+        # The push minted its own row at the extension-direct URL.
+        forked = JobPost.objects.filter(link=new_link).first()
+        self.assertIsNotNone(forked)
+        self.assertNotEqual(forked.id, existing_jp.id)
+        self.assertEqual(forked.title, "Real Job Title")
+        incoming_scrape.refresh_from_db()
+        self.assertEqual(incoming_scrape.job_post_id, forked.id)
 
     @patch.object(JobPostExtractor, "analyze_with_ai")
     def test_existing_extension_direct_keeps_link_under_browser_incoming(

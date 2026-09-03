@@ -3,7 +3,7 @@ import math
 
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q, OuterRef, Subquery
 from django.utils import timezone
 from rest_framework import viewsets, status
@@ -962,7 +962,27 @@ class JobPostViewSet(BaseViewSet):
             _record_discovery(dupe)
             _record_owner(dupe)
             return Response({"data": ser.to_resource(dupe)}, status=status.HTTP_200_OK)
-        obj.save()
+        try:
+            with transaction.atomic():
+                obj.save()
+        except IntegrityError:
+            # Two concurrent POSTs of the same link: the pre-lookup at the
+            # top of create() raced, the loser hits the unique constraint on
+            # `link`. Re-look up by exact link and return 200 against the
+            # winner — the same contract the pre-lookup's merge path gives a
+            # sequential repeat-POST. This handler is the ONLY thing between
+            # that race and a 500 (no other JobPost writer catches
+            # IntegrityError), and it is also the rollback net for Stage 5b
+            # of the reconciliation plan (dropping unique=True): once the
+            # constraint is gone this becomes unreachable dead code, kept
+            # one release, then deleted.
+            existing = JobPost.objects.filter(link=obj.link).first()
+            if existing is None:
+                raise
+            merge_empty_fields_from_attrs(existing, attrs)
+            _record_discovery(existing)
+            _record_owner(existing)
+            return Response({"data": ser.to_resource(existing)}, status=status.HTTP_200_OK)
         if not obj.posted_date:
             obj.posted_date = obj.created_at.date()
             obj.save(update_fields=["posted_date"])
@@ -1011,6 +1031,18 @@ class JobPostViewSet(BaseViewSet):
         if "link" in attrs and attrs["link"] != obj.link:
             obj.canonical_link = None
             attrs.pop("canonical_link", None)
+        # Same shape for the fingerprint pair: save() derives them only when
+        # empty, so a PATCH that changes title/company/location would leave
+        # both frozen at their creation-time values. Stale fingerprints used
+        # to be a merge hazard; under reconciliation they are a recall bug —
+        # compute_duplicate_candidates' fingerprint signal silently stops
+        # matching the post's real content. Clear on change; save() re-derives.
+        if any(
+            k in attrs and attrs[k] != getattr(obj, k)
+            for k in ("title", "location", "company_id")
+        ):
+            obj.content_fingerprint = None
+            obj.normalized_fingerprint = None
         # Canonicalize apply_url at write (CC-139). Covers the extension's
         # direct PATCHes of the apply destination — JobPost.save() strips
         # trailing junk but does NOT canonicalize apply_url, so a token /
@@ -1241,10 +1273,14 @@ class JobPostViewSet(BaseViewSet):
         the originating JobPost's fields are intentionally untouched.
 
         Use case: a tracker-URL stub like ZipRecruiter ``/km/<token>``
-        whose canonical_link can't be derived without a browser fetch
-        that follows the JS / meta-refresh redirect. Combined with
-        parse_scrape's canonical_link OR-leg dedup, the resulting child
-        scrape collapses onto the canonical JobPost row automatically.
+        whose real destination can't be derived without a browser fetch
+        that follows the JS / meta-refresh redirect. The child scrape is
+        created with ``job_post=obj``, and that explicit FK is what routes
+        the extraction back onto THIS row (BACK-104's authoritative-link
+        branch) — not URL matching. (A docstring here used to credit
+        "parse_scrape's canonical_link OR-leg dedup"; that leg was removed
+        2026-09 under the reconciliation ruling, and the FK was already
+        the load-bearing mechanism.)
 
         Returns the new Scrape so the client can poll for terminal."""
         if not request.user.is_staff:
@@ -1472,6 +1508,17 @@ class JobPostViewSet(BaseViewSet):
                     setattr(target, field, new_value)
                     target_updates.append(field)
         if target_updates:
+            # Fingerprints derive from title/company/location; save() only
+            # computes them when empty, and update_fields would skip the
+            # columns anyway. Clear and include them so the derivation in
+            # save() runs AND persists — otherwise the target's fingerprint
+            # signal keeps matching content the override just replaced.
+            if any(f in ("title", "company", "location") for f in target_updates):
+                target.content_fingerprint = None
+                target.normalized_fingerprint = None
+                target_updates.extend(
+                    ["content_fingerprint", "normalized_fingerprint"]
+                )
             target.save(update_fields=target_updates)
 
         previous_to_id = (
@@ -1513,8 +1560,17 @@ class JobPostViewSet(BaseViewSet):
     )
     @action(detail=True, methods=["post"], url_path="unlink-duplicate")
     def unlink_duplicate(self, request, pk=None):
-        """Set this post's duplicate_of to NULL. Idempotent — no-op when
-        it was already null. Visibility-gated on the post itself."""
+        """Clear this post's duplicate_of pointer — or, when only a repost
+        link is set, clear reposted_from instead. Idempotent — no-op when
+        neither is set. Visibility-gated on the post itself.
+
+        The repost branch exists because mark-duplicate-of can WRITE a
+        repost link (relation="repost" → reposted_from) and jp.show renders
+        it, but until 2026-09 no verb could undo it — the one irreversible
+        write in an otherwise non-destructive reconciliation surface.
+        duplicate_of takes precedence when both are set (unlink twice to
+        clear both), mirroring the mark verb's one-relation-per-call shape.
+        """
         visible = self._visible_jobpost_qs(request)
         post = visible.filter(pk=pk).first()
         if not post:
@@ -1522,8 +1578,23 @@ class JobPostViewSet(BaseViewSet):
         if post.duplicate_of_id is not None:
             previous_to_id = post.duplicate_of_id
             signals = self._snapshot_duplicate_signals(post, request)
+            signals["relation"] = self._RELATION_DUPLICATE
             post.duplicate_of_id = None
             post.save(update_fields=["duplicate_of_id"])
+            self._record_duplicate_annotation(
+                from_jp=post,
+                to_jp_id=None,
+                previous_to_id=previous_to_id,
+                action="unlink",
+                request=request,
+                signal_state=signals,
+            )
+        elif post.reposted_from_id is not None:
+            previous_to_id = post.reposted_from_id
+            signals = self._snapshot_duplicate_signals(post, request)
+            signals["relation"] = self._RELATION_REPOST
+            post.reposted_from_id = None
+            post.save(update_fields=["reposted_from_id"])
             self._record_duplicate_annotation(
                 from_jp=post,
                 to_jp_id=None,
