@@ -412,6 +412,189 @@ class TestNotCapturedSentinelSurvivesPersistence(TestCase):
         )
 
 
+class TestPersistenceDecidesCompleteness(TestCase):
+    """CC-237 — ``complete`` is derived at the write, not asserted there.
+
+    The other half of "a refusal must survive persistence". The gate
+    above lives in ``maybe_review_and_persist``, and every persist branch
+    in ``process_evaluation`` used to flip ``complete = True`` on the
+    assumption that the gate would run afterwards and walk it back. Two
+    reasons that assumption does not hold:
+
+    1. ``_REVIEWABLE_OUTCOMES`` does not contain ``"overwritten"``, so
+       the one branch that flips the flag *most* aggressively — a
+       higher-trust source landing on a lower-trust post — is never
+       reviewed at all.
+    2. The fresh-create branch never decided the flag; it inherited
+       ``JobPost.complete``'s model default of ``True``.
+
+    And ``complete=True`` is precisely the flag that stops anything from
+    revisiting the row, so a wrong value here is self-preserving. The
+    empty/placeholder verdict needs no model to reach, so it is now
+    reached at the write. Semantic junk still belongs to the reviewer.
+    """
+
+    SENTINEL = TestNotCapturedSentinelSurvivesPersistence.SENTINEL
+    REAL_DESCRIPTION = (
+        "You will own the billing pipeline end to end, from ingest through "
+        "invoicing. Requirements: five years of Python, strong Postgres."
+    )
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="persist", password="pw")
+
+    def _scrape(self, *, url, source="scrape", job_content=""):
+        return Scrape.objects.create(
+            url=url,
+            status="extracting",
+            source=source,
+            job_content=job_content,
+            created_by=self.user,
+        )
+
+    def _persist(self, scrape, **parsed_kwargs):
+        parsed = ParsedJobData(
+            title="Security Engineer",
+            company_name="Golden Analytics",
+            **parsed_kwargs,
+        )
+        extractor = JobPostExtractor()
+        ok = extractor.process_evaluation(scrape, parsed, user=self.user)
+        self.assertTrue(ok)
+        return extractor
+
+    def test_overwritten_outcome_is_never_reviewed(self):
+        """Why the write has to be right on its own.
+
+        If this ever starts passing for the wrong reason — i.e. someone
+        adds ``"overwritten"`` to the reviewable set — the overwrite
+        branch gains a second, LLM-backed opinion. That is fine, but it
+        does not make the derivation below optional: the reviewer is
+        skippable by env and swallowed on exception.
+        """
+        from job_hunting.lib.parsers.completeness_reviewer import (
+            _REVIEWABLE_OUTCOMES,
+        )
+
+        self.assertNotIn("overwritten", _REVIEWABLE_OUTCOMES)
+
+    def test_fresh_create_without_a_description_is_not_complete(self):
+        """The repro from the ticket, reduced: an extraction that yields
+        an identity but no job body must not mint a record claiming to be
+        finished. Nothing downstream re-opens a ``complete`` post."""
+        scrape = self._scrape(url="https://ats.example.com/jobs/1/apply")
+        self._persist(scrape)
+
+        jp = JobPost.objects.get()
+        self.assertEqual(jp.description or "", "")
+        self.assertFalse(
+            jp.complete,
+            "a body-less create must not inherit the model default of True",
+        )
+
+    def test_fresh_create_with_a_sentinel_description_is_not_complete(self):
+        """A labelled placeholder is a refusal in writing, not content —
+        the distinction the api/CLAUDE.md rule is about."""
+        scrape = self._scrape(url="https://www.linkedin.com/jobs/view/44539")
+        self._persist(scrape, description=self.SENTINEL)
+
+        jp = JobPost.objects.get()
+        self.assertFalse(jp.complete)
+
+    def test_fresh_create_with_a_real_description_is_complete(self):
+        """The other direction. A gate that only ever says no is a
+        regression wearing a fix's clothes."""
+        scrape = self._scrape(url="https://boards.example.com/jobs/42")
+        self._persist(scrape, description=self.REAL_DESCRIPTION)
+
+        jp = JobPost.objects.get()
+        self.assertTrue(jp.complete)
+
+    def test_stub_upgrade_that_only_adds_a_placeholder_stays_incomplete(self):
+        """The upgrade branch flipped ``complete=True`` unconditionally,
+        so a rescrape that recovered nothing still closed the record."""
+        link = "https://www.linkedin.com/jobs/view/44540"
+        stub = JobPost.objects.create(
+            title="Security Engineer",
+            company=Company.objects.create(name="Golden Analytics"),
+            link=link,
+            description="",
+            complete=False,
+            # Same source as the incoming scrape, so trust rank is a tie
+            # and the run lands in the stub-upgrade branch rather than in
+            # the overwrite branch covered further down.
+            source="scrape",
+            created_by=self.user,
+        )
+        scrape = self._scrape(url=link)
+        extractor = self._persist(scrape, description=self.SENTINEL)
+
+        self.assertEqual(extractor.last_outcome, "updated_stub")
+        stub.refresh_from_db()
+        self.assertEqual(JobPost.objects.count(), 1, "upgraded in place")
+        self.assertFalse(
+            stub.complete, "a placeholder is not a recovered description"
+        )
+
+    def test_trust_overwrite_without_a_description_does_not_claim_complete(self):
+        """``_trust_aware_overwrite`` is the unreviewed branch (see
+        ``test_overwritten_outcome_is_never_reviewed``). A higher-trust
+        source that corrects the title and company but carries no job
+        body has improved the record without finishing it."""
+        link = "https://ats.example.com/jobs/7/apply?step=application"
+        existing = JobPost.objects.create(
+            title="Wrong Title",
+            company=Company.objects.create(name="Golden Analytics"),
+            link=link,
+            description="",
+            complete=False,
+            source="email",
+            created_by=self.user,
+        )
+        scrape = self._scrape(url=link, source="extension")
+        extractor = self._persist(scrape)
+
+        self.assertEqual(extractor.last_outcome, "overwritten")
+        existing.refresh_from_db()
+        self.assertEqual(existing.title, "Security Engineer", "overwrite ran")
+        self.assertFalse(
+            existing.complete,
+            "trust rank decides whose fields win, not whether the post is done",
+        )
+
+    def test_trust_overwrite_carrying_a_description_does_complete(self):
+        """Same branch, real content — the flag must still flip."""
+        link = "https://ats.example.com/jobs/8"
+        existing = JobPost.objects.create(
+            title="Wrong Title",
+            company=Company.objects.create(name="Golden Analytics"),
+            link=link,
+            description="",
+            complete=False,
+            source="email",
+            created_by=self.user,
+        )
+        scrape = self._scrape(url=link, source="extension")
+        extractor = self._persist(scrape, description=self.REAL_DESCRIPTION)
+
+        self.assertEqual(extractor.last_outcome, "overwritten")
+        existing.refresh_from_db()
+        self.assertTrue(existing.complete)
+
+    def test_the_predicate_is_the_reviewers_own_pre_gate(self):
+        """One home. If these two ever disagree, a description is a
+        refusal on one path and content on the other — which is how the
+        sentinel got through the first time."""
+        from job_hunting.lib.parsers.completeness_reviewer import (
+            description_is_refusal,
+        )
+
+        self.assertTrue(description_is_refusal(None))
+        self.assertTrue(description_is_refusal("   "))
+        self.assertTrue(description_is_refusal(self.SENTINEL))
+        self.assertFalse(description_is_refusal(self.REAL_DESCRIPTION))
+
+
 class TestAgentRoleRegistry(TestCase):
     """``api/CLAUDE.md``: an AI-backed feature without a registry entry
     is invisible and unchangeable. ``completeness_reviewer`` read

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from django.db.models import Q
 
 from job_hunting.lib.job_post_merge import merge_empty_fields_from_attrs
+from job_hunting.lib.parsers.completeness_reviewer import description_is_refusal
 from job_hunting.lib.scrapers.html_cleaner import clean_html_to_markdown
 from job_hunting.lib.services.application_flow import STUB_MIN_WORDS
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
@@ -41,6 +42,31 @@ logger = logging.getLogger(__name__)
 # later scrape must not flip an email-originated post to "scrape".
 # `created_by` is the original owner and must never change.
 _NO_OVERWRITE_FIELDS = {"created_by", "source"}
+
+
+def _complete_for_description(description) -> bool:
+    """The value ``JobPost.complete`` may honestly hold for this description.
+
+    CC-237. Every persist branch below used to flip ``complete = True``
+    unconditionally and lean on the downstream ``CompletenessReviewer``
+    to walk it back. Two ways that failed:
+
+    1. The reviewer does not run on every ingest path. The synchronous
+       extension-direct capture (``ScrapeViewSet._persist_extension
+       _direct``) persists and marks the scrape completed without one, so
+       a capture that carried no description at all minted a
+       ``complete=True`` row permanently — nothing downstream would ever
+       revisit it, precisely because ``complete`` says there is nothing
+       to fix.
+    2. ``complete`` defaults to ``True`` on the model, so the fresh-create
+       branch never had to decide at all.
+
+    The reviewer's own cheap pre-gate needs no model to answer the
+    empty/placeholder cases, so the verdict is simply moved to the write
+    itself. Semantic junk still needs the reviewer; this is the half the
+    api can settle on its own, and it holds on every path.
+    """
+    return not description_is_refusal(description)
 
 # Synthetic "[CLOSED — applications no longer accepted]" prefix the
 # Tier1 extractor occasionally prepends when a profile extraction_hints
@@ -823,8 +849,12 @@ class JobPostExtractor:
                     # otherwise a "wasted parse" looks identical to a
                     # successful one (job-posts/1490 inbox bug).
                     self.last_outcome = "force_noop"
-                if not job.complete:
-                    job.complete = True
+                # CC-237: derived, not assumed. A re-parse that left the
+                # post without a description (or with a "not captured"
+                # placeholder) has nothing to be complete about.
+                merged_complete = _complete_for_description(job.description)
+                if job.complete != merged_complete:
+                    job.complete = merged_complete
                     job.save(update_fields=["complete"])
 
         # Prefer link-based lookup since link is unique. Branch on
@@ -935,11 +965,13 @@ class JobPostExtractor:
                     if getattr(job, field) != value:
                         setattr(job, field, value)
                         update_fields.append(field)
-                # The graph's ReviewCompleteness gate is the authoritative
-                # signal; flip eagerly here and let the gate flip back to
-                # False if the scraped output still doesn't read like a
-                # job description.
-                job.complete = True
+                # The graph's ReviewCompleteness gate stays authoritative
+                # on whether the prose READS like a job description, and
+                # can still flip this back to False. What it cannot be
+                # relied on for is the trivial case — it does not run on
+                # every ingest path — so the empty/placeholder verdict is
+                # settled here instead of flipped eagerly to True (CC-237).
+                job.complete = _complete_for_description(job.description)
                 update_fields.append("complete")
                 job.save(update_fields=update_fields)
             else:
@@ -975,6 +1007,15 @@ class JobPostExtractor:
             # applies only on the created=True branch — an existing-row
             # match (created=False) keeps its own audience untouched.
             create_defaults["audience"] = audience_for_user(user)
+            # CC-237: the fresh-create branch never decided this — it took
+            # the model default, which is True. A scrape that produced no
+            # description (or only a "not captured" placeholder) therefore
+            # minted a row asserting it was finished, and `complete=True`
+            # is the exact flag that stops anything from revisiting it.
+            # Decide it here, from what is actually being written.
+            create_defaults["complete"] = _complete_for_description(
+                create_defaults.get("description")
+            )
             job, created = JobPost.objects.get_or_create(
                 title=validated_data.title,
                 company=company,
@@ -1011,7 +1052,14 @@ class JobPostExtractor:
                         if getattr(job, field) != value:
                             setattr(job, field, value)
                             update_fields.append(field)
-                    job.complete = True
+                    # CC-237 — derived, same rule as the link-hit stub
+                    # branch. The STUB_MIN_WORDS gate above already means
+                    # a substantive description reached this row, so this
+                    # is belt-and-braces rather than a behaviour change:
+                    # it keeps every "flip to complete" in the file
+                    # reading the persisted description instead of
+                    # asserting a value.
+                    job.complete = _complete_for_description(job.description)
                     update_fields.append("complete")
                     job.save(update_fields=update_fields)
                 else:
@@ -1164,14 +1212,19 @@ class JobPostExtractor:
         diff["source"] = {"before": existing_source, "after": new_source}
         job.source = new_source
 
-        # Mirror the updated_stub branch's eager flip: a higher-trust
-        # source overwriting an email/scrape stub fills the fields, so
-        # the post is no longer "incomplete" by definition. ReviewCompleteness
-        # remains authoritative and will flip back to False if the
-        # parsed output still doesn't read like a job description.
-        if not job.complete:
-            diff["complete"] = {"before": False, "after": True}
-            job.complete = True
+        # Mirror the updated_stub branch: a higher-trust source
+        # overwriting an email/scrape stub usually fills the fields, so
+        # the post stops being "incomplete" — but derive that from the
+        # description the overwrite actually left behind rather than
+        # asserting it (CC-237). An overwrite that carried no description
+        # can now move the flag the other way too, and the audit row
+        # below records it either way.
+        overwritten_complete = _complete_for_description(job.description)
+        if job.complete != overwritten_complete:
+            diff["complete"] = {
+                "before": job.complete, "after": overwritten_complete,
+            }
+            job.complete = overwritten_complete
 
         # Fingerprints are derived from title/company/location but save()
         # only computes them when empty — an overwrite that changes those
