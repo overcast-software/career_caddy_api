@@ -1,56 +1,48 @@
-"""PACA CC-74: register the unclaimed-hold staleness observability sweep.
+"""Register the stale-unclaimed-hold observability sweep.
 
-Creates a django-q2 Schedule row that fires
-``job_hunting.lib.tasks.sweep_stale_unclaimed_holds`` every 5 minutes.
-The qcluster process picks the Schedule row up automatically — no extra
-deploy step. With no args the task uses ``_DEFAULT_HOLD_STALE_MINUTES``
-(30 min) as the staleness threshold.
+NEUTRALISED BY CC-208 (2026-09-07) — this migration is now a NO-OP.
 
-The task is read-only — it logs a per-partition WARNING
-(``scrape.holds.stale count=N oldest_age_min=M attended=<bool>``) so a
-dead/absent scrape runner stops being invisible. It never mutates rows;
-the attended=True partition's TTL auto-demote/fail action stays owned by
-``sweep_orphaned_attended_holds`` (registered by 0111).
+WHAT IT ORIGINALLY DID
+    Created a django-q2 Schedule row firing job_hunting.lib.tasks.sweep_stale_unclaimed_holds every 5 minutes.
 
-Idempotent: update_or_create keyed on the schedule name, so re-running
-the migration just refreshes the row instead of stacking schedules.
-Reverse drops the row. Mirrors 0111_register_attended_hold_sweep_schedule
-and 0109_scrape_html_prune_schedule.
+WHY IT IS EMPTY NOW
+    django-q2 was removed from INSTALLED_APPS when the qcluster bridge
+    worker was retired (CC-208, the exit-gate on CC-200). This file used to
+    carry two couplings to that app, and BOTH break a fresh `migrate` once
+    it is gone:
+
+      * a graph dependency on ("django_q", "0019_alter_task_options_...")
+        -> NodeNotFoundError, because the app no longer contributes nodes;
+      * apps.get_model("django_q", "Schedule") inside RunPython
+        -> LookupError.
+
+    Editing an applied migration is normally wrong. It is the correct remedy
+    HERE because the operation was a DATA migration, not a schema one, so it
+    contributes nothing to migration state and removing it cannot cause
+    drift (`makemigrations --check` compares state to models and never sees
+    RunPython). Concretely:
+
+      * on an EXISTING database this migration is already applied and its
+        body is never executed again;
+      * on a FRESH database the row it used to write would be meaningless —
+        nothing reads django_q_schedule any more.
+
+    The schedule this registered is NOT lost. Recurring sweeps moved to
+    lib/schedule_kinds.py SCHEDULE_REGISTRY, driven by Cloud Scheduler ->
+    /tasks/run-scheduled/ on GCP and by the `run_jobs` loop on self-host
+    (CC-213). That is the live mechanism; this row had been a duplicate
+    second driver of the same sweep for as long as both existed.
+
+    The django_q_* tables themselves are dropped by
+    0139_drop_django_q_tables.
 """
 from django.db import migrations
-
-
-SCHEDULE_NAME = "sweep_stale_unclaimed_holds"
-SCHEDULE_FUNC = "job_hunting.lib.tasks.sweep_stale_unclaimed_holds"
-SCHEDULE_INTERVAL_MINUTES = 5
-
-
-def register_schedule(apps, schema_editor):
-    Schedule = apps.get_model("django_q", "Schedule")
-    Schedule.objects.update_or_create(
-        name=SCHEDULE_NAME,
-        defaults={
-            "func": SCHEDULE_FUNC,
-            # 'I' = MINUTES interval. See django_q.models.Schedule.MINUTES.
-            "schedule_type": "I",
-            "minutes": SCHEDULE_INTERVAL_MINUTES,
-            "repeats": -1,  # forever
-        },
-    )
-
-
-def drop_schedule(apps, schema_editor):
-    Schedule = apps.get_model("django_q", "Schedule")
-    Schedule.objects.filter(name=SCHEDULE_NAME).delete()
 
 
 class Migration(migrations.Migration):
     dependencies = [
         ("job_hunting", "0112_jobpost_private_audience_and_federate_optin"),
-        # Depend on django_q's schema being in place before we INSERT a row.
-        ("django_q", "0019_alter_task_options_alter_ormq_key_alter_ormq_lock_and_more"),
     ]
 
-    operations = [
-        migrations.RunPython(register_schedule, reverse_code=drop_schedule),
-    ]
+    # Deliberately empty. See the module docstring.
+    operations = []

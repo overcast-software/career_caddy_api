@@ -1,4 +1,4 @@
-"""Phase 1 tests for the django-q2 task module.
+"""Tests for the task module.
 
 Plans/Job-queue integration — django-q2 phased rollout, sub-phase 1.
 The tests here cover three things:
@@ -12,18 +12,19 @@ The tests here cover three things:
    (return value is JSON-serializable, side-effect-free, deterministic
    under a fixed `message` arg) carries forward.
 
-3. django_q is wired into INSTALLED_APPS and Q_CLUSTER is configured.
-   These are the only behavior-bearing settings changes in Phase 1;
-   the rest of the migration phases assume they exist and override
-   per-task knobs.
+3. django-q2 is GONE (CC-208) and stays gone. This item used to assert
+   the opposite — that django_q was in INSTALLED_APPS and Q_CLUSTER was
+   configured. The qcluster worker was a temporary bridge that outlived
+   its blocker by five weeks, so its absence is now pinned rather than
+   left to drift back in.
 
-Out of scope for this test file: actually running a qcluster worker.
-The end-to-end smoke test (enqueue → worker picks up → completion)
-runs via `docker compose up worker` + a manual shell enqueue per the
-plan's Phase 1 verification section.
+Out of scope: running a worker. Async dispatch is the unified enqueue()
+producer — Cloud Tasks on GCP, a Job row drained by `manage.py run_jobs`
+on self-host, selected by CC_TASKS_ENABLED.
 """
 from __future__ import annotations
 
+import pathlib
 import time
 
 from django.conf import settings
@@ -65,22 +66,64 @@ class TestHealthCheckTask(TestCase):
         self.assertTrue(hasattr(mod, "health_check"))
 
 
-class TestDjangoQWiring(TestCase):
-    def test_django_q_in_installed_apps(self):
-        self.assertIn("django_q", settings.INSTALLED_APPS)
+class TestDjangoQRemoved(TestCase):
+    """CC-208 — django-q2 is gone. This is the regression guard.
 
-    def test_q_cluster_configured(self):
-        self.assertTrue(hasattr(settings, "Q_CLUSTER"))
-        q = settings.Q_CLUSTER
-        # Sanity-check the load-bearing keys; the plan node has the
-        # rationale for each default value.
-        self.assertEqual(q["orm"], "default")
-        self.assertEqual(q["name"], "career_caddy")
-        self.assertGreaterEqual(q["workers"], 1)
-        # Default timeout must be high enough for Phase 2's Score / Summary
-        # tier-1 LLM calls but not so high that a hung task chews a worker
-        # forever. 300s is the documented Phase 1 baseline.
-        self.assertGreaterEqual(q["timeout"], 60)
-        self.assertLessEqual(q["timeout"], 900)
-        # No automatic retries — per-task overrides only.
-        self.assertEqual(q.get("max_attempts", 1), 1)
+    It replaces ``TestDjangoQWiring``, which asserted the opposite. The
+    qcluster bridge worker (CC-199) was always a STRICTLY TEMPORARY drainer
+    for jobs stranded by the CC-169 push, and Doug was explicit that it must
+    not become permanent. It outlived its blocker by five weeks. Asserting its
+    ABSENCE is what stops it drifting back in.
+    """
+
+    def test_django_q_not_in_installed_apps(self):
+        self.assertNotIn("django_q", settings.INSTALLED_APPS)
+
+    def test_no_q_cluster_setting(self):
+        self.assertFalse(hasattr(settings, "Q_CLUSTER"))
+
+    def test_nothing_imports_django_q(self):
+        """The package may still sit in a stale venv; nothing may USE it.
+
+        Walks the source rather than shelling out to git — the container has
+        no git binary, and a test that silently depends on one is a test that
+        fails for a reason unrelated to what it checks.
+        """
+        import ast
+
+        import job_hunting
+
+        root = pathlib.Path(job_hunting.__file__).parent
+        offenders = []
+        for path in root.rglob("*.py"):
+            if "/tests/" in str(path) or "/migrations/" in str(path):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                # ast, not a line scan: a line scan counts docstring EXAMPLES
+                # as imports. tasks.py had two, and reporting them as live
+                # code would make this guard cry wolf until someone deleted it.
+                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                    "django_q"
+                ):
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+                elif isinstance(node, ast.Import) and any(
+                    a.name.startswith("django_q") for a in node.names
+                ):
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+
+        self.assertEqual(
+            offenders,
+            [],
+            "live django_q imports remain:\n" + "\n".join(offenders),
+        )
+
+    def test_the_replacement_is_wired(self):
+        """Every async path resolves through the one registry."""
+        from job_hunting.lib.job_kinds import KIND_REGISTRY
+
+        self.assertIn("cover_letter", KIND_REGISTRY)
+        self.assertEqual(
+            KIND_REGISTRY["cover_letter"],
+            "job_hunting.lib.tasks.cover_letter_job",
+        )

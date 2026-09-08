@@ -224,22 +224,20 @@ class TestScrapeQueueHealthEndpoint(TestCase):
 
 
 class TestStaleUnclaimedHoldScheduleRegistered(TestCase):
-    """Migration 0113 registers the sweep as a django-q2 Schedule. Pin the
-    cadence so a stray reset or migration rollback doesn't silently disable
-    the staleness observability."""
+    """Pin the cadence so the staleness observability cannot be silently
+    disabled.
 
-    def test_schedule_row_exists(self):
-        from django_q.models import Schedule
+    CC-208 moved WHERE the registration lives: migration 0113's django-q2
+    ``Schedule`` row and the qcluster worker that ran it are both gone, and
+    ``SCHEDULE_REGISTRY`` is the live mechanism.
+    """
 
-        row = Schedule.objects.filter(
-            name="sweep_stale_unclaimed_holds"
-        ).first()
-        self.assertIsNotNone(
-            row, "0113 migration should register the schedule"
-        )
+    def test_sweep_is_registered_with_its_cadence(self):
+        from job_hunting.lib.schedule_kinds import SCHEDULE_REGISTRY
+
+        spec = SCHEDULE_REGISTRY.get("sweep_stale_unclaimed_holds")
+        self.assertIsNotNone(spec, "the staleness sweep must stay registered")
         self.assertEqual(
-            row.func, "job_hunting.lib.tasks.sweep_stale_unclaimed_holds"
+            spec.dotted, "job_hunting.lib.tasks.sweep_stale_unclaimed_holds"
         )
-        self.assertEqual(row.schedule_type, Schedule.MINUTES)
-        self.assertEqual(row.minutes, 5)
-        self.assertEqual(row.repeats, -1)
+        self.assertEqual(spec.interval_seconds, 300)

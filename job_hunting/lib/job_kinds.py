@@ -51,6 +51,14 @@ KIND_REGISTRY: dict[str, str] = {
     "parse_scrape": "job_hunting.lib.tasks.parse_scrape_job",
     # CC-207b — staff ScrapeProfile sharpen request (light DB write).
     "sharpen_scrape_profile": "job_hunting.lib.tasks.sharpen_scrape_profile",
+    # CC-208 — cover-letter generation. The LAST path to join the registry,
+    # and it joins for the SELF-HOST side only: CC-169 shipped cover-letter
+    # before the unified design, so on GCP it still has its own producer and
+    # its own /tasks/cover-letter/ handler (see cloud_tasks.enqueue_cover_letter).
+    # Registering it here is what gives the non-GCP branch a transport now that
+    # django-q2 is gone — without this, retiring the qcluster would have left
+    # self-host cover letters with nowhere to go.
+    "cover_letter": "job_hunting.lib.tasks.cover_letter_job",
 }
 
 

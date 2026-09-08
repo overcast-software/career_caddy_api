@@ -34,16 +34,22 @@ _TASKS_SETTINGS = dict(
 
 class TestEnqueueCoverLetterProducer(TestCase):
     @override_settings(CC_TASKS_ENABLED=False)
-    def test_falls_back_to_django_q_when_disabled(self):
-        with patch("django_q.tasks.async_task") as mock_async, patch(
-            "job_hunting.lib.cloud_tasks._create_task"
-        ) as mock_create:
+    def test_self_host_writes_a_job_row(self):
+        """CC-208: this branch used to go straight to django-q2.
+
+        django-q2 is gone, so it now writes a ``Job`` row for the ``run_jobs``
+        pull runner via ``enqueue("cover_letter", ...)``. Without the registry
+        entry this branch would have had no transport at all.
+        """
+        from job_hunting.models import Job
+
+        with patch("job_hunting.lib.cloud_tasks._create_task") as mock_create:
             cloud_tasks.enqueue_cover_letter("abc1234567", injected_prompt="hi")
         mock_create.assert_not_called()
-        mock_async.assert_called_once_with(
-            cloud_tasks.COVER_LETTER_TASK,
-            "abc1234567",
-            injected_prompt="hi",
+        job = Job.objects.get(kind="cover_letter")
+        self.assertEqual(
+            job.payload,
+            {"cover_letter_id": "abc1234567", "injected_prompt": "hi"},
         )
 
     @override_settings(**_TASKS_SETTINGS)
@@ -81,29 +87,33 @@ class TestEnqueueCoverLetterProducer(TestCase):
         )
 
     @override_settings(**_TASKS_SETTINGS)
-    def test_enabled_dispatches_via_cloud_tasks_not_django_q(self):
-        with patch(
-            "job_hunting.lib.cloud_tasks._create_task"
-        ) as mock_create, patch("django_q.tasks.async_task") as mock_async:
+    def test_enabled_dispatches_via_cloud_tasks(self):
+        with patch("job_hunting.lib.cloud_tasks._create_task") as mock_create:
             cloud_tasks.enqueue_cover_letter("xyz9876543", injected_prompt="tone: warm")
-        mock_async.assert_not_called()
         mock_create.assert_called_once_with(
             cloud_tasks.COVER_LETTER_HANDLER_PATH,
             {"cover_letter_id": "xyz9876543", "injected_prompt": "tone: warm"},
         )
 
     @override_settings(**_TASKS_SETTINGS)
-    def test_falls_back_to_django_q_when_create_task_raises(self):
+    def test_create_task_failure_reraises_and_strands_nothing(self):
+        """CC-208: the old django-q2 fallback here was a SILENT DROP.
+
+        Nothing has drained ``django_q_ormq`` since the qcluster bridge worker
+        was retired, so "fall back to django-q2" meant "lose the job quietly".
+        Re-raising matches ``enqueue()``'s deliberate no-fallback rule on GCP,
+        and for the same reason: there is no runner, so a queued row strands.
+        """
+        from job_hunting.models import Job
+
         with patch(
             "job_hunting.lib.cloud_tasks._create_task",
             side_effect=RuntimeError("boom"),
-        ), patch("django_q.tasks.async_task") as mock_async:
-            cloud_tasks.enqueue_cover_letter("id01234567", injected_prompt=None)
-        mock_async.assert_called_once_with(
-            cloud_tasks.COVER_LETTER_TASK,
-            "id01234567",
-            injected_prompt=None,
-        )
+        ):
+            with self.assertRaises(RuntimeError):
+                cloud_tasks.enqueue_cover_letter("id01234567", injected_prompt=None)
+        # Must not quietly write a self-host row on GCP either.
+        self.assertFalse(Job.objects.filter(kind="cover_letter").exists())
 
 
 class TestCoverLetterTaskHandler(TestCase):
