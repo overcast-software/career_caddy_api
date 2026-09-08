@@ -2493,10 +2493,11 @@ class ScrapeProfileViewSet(BaseViewSet):
             )
 
         # CC-207b: dispatch via the unified producer (Cloud Task on GCP /
-        # Job row on self-host). Unlike django-q2 async_task, enqueue() returns
-        # no task id — the sharpen-status endpoint's django-q lookup is now
-        # vestigial (retired with django_q in CC-208); the live frontend does
-        # not poll it (operator refreshes the page), so meta.job_id is null.
+        # Job row on self-host). enqueue() returns no task id, so meta.job_id
+        # is null and always has been since CC-207b. The sharpen-status
+        # endpoint that used to read it was DELETED in CC-208 — it queried
+        # django-q2's Task/OrmQ tables, which no longer exist, and no client
+        # polled it (the operator refreshes the page).
         enqueue(
             "sharpen_scrape_profile",
             profile_id=profile.id,
@@ -2515,117 +2516,6 @@ class ScrapeProfileViewSet(BaseViewSet):
             },
             status=status.HTTP_202_ACCEPTED,
         )
-
-    @action(
-        detail=True,
-        methods=["get"],
-        url_path="sharpen-status",
-    )
-    def sharpen_status(self, request, pk=None):
-        """Report status of a previously-enqueued sharpen task.
-
-        Staff-only (inherits IsAdminUser from the viewset). Looks up the
-        django-q Task / OrmQ rows for ``?job_id=<task-id>`` and returns
-        one of ``completed`` / ``failed`` / ``pending`` / ``unknown``.
-
-        404 when the ScrapeProfile doesn't exist. 400 when ``job_id``
-        is missing or empty. Otherwise always 200 — the ``status``
-        attribute carries the meaning, so frontend polling stays a
-        simple GET-and-inspect loop.
-
-        django-q stores completed tasks in the ``django_q_task`` table
-        (with ``success=True`` as ``Success`` and ``success=False`` as
-        ``Failure`` proxy managers). Queued-but-not-started tasks live
-        in ``django_q_ormq``; OrmQ stores the task id inside a signed
-        payload (``OrmQ.task_id()``), so pending lookup walks rows
-        instead of filtering by id directly.
-        """
-        from django_q.models import Failure, OrmQ, Success
-
-        profile = ScrapeProfile.objects.filter(pk=pk).first()
-        if not profile:
-            return Response(
-                {"errors": [{"detail": "Not found"}]},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        job_id = (request.query_params.get("job_id") or "").strip()
-        if not job_id:
-            return Response(
-                {"errors": [{"detail": "job_id is required"}]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        def _iso(dt):
-            return dt.isoformat() if dt is not None else None
-
-        def _payload(state, *, result=None, error=None, started=None, stopped=None):
-            return {
-                "data": {
-                    "type": "scrape-profile-sharpen-status",
-                    "id": job_id,
-                    "attributes": {
-                        "status": state,
-                        "result": result,
-                        "error": error,
-                        "started_at": _iso(started),
-                        "stopped_at": _iso(stopped),
-                    },
-                }
-            }
-
-        success_row = Success.objects.filter(id=job_id).first()
-        if success_row is not None:
-            # Task.result is a PickledObjectField — coerce to a
-            # JSON-safe shape. The sharpen task returns a dict
-            # ({"status": "requested", ...}); other tasks may return
-            # arbitrary values, so fall back to repr() rather than
-            # raise on unknown types.
-            raw = success_row.result
-            if isinstance(raw, (dict, list, str, int, float, bool)) or raw is None:
-                result_payload = raw
-            else:
-                result_payload = repr(raw)
-            return Response(
-                _payload(
-                    "completed",
-                    result=result_payload,
-                    started=success_row.started,
-                    stopped=success_row.stopped,
-                )
-            )
-
-        failure_row = Failure.objects.filter(id=job_id).first()
-        if failure_row is not None:
-            # Failure.result holds the exception text/traceback that
-            # django-q captured. Coerce to string for JSON.
-            err = failure_row.result
-            if not isinstance(err, str):
-                err = repr(err) if err is not None else None
-            return Response(
-                _payload(
-                    "failed",
-                    error=err,
-                    started=failure_row.started,
-                    stopped=failure_row.stopped,
-                )
-            )
-
-        # Pending: OrmQ.key is the cluster name, not the task id.
-        # The task id lives in the signed payload — walk rows and
-        # match via OrmQ.task_id(). At Phase 1 scale (2 workers,
-        # queue_limit=50) this is a sub-50-row scan.
-        for queued in OrmQ.objects.all():
-            try:
-                if queued.task_id() == job_id:
-                    return Response(_payload("pending"))
-            except Exception:
-                # Malformed payload (signed-package decode error)
-                # — skip; never let a stray queue row 500 the
-                # status endpoint.
-                continue
-
-        return Response(_payload("unknown"))
 
     @action(
         detail=False,

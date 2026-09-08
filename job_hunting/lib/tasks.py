@@ -1,12 +1,16 @@
-"""django-q2 task definitions for the Career Caddy backend.
+"""Background task definitions for the Career Caddy backend.
 
-Phase 1 of the django-q2 rollout (Plans/Job-queue integration —
-django-q2 phased rollout). This module is the SINGLE import surface
-that application code uses to enqueue background work — views and
-services call::
+This module holds the worker FUNCTIONS. It is not the enqueue surface —
+views and services never import from here to dispatch. They call the one
+producer, which picks its transport from ``CC_TASKS_ENABLED``::
 
-    from django_q.tasks import async_task
-    async_task("job_hunting.lib.tasks.score_job", score_id)
+    from job_hunting.lib.cloud_tasks import enqueue
+    enqueue("score", score_id=score_id)
+
+The dotted path behind each kind lives in ``lib/job_kinds.py``
+KIND_REGISTRY, so both transports resolve through one dict and cannot
+drift. (Until CC-208 this docstring told you to call django-q2's
+``async_task`` directly; django-q2 has been removed.)
 
 Conventions enforced here:
 
@@ -47,17 +51,18 @@ logger = logging.getLogger(__name__)
 
 
 def health_check(message: str | None = None) -> dict:
-    """Smoke-test task that confirms the qcluster process is wired up.
+    """Smoke-test task that confirms the task module imports and runs.
 
-    Usage from a Django shell::
+    Call it directly from a Django shell::
 
-        from django_q.tasks import async_task
-        task_id = async_task("job_hunting.lib.tasks.health_check", "hello")
+        from job_hunting.lib.tasks import health_check
+        health_check("hello")
 
-    The qcluster worker picks the task up off the django_q_ormq queue
-    table and runs this function. The return value is persisted on the
-    django_q.Task row so the caller (or a future poller) can read it
-    back via ``fetch(task_id)``.
+    It is deliberately NOT in KIND_REGISTRY — there is nothing to dispatch
+    asynchronously about a smoke test, and registering it would make it
+    reachable from the public /tasks/run-job/ handler for no reason. (Until
+    CC-208 this was enqueued via django-q2 and its result read back off the
+    django_q.Task row; both are gone.)
 
     No side effects — no DB writes, no LLM calls, no scrape graph. The
     point is to verify the worker / broker / settings plumbing works

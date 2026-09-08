@@ -118,37 +118,42 @@ def _create_task(handler_path: str, payload: dict, *, schedule_time=None):
 
 
 def enqueue_cover_letter(cover_letter_id, *, injected_prompt=None) -> None:
-    """Dispatch cover-letter generation, via Cloud Tasks or django-q2.
+    """Dispatch cover-letter generation. Same two transports as ``enqueue()``.
 
-    Contract-identical to the previous inline ``async_task(COVER_LETTER_TASK,
-    cover_letter_id, injected_prompt=...)`` call: same task, same args, same
-    durable ``CoverLetter`` row updated by the worker/handler.
+    CC-169 shipped this before the unified design existed, so cover-letter
+    keeps its own producer and its own ``/tasks/cover-letter/`` handler path
+    (and the terraform behind it) rather than riding ``/tasks/run-job/``.
+    That split is deliberate and is unchanged here.
 
-    When CC_TASKS_ENABLED is on, builds a Cloud Tasks HTTP task whose JSON
-    body is the payload the handler needs. If task creation raises, we fall
-    back to django-q2 so a transient Cloud Tasks fault never drops the job.
-    When CC_TASKS_ENABLED is off, goes straight to django-q2.
+    WHAT CC-208 CHANGED: both of the old non-Cloud-Tasks routes ended in a
+    django-q2 ``async_task`` call, and django-q2 is gone.
+
+    - **ON (GCP)**: Cloud Task -> ``/tasks/cover-letter/``. A ``create_task``
+      fault now RE-RAISES rather than falling back. The old fallback wrote to
+      ``django_q_ormq``, and nothing has drained that table since the qcluster
+      bridge worker was retired — so it had stopped being a safety net and had
+      become a silent drop. This is now the same deliberate no-fallback rule
+      ``enqueue()`` follows, for the same reason: on GCP there is no runner, so
+      a queued row strands.
+    - **OFF (self-host / local)**: ``enqueue("cover_letter", ...)`` writes a
+      ``Job`` row for the ``run_jobs`` pull runner. This branch previously went
+      STRAIGHT to django-q2 — which is why simply deleting the fallback, as the
+      CC-208 checklist described, would have left self-host cover-letter
+      generation with no transport at all.
     """
     if cloud_tasks_enabled():
-        payload = {
-            "cover_letter_id": cover_letter_id,
-            "injected_prompt": injected_prompt,
-        }
-        try:
-            _create_task(COVER_LETTER_HANDLER_PATH, payload)
-            return
-        except Exception:
-            logger.exception(
-                "cloud_tasks: create_task failed for cover_letter_id=%s; "
-                "falling back to django-q2 async_task",
-                cover_letter_id,
-            )
+        _create_task(
+            COVER_LETTER_HANDLER_PATH,
+            {
+                "cover_letter_id": cover_letter_id,
+                "injected_prompt": injected_prompt,
+            },
+        )
+        return
 
-    from django_q.tasks import async_task
-
-    async_task(
-        COVER_LETTER_TASK,
-        cover_letter_id,
+    enqueue(
+        "cover_letter",
+        cover_letter_id=cover_letter_id,
         injected_prompt=injected_prompt,
     )
 

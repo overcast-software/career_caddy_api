@@ -105,12 +105,10 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "corsheaders",
     "drf_spectacular",
-    # Async task queue — Phase 1 of the django-q2 phased rollout
-    # (Plans/Job-queue integration — django-q2 phased rollout).
-    # The worker container runs `manage.py qcluster`; tasks are
-    # enqueued from views via async_task(). Subsequent phases migrate
-    # the existing 9 daemon-thread spawn points + 2 polling daemons.
-    "django_q",
+    # NOTE: django_q was here until CC-208 (2026-09-07). Async dispatch is now
+    # the unified enqueue() producer in lib/cloud_tasks.py — Cloud Tasks on GCP,
+    # a Job row drained by `manage.py run_jobs` on self-host, selected by
+    # CC_TASKS_ENABLED. See lib/job_kinds.py KIND_REGISTRY.
     "job_hunting.apps.JobHuntingConfig",
 ]
 
@@ -605,8 +603,8 @@ ACTIVITYPUB_BODY_MAX_BYTES = int(
 # - split connect/read timeout (3s connect / 10s read): a DEAD host hangs
 #   in the connect phase, so a tight 3s connect fails the storm sources
 #   fast; a 10s read (matches Mastodon's app/lib/request.rb read_timeout)
-#   still lets a slow-but-ALIVE legit peer respond. Since the fetch now
-#   runs in the qcluster worker (not the web thread) we don't need the
+#   still lets a slow-but-ALIVE legit peer respond. Since the fetch runs in
+#   a background worker (not the web thread) we don't need the
 #   brutal 2-3s total Doug floated — that would also drop live-but-slow
 #   peers, which accept-then-async can't recover (the peer got a 202 and
 #   won't redeliver). Both bounds are env-tunable.
@@ -782,59 +780,8 @@ if TESTING:
     # Inbox verify+process runs in-band under TESTING so the existing
     # inbox suite observes side effects synchronously (the pre-CC-127
     # contract was synchronous). Dedicated async tests override this to
-    # False and assert the async_task enqueue. Unlike Q_CLUSTER['sync'],
-    # this only affects the inbox path — no other async_task call site.
+    # False and assert the enqueue() call. Deliberately scoped to the inbox
+    # path alone — it is not a global "run tasks synchronously" switch, and
+    # nothing else should grow one. (It used to be contrasted here with
+    # Q_CLUSTER['sync']; django-q2 was removed in CC-208.)
     ACTIVITYPUB_INBOX_DISPATCH_SYNC = True
-
-# ---------------------------------------------------------------------------
-# Q_CLUSTER — django-q2 task queue configuration.
-#
-# Phase 1 of Plans/Job-queue integration — django-q2 phased rollout.
-# The worker container runs `manage.py qcluster` against the existing
-# Postgres DB (no new infrastructure). Tasks are enqueued from views
-# via `async_task('module.path', *args)`; the qcluster process picks
-# them up off the django_q_ormq queue table.
-#
-# Defaults rationale (open question [?] Worker count / timeout defaults
-# in the plan node):
-#   - 2 workers: matches the archived plan's recommendation; small
-#     enough to fit comfortably alongside api on the rn host.
-#   - 300s timeout: covers Score / Summary / Cover Letter / Resume /
-#     Answer / Question tier-1 LLM calls. parse_scrape (Phase 5) will
-#     override to 600s via the task's `timeout=` kwarg.
-#   - 4s poll: standard django-q2 default; balance between worker
-#     responsiveness and DB load.
-#   - retry=0 globally: per-task retry policies are explicit at the
-#     async_task() call site (federation dispatch will override).
-#
-# This config block has no behavior impact in Phase 1 — only the
-# `health_check` task exists. Subsequent phases migrate the 9
-# daemon-thread spawn points + 2 polling daemons.
-Q_CLUSTER = {
-    "name": "career_caddy",
-    # Env-driven so each host can be tuned independently (rn at 1 for
-    # breathing room, off-rn workers at 2). Default 2 preserves the
-    # Phase 1 baseline.
-    "workers": int(os.environ.get("Q_WORKERS", 2)),
-    "recycle": 500,
-    "timeout": 300,
-    "retry": 360,  # Higher than timeout so timed-out tasks don't re-queue immediately
-    "queue_limit": 50,
-    "bulk": 10,
-    "orm": "default",
-    "poll": 4,
-    "label": "Career Caddy Tasks",
-    "save_limit": 1000,
-    "ack_failures": True,
-    "max_attempts": 1,  # No automatic retry; per-task override via async_task(retry=N)
-}
-
-# ``Q_CLUSTER['sync']`` is NOT toggled globally under TESTING. Doing so
-# would force every async_task() call site (resume ingest, score
-# pipeline, summary, cover-letter, ...) to execute the task body
-# in-band on the calling thread, surfacing every task exception as a
-# 500 inside whatever view enqueued it. Several pre-existing tests
-# (e.g. test_ingest_endpoint_blob) rely on the enqueue path returning
-# 202-pending without touching the task body. Phase 5d federation
-# dispatch tests opt into sync mode per-class via
-# ``override_settings(Q_CLUSTER={..., 'sync': True})``.

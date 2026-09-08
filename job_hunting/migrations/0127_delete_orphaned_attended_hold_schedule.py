@@ -1,40 +1,48 @@
 """PACA CC-114: retire the orphaned-attended-hold sweep schedule.
 
-Attended-scrape routing is gone — a scrape is a scrape, and the
-``sweep_orphaned_attended_holds`` task + its django-q2 Schedule row (created
-by 0111) no longer exist. Deployed databases still carry that Schedule row,
-and the qcluster would keep trying to import a task that's been deleted, so
-this migration explicitly DELETES the row forward.
+NEUTRALISED BY CC-208 (2026-09-07) — this migration is now a NO-OP.
 
-The reverse is a deliberate no-op: the task is gone, so there is nothing to
-re-register on rollback (re-creating a Schedule that points at a missing
-func would just resurrect the import error). Mirrors the drop half of
-0111_register_attended_hold_sweep_schedule.
+WHAT IT ORIGINALLY DID
+    Deleted the sweep_orphaned_attended_holds Schedule row created by 0111, whose func no longer existed.
+
+WHY IT IS EMPTY NOW
+    django-q2 was removed from INSTALLED_APPS when the qcluster bridge
+    worker was retired (CC-208, the exit-gate on CC-200). This file used to
+    carry two couplings to that app, and BOTH break a fresh `migrate` once
+    it is gone:
+
+      * a graph dependency on ("django_q", "0019_alter_task_options_...")
+        -> NodeNotFoundError, because the app no longer contributes nodes;
+      * apps.get_model("django_q", "Schedule") inside RunPython
+        -> LookupError.
+
+    Editing an applied migration is normally wrong. It is the correct remedy
+    HERE because the operation was a DATA migration, not a schema one, so it
+    contributes nothing to migration state and removing it cannot cause
+    drift (`makemigrations --check` compares state to models and never sees
+    RunPython). Concretely:
+
+      * on an EXISTING database this migration is already applied and its
+        body is never executed again;
+      * on a FRESH database the row it used to write would be meaningless —
+        nothing reads django_q_schedule any more.
+
+    The schedule this registered is NOT lost. Recurring sweeps moved to
+    lib/schedule_kinds.py SCHEDULE_REGISTRY, driven by Cloud Scheduler ->
+    /tasks/run-scheduled/ on GCP and by the `run_jobs` loop on self-host
+    (CC-213). That is the live mechanism; this row had been a duplicate
+    second driver of the same sweep for as long as both existed.
+
+    The django_q_* tables themselves are dropped by
+    0139_drop_django_q_tables.
 """
 from django.db import migrations
-
-
-SCHEDULE_NAME = "sweep_orphaned_attended_holds"
-
-
-def drop_schedule(apps, schema_editor):
-    Schedule = apps.get_model("django_q", "Schedule")
-    Schedule.objects.filter(name=SCHEDULE_NAME).delete()
-
-
-def noop(apps, schema_editor):
-    # The task no longer exists; re-registering the schedule on reverse
-    # would only point at a missing func. Intentionally do nothing.
-    pass
 
 
 class Migration(migrations.Migration):
     dependencies = [
         ("job_hunting", "0126_profile_federate_rich"),
-        # Depend on django_q's schema being in place before we touch a row.
-        ("django_q", "0019_alter_task_options_alter_ormq_key_alter_ormq_lock_and_more"),
     ]
 
-    operations = [
-        migrations.RunPython(drop_schedule, reverse_code=noop),
-    ]
+    # Deliberately empty. See the module docstring.
+    operations = []

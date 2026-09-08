@@ -157,18 +157,20 @@ class TestSweepStaleScrapeClaims(TestCase):
 
 
 class TestSweepScheduleRegistered(TestCase):
-    """Migration 0086 should have registered the sweep as a django-q2
-    Schedule with the expected cadence. Pin so a stray reset or migration
-    rollback doesn't silently disable lease recovery in production."""
+    """The sweep must stay registered, so lease recovery cannot be silently
+    disabled in production.
 
-    def test_schedule_row_exists(self):
-        from django_q.models import Schedule
+    CC-208 moved WHERE that registration lives. It used to be a django-q2
+    ``Schedule`` row written by migration 0086 and executed by the qcluster
+    worker; both are gone. The live mechanism is ``SCHEDULE_REGISTRY``, driven
+    by Cloud Scheduler on GCP and by the ``run_jobs`` loop on self-host. Same
+    guard, current mechanism.
+    """
 
-        row = Schedule.objects.filter(name="sweep_stale_scrape_claims").first()
-        self.assertIsNotNone(row, "0086 migration should register the schedule")
-        self.assertEqual(
-            row.func, "job_hunting.lib.tasks.sweep_stale_scrape_claims"
-        )
-        self.assertEqual(row.schedule_type, Schedule.MINUTES)
-        self.assertEqual(row.minutes, 5)
-        self.assertEqual(row.repeats, -1)
+    def test_sweep_is_registered_with_its_cadence(self):
+        from job_hunting.lib.schedule_kinds import SCHEDULE_REGISTRY
+
+        spec = SCHEDULE_REGISTRY.get("sweep_stale_scrape_claims")
+        self.assertIsNotNone(spec, "the lease sweep must stay registered")
+        self.assertEqual(spec.dotted, "job_hunting.lib.tasks.sweep_stale_scrape_claims")
+        self.assertEqual(spec.interval_seconds, 300)

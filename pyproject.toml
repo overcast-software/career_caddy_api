@@ -49,20 +49,15 @@ dependencies = [
     # isolating the streaming endpoint off the sync gunicorn pool.
     "starlette>=0.40.0",
     "uvicorn[standard]>=0.30.0",
-    # Async task queue — Phase 1 of the django-q2 phased rollout
-    # (Plans/Job-queue integration — django-q2 phased rollout). Uses the
-    # existing Postgres broker via the django_q ORM backend; the worker
-    # container runs `manage.py qcluster`. Replaces the 9 daemon-thread
-    # spawn points + 2 polling daemons over Phases 2-5.
-    "django-q2>=1.7.0",
     # Opaque primary keys — CC-77 NanoID PK swap. Generates the 10-char
     # URL-safe NanoID ids used as every model's primary key (see
     # job_hunting.models.nanoid_pk).
     "nanoid>=2.0.0",
-    # Cloud Tasks producer — CC-169 async dispatch on GCP Cloud Run. The
-    # django-q2 qcluster worker can't run as a portless Cloud Run service, so
-    # latency-sensitive push paths (cover-letter first) enqueue Cloud Tasks
-    # HTTP tasks to an authenticated /tasks/* handler. Only imported when
+    # Cloud Tasks producer — the GCP half of async dispatch on Cloud Run.
+    # Originally CC-169, because the django-q2 qcluster worker was a portless
+    # process that could not be a Cloud Run service; django-q2 is gone as of
+    # CC-208 and Cloud Tasks is now simply the GCP transport. Work is enqueued
+    # as HTTP tasks to an authenticated /tasks/* handler. Only imported when
     # CC_TASKS_ENABLED is on (job_hunting.lib.cloud_tasks).
     "google-cloud-tasks>=2.16.0",
     # Blob storage for uploaded resumes — CC-204. django-storages S3Storage
