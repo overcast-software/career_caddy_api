@@ -584,6 +584,24 @@ ACTIVITYPUB_BODY_MAX_BYTES = int(
     os.environ.get("ACTIVITYPUB_BODY_MAX_BYTES", str(1_048_576))
 )
 
+# CC-220 — largest inbound body still eligible for ASYNC handoff.
+#
+# enqueue_inbound_activity carries the raw request body inline in the task
+# payload, base64-encoded (CC-206) because the HTTP-signature re-verify needs
+# byte-identity and JSON can't carry bytes. Base64 inflates by ~33%, and Cloud
+# Tasks caps a single task at ~1 MB — so a body near the ~1 MB edge cap above
+# would produce a ~1.33 MB task and fail to enqueue on GCP.
+#
+# Bodies at or below this cap are enqueued; anything larger is processed
+# IN-BAND (the pre-CC-127 synchronous path) rather than dropped. 700_000 raw
+# bytes → ~933 KB of base64, leaving headroom under 1 MB for the rest of the
+# payload (headers, path, identifier) and the Cloud Tasks envelope. Oversized
+# AP activities are vanishingly rare, so the in-band fallback is a rare,
+# bounded latency hit on the web thread rather than a routine one.
+ACTIVITYPUB_INBOX_ASYNC_MAX_BYTES = int(
+    os.environ.get("ACTIVITYPUB_INBOX_ASYNC_MAX_BYTES", str(700_000))
+)
+
 # ---------------------------------------------------------------------------
 # CC-127 — inbox accept-then-async + bounded/negatively-cached key fetch.
 #
