@@ -4,6 +4,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
 from django.conf import settings
+from django.db import DatabaseError
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
@@ -20,6 +21,37 @@ from job_hunting.models import Invitation
 from ._helpers import _create_user_from_data, _notify_admins_new_signup
 
 logger = logging.getLogger(__name__)
+
+# CC-174 — the three bootstrap states, shared by `healthcheck` and
+# `initialize` so the two endpoints can never disagree.
+BOOTSTRAP_NO_SCHEMA = "no_schema"
+BOOTSTRAP_OPEN = "bootstrap_open"
+BOOTSTRAP_INITIALIZED = "initialized"
+
+
+def bootstrap_state():
+    """Return the instance's bootstrap state.
+
+    ``no_schema``      — the user table is not queryable; the DB has not
+                         been migrated yet. This is deliberately NOT
+                         reported as bootstrap-open: during the 2026-07-14
+                         GCP deploy the setup wizard rendered before
+                         ``migrate`` finished and the submitted INSERT died
+                         on ``relation "auth_user" does not exist``.
+    ``bootstrap_open`` — schema present, no superuser yet. Initialization
+                         is permitted.
+    ``initialized``    — a superuser exists. Initialization is closed.
+
+    Keyed on **superuser existence**, not "any user exists". Seeded and
+    demo accounts (``make demo-data`` creates the Danny Noonan guest) are
+    not admins and must not lock a fresh operator out of creating theirs.
+    """
+    User = get_user_model()
+    try:
+        has_superuser = User.objects.filter(is_superuser=True).exists()
+    except DatabaseError:
+        return BOOTSTRAP_NO_SCHEMA
+    return BOOTSTRAP_INITIALIZED if has_superuser else BOOTSTRAP_OPEN
 
 
 @extend_schema(
@@ -56,27 +88,45 @@ def profile(request):
             description="Service is healthy",
             response=inline_serializer(
                 name="HealthcheckResponse",
-                fields={"healthy": drf_serializers.BooleanField()},
+                fields={
+                    "healthy": drf_serializers.BooleanField(),
+                    "bootstrap_open": drf_serializers.BooleanField(),
+                    "bootstrap_state": drf_serializers.CharField(),
+                },
             ),
-        )
+        ),
+        503: OpenApiResponse(
+            description="User table not queryable — DB down or un-migrated"
+        ),
     },
 )
 @csrf_exempt
 def healthcheck(request):
     """Simple health check endpoint that only reports system health."""
     if request.method == "GET":
-        User = get_user_model()
-        user_count = User.objects.count()
+        state = bootstrap_state()
+        # `no_schema` means the user table could not be queried at all —
+        # un-migrated, but equally a DB that is down or unreachable. This
+        # endpoint IS the api service's liveness probe (Cloud Run
+        # `health_path` in deploy/terraform/gcp/locals.tf), so it must
+        # never answer healthy in that state. 503 + the state string, so
+        # the probe fails while ops and the wizard can still tell the
+        # three bootstrap states apart.
+        healthy = state != BOOTSTRAP_NO_SCHEMA
         return JsonResponse({
-            "healthy": True,
-            "bootstrap_open": user_count == 0,
+            "healthy": healthy,
+            # CC-174: true only when the schema exists AND no superuser
+            # does. `bootstrap_state` carries the finer three-way answer;
+            # this boolean stays for the SPA, which reads only this key.
+            "bootstrap_open": state == BOOTSTRAP_OPEN,
+            "bootstrap_state": state,
             "registration_open": settings.REGISTRATION_OPEN,
             # BACK-102 instance capability — drives the frontend's per-post
             # publish button gating ({off, operator_only, all_users}).
             "federation_publish_ui": getattr(
                 settings, "FEDERATION_PUBLISH_UI", "off"
             ),
-        })
+        }, status=200 if healthy else 503)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
 
@@ -116,6 +166,7 @@ def guest_session(request):
                 fields={
                     "initialization_needed": drf_serializers.BooleanField(),
                     "status": drf_serializers.CharField(),
+                    "bootstrap_state": drf_serializers.CharField(),
                 },
             ),
         )
@@ -150,49 +201,62 @@ def guest_session(request):
         ),
         400: OpenApiResponse(description="Bad request / user creation failed"),
         409: OpenApiResponse(description="Already initialized — superuser already exists"),
+        503: OpenApiResponse(description="Database not migrated — no user table yet"),
     },
 )
 @csrf_exempt
 def initialize(request):
     """Initialize the application with first-time setup."""
     if request.method == "GET":
-        # Check if initialization is needed
-        try:
-            User = get_user_model()
-            user_count = User.objects.count()
-        except Exception:
-            # If Django ORM isn't initialized yet, initialization is needed
-            user_count = None
-
-        if user_count is None:
-            status_str = "unknown"
-            initialization_needed = True
-        else:
-            initialization_needed = user_count == 0
-            status_str = (
-                "initialized" if not initialization_needed else "needs_initialization"
-            )
+        # CC-174: keyed on superuser existence, and an un-migrated DB is
+        # reported as such rather than as "initialization needed".
+        state = bootstrap_state()
+        initialization_needed = state == BOOTSTRAP_OPEN
+        status_str = {
+            BOOTSTRAP_NO_SCHEMA: "no_schema",
+            BOOTSTRAP_OPEN: "needs_initialization",
+            BOOTSTRAP_INITIALIZED: "initialized",
+        }[state]
 
         return JsonResponse(
             {
                 "initialization_needed": initialization_needed,
                 "status": status_str,
+                "bootstrap_state": state,
             }
         )
 
     if request.method == "POST":
-        # Handle initial setup
-        try:
-            User = get_user_model()
-            user_count = User.objects.count()
-        except Exception:
-            user_count = None
+        state = bootstrap_state()
 
-        # Only allow initialization when no users exist
-        if user_count is not None and user_count > 0:
+        # The DB has not been migrated — creating the superuser would die
+        # on a missing relation. Say so instead of failing at the INSERT.
+        if state == BOOTSTRAP_NO_SCHEMA:
             return JsonResponse(
-                {"errors": [{"detail": "Application already initialized"}]}, status=409
+                {
+                    "errors": [{
+                        "detail": (
+                            "Database is not migrated yet — run migrations "
+                            "before initializing."
+                        )
+                    }],
+                    "bootstrap_state": state,
+                },
+                status=503,
             )
+
+        # Only allow initialization while no superuser exists. Seeded or
+        # demo users do not close this gate (CC-174).
+        if state == BOOTSTRAP_INITIALIZED:
+            return JsonResponse(
+                {
+                    "errors": [{"detail": "Application already initialized"}],
+                    "bootstrap_state": state,
+                },
+                status=409,
+            )
+
+        User = get_user_model()
 
         # Parse request data
         try:
