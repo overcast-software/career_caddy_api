@@ -73,6 +73,15 @@ class SortWhitelistTests(TestCase):
         resp = self.client.get("/api/v1/companies/?sort=-updated_at")
         self._assert_sort_error(resp)
 
+    def test_scrapes_dropped_attended_column_returns_400_not_500(self):
+        # CC-124: `attended` left the Scrape model (#218) but lingered in
+        # SORT_FIELDS, so it passed the whitelist and hit a FieldError 500.
+        resp = self.client.get("/api/v1/scrapes/?sort=attended")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        err = resp.json()["errors"][0]
+        self.assertEqual(err.get("source", {}).get("parameter"), "sort")
+        self.assertIn("attended", err.get("detail", ""))
+
     def test_unknown_field_among_valid_ones_still_rejected(self):
         # A whitelisted field plus an unknown one must still 400 — don't
         # silently drop the bad one.
