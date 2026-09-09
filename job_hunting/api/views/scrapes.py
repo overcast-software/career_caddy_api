@@ -124,7 +124,9 @@ class ScrapeViewSet(BaseViewSet):
         "scraped_at",
         "status",
         "claimed_at",
-        "attended",
+        # "attended" was dropped with the column (#218, CC-114). Keeping it
+        # whitelisted let ?sort=attended past the 400 guard into a FieldError
+        # 500 (CC-124).
         "source",
     })
 
