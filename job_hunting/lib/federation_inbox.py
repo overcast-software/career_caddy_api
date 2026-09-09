@@ -137,8 +137,32 @@ def enqueue_inbound_activity(
     in-band (default False in prod → real ``enqueue``; defaulted True
     under TESTING so the inbox suite observes side effects synchronously).
     Unlike ``Q_CLUSTER['sync']`` this knob affects ONLY the inbox path.
+
+    CC-220: a body larger than ``ACTIVITYPUB_INBOX_ASYNC_MAX_BYTES`` is also
+    processed in-band — see the oversize guard below.
     """
-    if getattr(settings, "ACTIVITYPUB_INBOX_DISPATCH_SYNC", False):
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    body = body or b""
+
+    # CC-220: the async payload carries this body base64-encoded (~+33%), and
+    # Cloud Tasks caps a task at ~1 MB. The edge accepts up to
+    # ACTIVITYPUB_BODY_MAX_BYTES (~1 MB), whose base64 form is ~1.33 MB — that
+    # task would be REJECTED at enqueue time on GCP and the activity lost. So
+    # anything above the async cap falls back to the in-band path: slower for
+    # that one request, but it actually gets processed.
+    async_max = getattr(settings, "ACTIVITYPUB_INBOX_ASYNC_MAX_BYTES", 700_000)
+    oversized = len(body) > async_max
+
+    if getattr(settings, "ACTIVITYPUB_INBOX_DISPATCH_SYNC", False) or oversized:
+        if oversized:
+            log.info(
+                "ap.inbox.enqueue.oversize_inband kind=%s id=%s bytes=%d cap=%d",
+                actor_kind,
+                identifier,
+                len(body),
+                async_max,
+            )
         process_inbound_activity(
             actor_kind=actor_kind,
             identifier=identifier,
@@ -157,9 +181,7 @@ def enqueue_inbound_activity(
     # already caps body size), so inline base64 is fine — no blob store needed.
     from job_hunting.lib.cloud_tasks import enqueue
 
-    if isinstance(body, str):
-        body = body.encode("utf-8")
-    body_b64 = base64.b64encode(body or b"").decode("ascii")
+    body_b64 = base64.b64encode(body).decode("ascii")
 
     enqueue(
         "federation_inbox",
