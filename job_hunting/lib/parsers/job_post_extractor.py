@@ -1640,6 +1640,18 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
             if not user:
                 user = scrape.created_by
 
+            # CC-209: a (re-)parse starts clean. Any failure_reason on the
+            # row belongs to a PREVIOUS attempt; letting it ride through
+            # this run means a poll can read "extracting" — or a terminal
+            # success — next to a stale error from last week. That is what
+            # sent the CC-199 reclaim chasing a 429 that was no longer
+            # real. Cleared on the row AND on the in-memory instance, since
+            # process_evaluation full-saves the instance on its own failure
+            # branches. Failed runs below write a fresh reason.
+            if scrape.failure_reason:
+                scrape.failure_reason = None
+                ScrapeModel.objects.filter(pk=scrape_id).update(failure_reason=None)
+
             _log_scrape_status(scrape_id, "extracting")
 
             parser = JobPostExtractor()
@@ -1671,6 +1683,23 @@ def parse_scrape(scrape_id: int, user_id: int = None, sync: bool = False, force:
                 outcome = getattr(parser, "last_outcome", None) or "created"
                 scrape.refresh_from_db(fields=["job_post_id"])
                 jp_id = scrape.job_post_id
+            if success and not jp_id:
+                # CC-209: `completed` MUST imply a linked JobPost. A run
+                # that reports success but leaves job_post_id NULL has
+                # produced nothing a user can see, and writing it as
+                # completed hides it from every recovery sweep (they key
+                # on status=failed). Land it failed, with a reason that
+                # names the contradiction rather than the previous error.
+                _log_scrape_status(
+                    scrape_id, "failed",
+                    note=f"no_job_post: extractor reported success (outcome={outcome}) but linked no JobPost",
+                    failure_reason=(
+                        f"Extractor reported success (outcome={outcome}) "
+                        "but no JobPost was linked"
+                    ),
+                )
+                reached_terminal = True
+            elif success:
                 if outcome == "duplicate" and jp_id:
                     note = f"duplicate: existing JobPost #{jp_id}"
                 elif outcome == "updated_stub" and jp_id:

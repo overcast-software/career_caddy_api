@@ -109,6 +109,12 @@ def _log_scrape_status(
             # caller can't poison the column on a 'completed' write.
             if status_label == "failed" and failure_reason:
                 update_fields["failure_reason"] = str(failure_reason)[:2000]
+            elif status_label == "completed":
+                # CC-209: a completed scrape has no failure. Clear the
+                # column in the SAME UPDATE as the status flip, so a poll
+                # can never observe status=completed next to a stale
+                # reason left over from an earlier failed attempt.
+                update_fields["failure_reason"] = None
             Scrape.objects.filter(pk=scrape_id).update(**update_fields)
             # Emit a terminal-status notification when the Scrape lands
             # on completed/failed so frontend SSE subscribers can update
