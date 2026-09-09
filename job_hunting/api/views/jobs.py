@@ -1973,8 +1973,18 @@ class JobPostViewSet(BaseViewSet):
     def applications(self, request, pk=None):
         if not JobPost.objects.filter(pk=pk).exists():
             return Response({"errors": [{"detail": "Not found"}]}, status=404)
-        apps = list(JobApplication.objects.filter(job_post_id=pk, user_id=request.user.id))
-        data = [JobApplicationSerializer().to_resource(a) for a in apps]
+        # CC-98: same per-row N+1 CC-91 fixed on JobApplicationViewSet.list —
+        # this related-link action fetched the rows with no select_related /
+        # prefetch_related, so to_resource() lazy-loaded every to-one FK object
+        # and the application-statuses linkage per row (~27s in prod logfire).
+        # optimize_queryset applies JobApplicationSerializer's declared hints.
+        apps = list(
+            JobApplicationSerializer.optimize_queryset(
+                JobApplication.objects.filter(job_post_id=pk, user_id=request.user.id)
+            )
+        )
+        ser = JobApplicationSerializer()
+        data = [ser.to_resource(a) for a in apps]
         return Response({"data": data})
 
     @extend_schema(
