@@ -36,11 +36,13 @@ RUN uv sync --frozen --no-dev
 ENV DJANGO_SETTINGS_MODULE=job_hunting.settings \
     DEBUG=False
 
-# Build-time only secret (not persisted in image layers)
-ARG SECRET_KEY=build-time-dummy-secret
-
-# Collect static (ignore if not configured)
-RUN SECRET_KEY=${SECRET_KEY} python manage.py collectstatic --noinput || true
+# Collect static (ignore if not configured). settings.py refuses to load
+# without a SECRET_KEY, so collectstatic needs one — but only for the
+# duration of this RUN. It is a fixed placeholder scoped to the shell line,
+# never an ARG/ENV: those persist in image metadata (Docker's
+# SecretsUsedInArgOrEnv lint, CC-233), and a build ARG invites someone to
+# pass the real key one day. The runtime key comes from the environment.
+RUN SECRET_KEY=build-time-dummy-secret python manage.py collectstatic --noinput || true
 
 # Create non-root user and data directory
 RUN useradd -m appuser && \
