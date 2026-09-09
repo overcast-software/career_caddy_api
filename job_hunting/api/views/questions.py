@@ -25,7 +25,11 @@ from ..serializers import (
     QuestionSerializer,
     AnswerSerializer,
 )
-from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.ai_client import provider_credential_missing
+from job_hunting.lib.services.answer_service import (
+    ANSWER_MODEL_DEFAULT,
+    ANSWER_MODEL_ENV,
+)
 from job_hunting.lib.cloud_tasks import enqueue
 from job_hunting.models import (
     Question,
@@ -446,12 +450,15 @@ class AnswerViewSet(BaseViewSet):
 
         if not content and ai_assist:
             # AI generation — create a pending record and dispatch async
-            client = get_client(required=False)
-            if client is None:
-                return Response(
-                    {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                    status=503,
-                )
+            # CC-236: the answer role can be pointed at any supported
+            # provider, so readiness follows ANSWER_MODEL rather than
+            # assuming OpenAI. An OpenAI-configured stack gets the identical
+            # 503 and message it got before.
+            missing = provider_credential_missing(
+                ANSWER_MODEL_ENV, ANSWER_MODEL_DEFAULT
+            )
+            if missing:
+                return Response({"errors": [{"detail": missing}]}, status=503)
 
             obj = Answer.objects.create(question_id=question.id, status="pending")
 

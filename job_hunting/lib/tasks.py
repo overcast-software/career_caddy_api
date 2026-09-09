@@ -382,12 +382,16 @@ def cover_letter_job(
     ``job_post_id`` from the view's row-creation step, so the task
     re-fetches by pk and re-derives context.
     """
-    from job_hunting.lib.ai_client import get_client
+    from job_hunting.lib.ai_client import get_client, provider_credential_missing
     from job_hunting.lib.models import CareerData
     from job_hunting.lib.services.application_prompt_builder import (
         ApplicationPromptBuilder,
     )
-    from job_hunting.lib.services.cover_letter_service import CoverLetterService
+    from job_hunting.lib.services.cover_letter_service import (
+        COVER_LETTER_MODEL_DEFAULT,
+        COVER_LETTER_MODEL_ENV,
+        CoverLetterService,
+    )
     from job_hunting.models import CoverLetter, JobPost, Resume
 
     cl = CoverLetter.objects.filter(pk=cover_letter_id).first()
@@ -424,11 +428,17 @@ def cover_letter_job(
             events.notify("cover_letter", cover_letter_id, "failed", user_id)
             return {"status": "failed"}
 
-    client = get_client(required=False)
-    if client is None:
+    # CC-236: the gate asks whether THIS ROLE's provider is configured, not
+    # whether OPENAI_API_KEY is set. With COVER_LETTER_MODEL pointed at
+    # Anthropic there is no OpenAI client to build and none is needed, so the
+    # old `get_client() is None` check failed every generation on a
+    # correctly-configured stack.
+    if provider_credential_missing(COVER_LETTER_MODEL_ENV, COVER_LETTER_MODEL_DEFAULT):
         CoverLetter.objects.filter(pk=cover_letter_id).update(status="failed")
         events.notify("cover_letter", cover_letter_id, "failed", user_id)
         return {"status": "failed"}
+
+    client = get_client(required=False)
 
     try:
         svc = CoverLetterService(
@@ -472,9 +482,13 @@ def answer_job(
     CareerData; ``resume_id`` set means use that specific resume's
     exported markdown.
     """
-    from job_hunting.lib.ai_client import get_client
+    from job_hunting.lib.ai_client import get_client, provider_credential_missing
     from job_hunting.lib.models import CareerData
-    from job_hunting.lib.services.answer_service import AnswerService
+    from job_hunting.lib.services.answer_service import (
+        ANSWER_MODEL_DEFAULT,
+        ANSWER_MODEL_ENV,
+        AnswerService,
+    )
     from job_hunting.lib.services.application_prompt_builder import (
         ApplicationPromptBuilder,
     )
@@ -521,11 +535,13 @@ def answer_job(
             prompt_builder.build_from_career_data(career_data) or ""
         )
 
-    client = get_client(required=False)
-    if client is None:
+    # CC-236: provider-aware — see the same gate in generate_cover_letter_task.
+    if provider_credential_missing(ANSWER_MODEL_ENV, ANSWER_MODEL_DEFAULT):
         Answer.objects.filter(pk=answer_id).update(status="failed")
         events.notify("answer", answer_id, "failed", user_id)
         return {"status": "failed"}
+
+    client = get_client(required=False)
 
     try:
         svc = AnswerService(client)

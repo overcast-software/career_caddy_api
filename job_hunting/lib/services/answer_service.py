@@ -38,10 +38,21 @@ class AnswerService:
         # deliberately, because nobody asked for their prompts to grow.
         max_section_chars=None,
     ):
-        from job_hunting.lib.ai_client import resolve_model
+        from job_hunting.lib.ai_client import resolve_model_spec, split_model_spec
 
         self.ai_client = ai_client
-        self.model = model or resolve_model(ANSWER_MODEL_ENV, ANSWER_MODEL_DEFAULT)
+        # CC-236: the role follows its configured PROVIDER. `self.model` stays
+        # the bare id — that is what the OpenAI SDK wants and what
+        # rejects_temperature() keys on — and `self.provider` decides which
+        # client `_call_ai` reaches for. An explicit `model=` argument may
+        # carry a prefix too ("anthropic:claude-sonnet-4-6"); a bare one is
+        # OpenAI, as it always was.
+        if model:
+            self.provider, self.model = split_model_spec(model)
+        else:
+            self.provider, self.model = resolve_model_spec(
+                ANSWER_MODEL_ENV, ANSWER_MODEL_DEFAULT
+            )
         self.temperature = temperature
         self.previous_limit = previous_limit  # None means no limit
         self.max_section_chars = (
@@ -317,7 +328,31 @@ class AnswerService:
         "rather than padded: length should follow the question, not a template."
     )
 
+    def _call_ai_via_agent(self, prompt: str) -> str:
+        """Generate through pydantic-ai, for any provider that isn't OpenAI.
+
+        The prompt and system prompt are the SAME strings the OpenAI path
+        sends — only the transport changes. `self.ai_client` is unused here:
+        an Anthropic run has no OpenAI client to inject, which is why the
+        callers' `get_client() is None` gates became provider-aware
+        (ai_client.provider_credential_missing).
+        """
+        from job_hunting.lib.ai_client import build_prose_agent
+
+        agent = build_prose_agent(
+            self.provider,
+            self.model,
+            system_prompt=self._SYSTEM_PROMPT,
+            temperature=self.temperature,
+            timeout=self._AI_CALL_TIMEOUT,
+        )
+        result = agent.run_sync(prompt)
+        return getattr(result, "output", "") or ""
+
     def _call_ai(self, prompt: str) -> str:
+        if self.provider != "openai":
+            return self._call_ai_via_agent(prompt)
+
         messages = [
             {"role": "system", "content": self._SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
