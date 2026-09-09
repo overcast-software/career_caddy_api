@@ -94,7 +94,10 @@ def profile(request):
                     "bootstrap_state": drf_serializers.CharField(),
                 },
             ),
-        )
+        ),
+        503: OpenApiResponse(
+            description="User table not queryable — DB down or un-migrated"
+        ),
     },
 )
 @csrf_exempt
@@ -102,8 +105,16 @@ def healthcheck(request):
     """Simple health check endpoint that only reports system health."""
     if request.method == "GET":
         state = bootstrap_state()
+        # `no_schema` means the user table could not be queried at all —
+        # un-migrated, but equally a DB that is down or unreachable. This
+        # endpoint IS the api service's liveness probe (Cloud Run
+        # `health_path` in deploy/terraform/gcp/locals.tf), so it must
+        # never answer healthy in that state. 503 + the state string, so
+        # the probe fails while ops and the wizard can still tell the
+        # three bootstrap states apart.
+        healthy = state != BOOTSTRAP_NO_SCHEMA
         return JsonResponse({
-            "healthy": True,
+            "healthy": healthy,
             # CC-174: true only when the schema exists AND no superuser
             # does. `bootstrap_state` carries the finer three-way answer;
             # this boolean stays for the SPA, which reads only this key.
@@ -115,7 +126,7 @@ def healthcheck(request):
             "federation_publish_ui": getattr(
                 settings, "FEDERATION_PUBLISH_UI", "off"
             ),
-        })
+        }, status=200 if healthy else 503)
 
     return JsonResponse({"error": "method not allowed"}, status=405)
 

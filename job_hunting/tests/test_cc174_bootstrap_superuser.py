@@ -107,9 +107,30 @@ class UnmigratedDatabaseTests(TestCase):
             QUERYSET_EXISTS,
             side_effect=ProgrammingError('relation "auth_user" does not exist'),
         ):
-            body = self.client.get("/api/v1/healthcheck/").json()
+            resp = self.client.get("/api/v1/healthcheck/")
+        body = resp.json()
         self.assertEqual(body["bootstrap_state"], "no_schema")
         self.assertFalse(body["bootstrap_open"])
+
+    def test_healthcheck_is_unhealthy_when_user_table_unqueryable(self):
+        """This endpoint is the api service's Cloud Run liveness probe
+        (``health_path`` in deploy/terraform/gcp/locals.tf). A DB that is
+        un-migrated — or simply down — must fail the probe, not read as a
+        healthy instance that happens to be awaiting setup."""
+        with patch(QUERYSET_EXISTS, side_effect=DatabaseError("connection refused")):
+            resp = self.client.get("/api/v1/healthcheck/")
+        self.assertEqual(resp.status_code, 503, resp.content)
+        body = resp.json()
+        self.assertFalse(body["healthy"])
+        self.assertFalse(body["bootstrap_open"])
+        # The state string survives the failure so ops can tell why.
+        self.assertEqual(body["bootstrap_state"], "no_schema")
+
+    def test_healthcheck_stays_healthy_when_only_bootstrap_is_open(self):
+        resp = self.client.get("/api/v1/healthcheck/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertTrue(resp.json()["healthy"])
+        self.assertEqual(resp.json()["bootstrap_state"], "bootstrap_open")
 
     def test_initialize_get_reports_no_schema(self):
         with patch(
