@@ -205,3 +205,84 @@ class TestToResourceLinkagePreserved(TestCase):
         rels = row["relationships"]
         self.assertEqual(rels["job-post"]["data"]["id"], str(score.job_post_id))
         self.assertEqual(rels["company"]["data"]["id"], str(score.job_post.company_id))
+
+
+def _make_applications_on_one_post(user, count):
+    """One JobPost carrying `count` fully-populated applications for `user`.
+
+    CC-98 varies the number of applications *on a single post*, which is what
+    the JobPost related-link paginates. JobApplication has no uniqueness
+    constraint on (user, job_post), so several applications on one post is
+    legitimate (re-applies, multiple resume/cover-letter pairings).
+    """
+    tag = uuid.uuid4().hex[:10]
+    company = Company.objects.create(name=f"CC98Co{tag}")
+    job_post = JobPost.objects.create(
+        title=f"CC98Role{tag}", company=company, created_by=user
+    )
+    for i in range(count):
+        app = JobApplication.objects.create(
+            user=user,
+            job_post=job_post,
+            company=company,
+            resume=Resume.objects.create(user=user),
+            cover_letter=CoverLetter.objects.create(user=user),
+            status="applied",
+        )
+        status = Status.objects.create(status=f"cc98-{tag}-{i}")
+        JobApplicationStatus.objects.create(application=app, status=status)
+    return job_post
+
+
+class TestJobPostApplicationsRelatedLinkN1(_QueryCountMixin, TestCase):
+    """CC-98: GET /job-posts/<id>/job-applications/ — the related-link action
+    CC-91's optimize_queryset did not cover (~27s in prod logfire)."""
+
+    def test_job_post_job_applications_related_link_bounded(self):
+        small = User.objects.create_user(username="cc98_jp_small", password="x")
+        big = User.objects.create_user(username="cc98_jp_big", password="x")
+        posts = {
+            small.id: _make_applications_on_one_post(small, 2),
+            big.id: _make_applications_on_one_post(big, 6),
+        }
+        r_small, r_big = self._assert_bounded(
+            lambda u: f"/api/v1/job-posts/{posts[u.id].id}/job-applications/",
+            small,
+            big,
+        )
+        self.assertEqual(len(r_small.json()["data"]), 2)
+        self.assertEqual(len(r_big.json()["data"]), 6)
+
+    def test_job_post_job_applications_linkage_preserved(self):
+        # The prefetch must not change the emitted payload: to-one linkage ids
+        # still equal the FK columns and the application-statuses linkage is
+        # still populated.
+        user = User.objects.create_user(username="cc98_jp_link", password="x")
+        job_post = _make_applications_on_one_post(user, 2)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        resp = client.get(f"/api/v1/job-posts/{job_post.id}/job-applications/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        rows = resp.json()["data"]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            app = JobApplication.objects.get(pk=row["id"])
+            rels = row["relationships"]
+            self.assertEqual(rels["job-post"]["data"]["id"], str(job_post.id))
+            self.assertEqual(rels["company"]["data"]["id"], str(app.company_id))
+            self.assertEqual(rels["resume"]["data"]["id"], str(app.resume_id))
+            self.assertEqual(
+                rels["cover-letter"]["data"]["id"], str(app.cover_letter_id)
+            )
+            self.assertTrue(rels["application-statuses"]["data"])
+
+    def test_job_post_job_applications_scoped_to_requesting_user(self):
+        # The action filters by user_id; the optimized queryset must keep that.
+        owner = User.objects.create_user(username="cc98_jp_owner", password="x")
+        other = User.objects.create_user(username="cc98_jp_other", password="x")
+        job_post = _make_applications_on_one_post(owner, 2)
+        client = APIClient()
+        client.force_authenticate(user=other)
+        resp = client.get(f"/api/v1/job-posts/{job_post.id}/job-applications/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["data"], [])
