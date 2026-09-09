@@ -1,9 +1,11 @@
 from jinja2 import Environment, FileSystemLoader
 from job_hunting.lib.ai_client import (
+    build_prose_agent,
     is_temperature_error,
     note_temperature_rejected,
     rejects_temperature,
-    resolve_model,
+    resolve_model_spec,
+    split_model_spec,
 )
 from job_hunting.lib.services.db_export_service import DbExportService
 from job_hunting.lib.services.prompt_utils import write_prompt_to_file
@@ -17,6 +19,26 @@ COVER_LETTER_MODEL_DEFAULT = "openai:gpt-5"
 
 
 class CoverLetterService:
+    # Lifted out of the request kwargs verbatim so both the OpenAI path and
+    # the pydantic-ai path send the SAME system prompt. CC-236 changed the
+    # transport, not a word of the prompt.
+    _SYSTEM_PROMPT = (
+        "You write cover letters for a job seeker, in their own "
+        "voice. Output only the letter text.\n"
+        "\n"
+        "Ground the letter in the specific evidence provided — "
+        "name the actual employer, project, tool, or outcome "
+        "from the candidate's history rather than describing "
+        "the shape of one. Never invent an experience, metric, "
+        "or credential. Connect their real work to this "
+        "specific role and company; a letter that could be sent "
+        "to any employer has failed."
+    )
+
+    # The temperature the OpenAI path has always sent. gpt-5 rejects an
+    # explicit one (see below); on a provider that honours it, it applies.
+    _TEMPERATURE = 0.7
+
     def __init__(
         self,
         ai_client,
@@ -31,9 +53,14 @@ class CoverLetterService:
         self.ai_client = ai_client
         self._resume_markdown = resume_markdown
         self._user_id = user_id
-        self.model = model or resolve_model(
-            COVER_LETTER_MODEL_ENV, COVER_LETTER_MODEL_DEFAULT
-        )
+        # CC-236: same provider routing as AnswerService — `self.model` is the
+        # bare id, `self.provider` picks the client.
+        if model:
+            self.provider, self.model = split_model_spec(model)
+        else:
+            self.provider, self.model = resolve_model_spec(
+                COVER_LETTER_MODEL_ENV, COVER_LETTER_MODEL_DEFAULT
+            )
 
     def generate_cover_letter(self, injected_prompt=None) -> str:
         """Generate cover-letter text from the configured job_post + resume.
@@ -75,24 +102,13 @@ class CoverLetterService:
             },
         )
 
+        if self.provider != "openai":
+            return self._generate_via_agent(prompt)
+
         kwargs = {
             "model": self.model,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You write cover letters for a job seeker, in their own "
-                        "voice. Output only the letter text.\n"
-                        "\n"
-                        "Ground the letter in the specific evidence provided — "
-                        "name the actual employer, project, tool, or outcome "
-                        "from the candidate's history rather than describing "
-                        "the shape of one. Never invent an experience, metric, "
-                        "or credential. Connect their real work to this "
-                        "specific role and company; a letter that could be sent "
-                        "to any employer has failed."
-                    ),
-                },
+                {"role": "system", "content": self._SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -103,7 +119,7 @@ class CoverLetterService:
         # happens once per process, not on every cover letter. Same guard as
         # AnswerService._call_ai.
         if not rejects_temperature(self.model):
-            kwargs["temperature"] = 0.7
+            kwargs["temperature"] = self._TEMPERATURE
         try:
             completion = self.ai_client.chat.completions.create(**kwargs)
         except Exception as exc:
@@ -113,3 +129,20 @@ class CoverLetterService:
             kwargs.pop("temperature", None)
             completion = self.ai_client.chat.completions.create(**kwargs)
         return completion.choices[0].message.content.strip()
+
+    def _generate_via_agent(self, prompt: str) -> str:
+        """Generate through pydantic-ai, for any provider that isn't OpenAI.
+
+        Same rendered prompt, same system prompt — only the transport
+        differs. `self.ai_client` is unused on this path; the callers'
+        OPENAI_API_KEY gates became provider-aware for it
+        (ai_client.provider_credential_missing).
+        """
+        agent = build_prose_agent(
+            self.provider,
+            self.model,
+            system_prompt=self._SYSTEM_PROMPT,
+            temperature=self._TEMPERATURE,
+        )
+        result = agent.run_sync(prompt)
+        return (getattr(result, "output", "") or "").strip()

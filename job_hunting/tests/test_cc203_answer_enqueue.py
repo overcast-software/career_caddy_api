@@ -7,7 +7,7 @@ enqueue SEAM: ``enqueue`` is called with ``kind='answer'`` and the
 NanoID-string ``answer_id`` payload. The ``answer_job`` worker leg is covered
 by the worker tests; here we patch the seam so the real LLM never runs.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -47,8 +47,11 @@ class TestAnswerEnqueueContract(TestCase):
         }
 
     def test_ai_assist_creates_pending_and_enqueues_answer_kind(self):
+        # CC-236: the view no longer asks "is there an OpenAI client?" — it
+        # asks whether the ANSWER_MODEL role's provider has a credential.
         with patch(
-            "job_hunting.api.views.questions.get_client", return_value=MagicMock()
+            "job_hunting.api.views.questions.provider_credential_missing",
+            return_value=None,
         ), patch("job_hunting.api.views.questions.enqueue") as mock_enqueue:
             resp = self.client.post(
                 ANSWERS_URL,

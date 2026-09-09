@@ -75,8 +75,10 @@ def _agent_role_specs():
         # User-facing prose. These were absent from this registry and pinned to
         # gpt-4o-mini in their service constructors, so the two roles whose
         # output a user actually sends were both the cheapest and the only ones
-        # invisible on this page. They resolve through ai_client.resolve_model,
-        # which strips the provider prefix for the raw OpenAI SDK.
+        # invisible on this page. They resolve through
+        # ai_client.resolve_model_spec and, as of CC-236, honour the provider
+        # prefix — an "anthropic:" model routes through pydantic-ai instead of
+        # the raw OpenAI SDK.
         ("answer", "Answers an application question from career data", "ANSWER_MODEL", "openai:gpt-5"),
         ("cover_letter", "Writes a cover letter for a job post", "COVER_LETTER_MODEL", "openai:gpt-5"),
         # CC-240: matching an application page to a job post is a RESTRAINT

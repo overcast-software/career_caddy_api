@@ -181,16 +181,30 @@ None of them were visible on the admin page, so nobody could see what they
 ran on. `tests/test_agent_model_registry.py` is what makes dropping a
 registration fail loudly now.
 
-Note there are two model plumbing families and they are not interchangeable:
+Every role takes **provider-prefixed** ids (`openai:gpt-5`,
+`anthropic:claude-sonnet-4-6`, `ollama:…`) and dispatches to the right SDK.
+An unprefixed id means OpenAI; an unsupported provider raises at config time
+rather than misrouting to the wrong SDK.
 
-- pydantic-ai roles take **provider-prefixed** ids (`openai:gpt-5`,
-  `anthropic:claude-sonnet-4-6`) and dispatch to the right SDK — see
-  `lib/parsers/job_post_extractor.py::_build_agent_for_model`.
-- `AnswerService` / `CoverLetterService` call the **raw OpenAI SDK** via
-  `lib/ai_client.get_client()`, which is OpenAI-only and needs a **bare**
-  model id. `lib/ai_client.resolve_model()` bridges them and **raises** on a
-  non-openai prefix rather than silently handing a Claude model name to the
-  OpenAI client.
+- pydantic-ai roles build their model in
+  `lib/parsers/job_post_extractor.py::_build_agent_for_model` and its
+  siblings in `job_matcher`, `description_arbiter`, `completeness_reviewer`.
+- `AnswerService` / `CoverLetterService` resolve through
+  `lib/ai_client.resolve_model_spec()` and then take one of two transports
+  (CC-236). On `openai:` they keep the **raw OpenAI SDK** via
+  `lib/ai_client.get_client()` with a bare model id, which is where the
+  temperature guard below lives. On any other provider they build a
+  pydantic-ai agent with `lib/ai_client.build_prose_agent()` and run it
+  `run_sync`. The prompt and system prompt are identical on both paths.
+- Because those roles no longer imply OpenAI, the "can this run?" gates in
+  `views/questions.py`, `views/cover_letters.py` and `lib/tasks.py` ask
+  `lib/ai_client.provider_credential_missing()` instead of testing
+  `get_client() is None`. A role pointed at Anthropic needs
+  `ANTHROPIC_API_KEY`, not `OPENAI_API_KEY`.
+- `lib/ai_client.resolve_model()` is the narrower OpenAI-only sibling, kept
+  for call sites that really do hand the id to the raw SDK. It still
+  **raises** on a non-openai prefix. `SummaryService` does not use it at all
+  and remains hardcoded to `gpt-5`.
 
 Some newer OpenAI models (the gpt-5 line, o-series) **reject an explicit
 `temperature`** with a 400 and accept only the default. Both prose services

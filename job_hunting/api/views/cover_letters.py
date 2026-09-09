@@ -15,7 +15,11 @@ from .base import BaseViewSet
 from ._schema import _JSONAPI_ITEM, _JSONAPI_WRITE
 from ..serializers import CoverLetterSerializer
 from job_hunting.api.permissions import IsGuestReadOnly
-from job_hunting.lib.ai_client import get_client
+from job_hunting.lib.ai_client import provider_credential_missing
+from job_hunting.lib.services.cover_letter_service import (
+    COVER_LETTER_MODEL_DEFAULT,
+    COVER_LETTER_MODEL_ENV,
+)
 from job_hunting.lib.cloud_tasks import enqueue_cover_letter
 from job_hunting.lib.services.application_prompt_builder import ApplicationPromptBuilder
 from job_hunting.lib.models import CareerData
@@ -324,12 +328,15 @@ class CoverLetterViewSet(BaseViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        client = get_client(required=False)
-        if client is None:
-            return Response(
-                {"errors": [{"detail": "AI client not configured. Set OPENAI_API_KEY."}]},
-                status=503,
-            )
+        # CC-236: the cover-letter role can be pointed at any supported
+        # provider, so the readiness check follows COVER_LETTER_MODEL rather
+        # than assuming OpenAI. An OpenAI-configured stack gets the identical
+        # 503 and message it got before.
+        missing = provider_credential_missing(
+            COVER_LETTER_MODEL_ENV, COVER_LETTER_MODEL_DEFAULT
+        )
+        if missing:
+            return Response({"errors": [{"detail": missing}]}, status=503)
 
         cover_letter = CoverLetter.objects.create(
             user_id=user_id,
